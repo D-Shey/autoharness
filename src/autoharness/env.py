@@ -78,15 +78,22 @@ def _hash_dir(root: Path) -> str:
     return h.hexdigest()
 
 
-STATE_GITIGNORE = "*\n!.gitignore\n!config.json\n!kept.json\n"
+STATE_GITIGNORE = "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n"
+_OLD_GITIGNORES = {"*\n", "*\n!.gitignore\n!config.json\n!kept.json\n"}   # written by older versions
+GATEWAY_NAME = "autoharness"
 
 
 def ensure_state_dir(state: Path) -> None:
-    """Create .autoharness/; its .gitignore keeps task state out of git but lets settings and kept.json in."""
+    """Create .autoharness/; its .gitignore keeps task state out of git but lets settings, kept.json and gateway.json in."""
     state.mkdir(parents=True, exist_ok=True)
     gitignore = state / ".gitignore"
-    if not gitignore.exists() or gitignore.read_text("utf-8") == "*\n":  # "*\n" = written by older versions
+    if not gitignore.exists() or gitignore.read_text("utf-8") in _OLD_GITIGNORES:
         gitignore.write_text(STATE_GITIGNORE, "utf-8")
+
+
+def proxyable(config: dict) -> bool:
+    """Servers the gateway can run: stdio, or HTTP with explicit headers (no OAuth login)."""
+    return "command" in config or (config.get("type") == "http" and bool(config.get("headers")))
 
 
 def _uninstall_mcp(root: Path, agent: Agent, name: str, created: dict | None) -> None:
@@ -172,7 +179,10 @@ class Project:
         agent = _agent(entry.get("agent", "claude"))
         result = {"removed": name}
         if kind == "mcp":
-            _uninstall_mcp(self.root, agent, name, entry.get("created_mcp_config"))
+            if entry.get("via") == "gateway":
+                self._gateway_forget(name)
+            else:
+                _uninstall_mcp(self.root, agent, name, entry.get("created_mcp_config"))
         else:
             backup = self.state / "modified-skills" / name
             if _uninstall_skill(agent.skills_path(self.root) / name, entry["sha256"], backup):
@@ -187,6 +197,50 @@ class Project:
             for name in names:
                 self.remove_kept(kind, name)
         return removed
+
+    def gateway_registry(self) -> dict:
+        data = _read_json(self.state / "gateway.json", {})
+        data.setdefault("installed", [])
+        data.setdefault("servers", {})
+        return data
+
+    def save_gateway_registry(self, data: dict) -> None:
+        ensure_state_dir(self.state)
+        _write_json(self.state / "gateway.json", data)
+
+    def gateway_active(self) -> bool:
+        return (self.agent.name in self.gateway_registry()["installed"]
+                and self.agent.mcp_store(self.root).has(GATEWAY_NAME))
+
+    def install_gateway(self, server: dict) -> None:
+        agent, reg = self.agent, self.gateway_registry()
+        store = agent.mcp_store(self.root)
+        if store.has(GATEWAY_NAME) and agent.name not in reg["installed"]:
+            raise HarnessError(f"MCP server {GATEWAY_NAME!r} already exists in {agent.mcp_file} and is not managed by autoharness")
+        path = agent.mcp_path(self.root)
+        if not path.exists():
+            reg.setdefault("created_config", {})[agent.name] = {"dir": not path.parent.exists()}
+        try:
+            store.add(GATEWAY_NAME, agent.translate(server)[0])
+        except AgentError as e:
+            raise HarnessError(str(e)) from e
+        if agent.name not in reg["installed"]:
+            reg["installed"].append(agent.name)
+        self.save_gateway_registry(reg)
+
+    def uninstall_gateway(self) -> None:
+        agent, reg = self.agent, self.gateway_registry()
+        if agent.name not in reg["installed"]:
+            raise HarnessError(f"the gateway is not installed for {agent.name}")
+        created = reg.get("created_config", {}).pop(agent.name, None)
+        _uninstall_mcp(self.root, agent, GATEWAY_NAME, created)
+        reg["installed"].remove(agent.name)
+        self.save_gateway_registry(reg)
+
+    def _gateway_forget(self, name: str) -> None:
+        reg = self.gateway_registry()
+        if reg["servers"].pop(name, None) is not None:
+            self.save_gateway_registry(reg)
 
     def active_id(self) -> str | None:
         p = self.state / "active"
@@ -268,16 +322,30 @@ class Task:
 
     # --- MCP -----------------------------------------------------------------
 
-    def add_mcp(self, name: str, config: dict, *, source: str, trust: dict, permissions: dict) -> list[str]:
-        """Write `config` (canonical form) into the agent's MCP file; returns translation warnings."""
+    def add_mcp(self, name: str, config: dict, *, source: str, trust: dict, permissions: dict,
+                direct: bool = False) -> list[str]:
+        """Add an MCP server: through the gateway when it is installed and can run it, else into the
+        agent's MCP file. Returns translation warnings (always empty through the gateway)."""
         agent = self.agent
         store = agent.mcp_store(self.project.root)
         path = agent.mcp_path(self.project.root)
         lock = self.mcp_lock()
+        if name == GATEWAY_NAME:
+            raise HarnessError(f"{GATEWAY_NAME!r} is reserved for the autoharness gateway")
         if name in self.project.kept()["mcp"]:
             raise HarnessError(f"MCP server {name!r} is already installed: kept in the project by an earlier task")
-        if name not in lock and store.has(name):
-            raise HarnessError(f"MCP server {name!r} already exists in {agent.mcp_file} and is not managed by autoharness")
+        registry = self.project.gateway_registry()
+        if name not in lock and (store.has(name) or name in registry["servers"]):
+            raise HarnessError(f"MCP server {name!r} already exists and is not managed by autoharness")
+        if not direct and proxyable(config) and self.project.gateway_active():
+            registry["servers"][name] = config
+            self.project.save_gateway_registry(registry)
+            lock[name] = {"config": config, "source": source, "trust": trust, "agent": agent.name, "via": "gateway",
+                          "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            _write_json(self.dir / "mcp.lock.json", lock)
+            self._grant(f"mcp:{name}", permissions)
+            self.log(f"added MCP `{name}` through the gateway from {source} (trust {trust.get('level')}, {trust.get('score')})")
+            return []
         created = self.info().get("created_mcp_config", {})
         if not path.exists() and agent.name not in created:
             created[agent.name] = {"dir": not path.parent.exists()}
@@ -300,7 +368,10 @@ class Task:
         lock = self.mcp_lock()
         if name not in lock:
             raise HarnessError(f"MCP server {name!r} was not added by this task")
-        _uninstall_mcp(self.project.root, self.agent, name, self._created_mcp_config())
+        if lock[name].get("via") == "gateway":
+            self.project._gateway_forget(name)
+        else:
+            _uninstall_mcp(self.project.root, self.agent, name, self._created_mcp_config())
         del lock[name]
         _write_json(self.dir / "mcp.lock.json", lock)
         self.log(f"removed MCP `{name}`")

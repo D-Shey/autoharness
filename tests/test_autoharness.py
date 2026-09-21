@@ -797,3 +797,64 @@ def test_http_client_json_and_sse(http_server, monkeypatch):
     headers = [h for h, _ in http_server.seen]
     assert all(h["authorization"] == "Bearer t0k" for h in headers)
     assert headers[-1]["mcp-session-id"] == "s-1" and headers[-1]["mcp-protocol-version"]
+
+
+GATEWAY_SERVER = {"command": "autoharness", "args": ["gateway", "serve"]}
+
+
+def test_add_mcp_routes_through_gateway_when_installed(project):
+    project.install_gateway(GATEWAY_SERVER)
+    assert json.loads(project.mcp_path.read_text())["mcpServers"] == {"autoharness": GATEWAY_SERVER}
+    task = project.init_task("t")
+    task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
+    task.add_mcp("github", GITHUB, source="catalog", trust={}, permissions={})
+    task.add_mcp("open-remote", {"type": "http", "url": "https://x.io/mcp"}, source="registry", trust={}, permissions={})
+    task.add_mcp("ctx", {"command": "npx"}, source="catalog", trust={}, permissions={}, direct=True)
+    assert set(project.gateway_registry()["servers"]) == {"fetch", "github"}
+    assert set(json.loads(project.mcp_path.read_text())["mcpServers"]) == {"autoharness", "open-remote", "ctx"}
+    assert task.mcp_lock()["fetch"]["via"] == "gateway" and "via" not in task.mcp_lock()["ctx"]
+    with pytest.raises(HarnessError):
+        task.add_mcp("autoharness", {"command": "x"}, source="catalog", trust={}, permissions={})
+    task.teardown("remove")
+    assert project.gateway_registry()["servers"] == {}
+    assert set(json.loads(project.mcp_path.read_text())["mcpServers"]) == {"autoharness"}
+
+
+def test_gateway_servers_follow_keep_and_prune(project):
+    project.install_gateway(GATEWAY_SERVER)
+    task = project.init_task("t")
+    task.add_mcp("fetch", {"command": "uvx"}, source="catalog", trust={}, permissions={})
+    task.teardown("keep")
+    assert "fetch" in project.gateway_registry()["servers"]
+    assert project.kept()["mcp"]["fetch"]["via"] == "gateway"
+    project.prune()
+    assert project.gateway_registry()["servers"] == {}
+
+
+def test_gateway_install_and_uninstall(project, tmp_path):
+    project.mcp_path.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}), "utf-8")
+    project.install_gateway(GATEWAY_SERVER)
+    project.install_gateway(GATEWAY_SERVER)               # idempotent
+    assert project.gateway_active() and project.gateway_registry()["installed"] == ["claude"]
+    project.uninstall_gateway()
+    assert not project.gateway_active()
+    assert json.loads(project.mcp_path.read_text())["mcpServers"] == {"mine": {"command": "x"}}
+
+    fresh = Project(tmp_path / "fresh", "claude")
+    fresh.root.mkdir()
+    fresh.install_gateway(GATEWAY_SERVER)
+    fresh.uninstall_gateway()
+    assert not fresh.mcp_path.exists()
+
+
+def test_gateway_install_refuses_foreign_server(project):
+    project.mcp_path.write_text(json.dumps({"mcpServers": {"autoharness": {"command": "other"}}}), "utf-8")
+    with pytest.raises(HarnessError, match="not managed"):
+        project.install_gateway(GATEWAY_SERVER)
+
+
+def test_old_state_gitignore_is_upgraded(project):
+    project.state.mkdir(parents=True)
+    (project.state / ".gitignore").write_text("*\n!.gitignore\n!config.json\n!kept.json\n", "utf-8")
+    project.init_task("t")
+    assert "!gateway.json" in (project.state / ".gitignore").read_text("utf-8").split()
