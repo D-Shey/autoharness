@@ -91,6 +91,7 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs and how you g
   --constraints "<the user's constraints, verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; <name>: ...; searched: <queries>" \
   --gaps "create <skill-name>: <capability>; ..."   # or: "none: <why tools at hand cover it>"
+  # optional: --fidelity "<level to judge at, e.g. stylised poster, not photographic>"
   # optional: --review critic   (require an independent critic even if no capability does)
 ```
 
@@ -172,21 +173,34 @@ resume from where you were.
 
    ```bash
    autoharness evidence add <file> --kind reference   # what the result must match; the thing itself
-   autoharness evidence add <file> --kind result      # what this round produced
-   autoharness review --by self --diff "<differences, most important first>" --fixable yes|no
+   autoharness evidence add <file> --kind result      # this round: the whole result, then close-ups
+   autoharness review --by self --diff "1 <most important>; 2 ..." --worst blocker|major|minor|none
    autoharness critic                                 # prompt for an independent reviewer
-   autoharness review --by critic --diff "<its list>" --fixable yes|no
+   autoharness review --by critic --diff "<its list>" --worst <its VERDICT>
    ```
 
    Rounds: produce, add the result, compare it side by side with the reference, fix the
-   most important differences, repeat. One pass is not a review. You are not the judge
-   of your own work: give the `critic` prompt to a fresh subagent that did not make it
-   (Claude Code: the Agent tool; elsewhere a new session), unchanged, and record its
-   answer as it is. Stop only when the critic's verdict on the latest result is that
-   nothing fixable is left; "the medium cannot do it" must be the critic's call, not
-   yours. Some capabilities require this (visual ones need image references, at least
-   two results and a final critic); teardown refuses until it is done. Tell the user
-   which differences remain.
+   most important differences, repeat. One pass is not a review.
+
+   - **Severity.** `--worst` is the worst severity among the differences that are still
+     fixable: blocker (fails its purpose), major (clearly wrong at a glance), minor
+     (polish, or detail beyond the fidelity from your brief). The task may stop when the
+     critic's verdict on the latest result is `minor` or `none`.
+   - **Close-ups.** Where details matter (a face, a hand, one table in a report, one
+     function in a diff), add a close-up of that part as another result of the same
+     round; the critic sees every result added since its last review.
+   - **You are not the judge of your own work.** Give the `critic` prompt unchanged to
+     a fresh subagent that did not make it (Claude Code: the Agent tool; elsewhere a
+     new session), and record its answer as it is.
+   - **Disagreeing is not dropping.** If you think a critic point is wrong, do not skip
+     it: add a close-up of that part and run `autoharness critic --dispute "<the point>"`;
+     a fresh critic decides.
+   - **Loops.** If the same top problem comes back three critic rounds in a row, the way
+     you are fixing it does not work: change the approach for that part, or ask the user.
+   - **The user decides when good is good enough.** Visual capabilities require image
+     references, at least two results and a final critic; teardown refuses until then.
+     If the user accepts the result as it is, run
+     `autoharness teardown --accepted "<their words>"`. Tell the user which differences remain.
 2. Save the skills you created: bring each one up to date with what the task taught
    you, then `autoharness skill save <name>`. If you learned something else reusable that
    no skill covers (how to build or check this kind of project, an API quirk), write it

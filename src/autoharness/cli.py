@@ -230,22 +230,30 @@ def cmd_evidence(args, project, catalog):
 
 
 def cmd_review(args, project, catalog):
-    item = evidence.review(project.task(), args.diff, args.fixable == "yes", args.by)
-    nxt = ("Fix the fixable differences, produce the result again, `evidence add` it, and review again."
-           if item["fixable"] else
-           "Nothing fixable left in this review." + ("" if item["by"] == "critic" else
-                                                     " Confirm with an independent critic: `autoharness critic`."))
+    worst = args.worst or ("major" if args.fixable == "yes" else "none")
+    item = evidence.review(project.task(), args.diff, worst, args.by)
+    if item.get("repeats", 0) >= evidence.LOOP_ROUNDS:
+        nxt = (f"The same top problem came back {item['repeats']} critic rounds in a row: \"{item['top']}\". "
+               "What you are doing is not fixing it. Change the approach for that part (rebuild it from the "
+               "reference point by point, simplify it, or try another technique), or ask the user whether it "
+               "matters. Do not repeat the same kind of edit.")
+    elif item["fixable"]:
+        nxt = ("Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
+               "close-ups of the parts in question), and review again. If you believe a critic point is wrong, "
+               "do not drop it yourself: add a close-up and run `autoharness critic --dispute \"<the point>\"`.")
+    else:
+        nxt = ("No blocker or major difference is fixable in this review."
+               + ("" if item["by"] == "critic" else " Confirm with an independent critic: `autoharness critic`."))
     out({"status": "ok", "review": item, "next": nxt})
     return 0
 
 
 def cmd_critic(args, project, catalog):
-    res = evidence.critic_prompt(catalog, project.task())
+    res = evidence.critic_prompt(catalog, project.task(), args.dispute or "")
     out({"status": "ok"} | res | {
         "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
                 "elsewhere a new session). Do not add your own opinion to it. Record its answer verbatim in "
-                "substance: `autoharness review --by critic --diff \"<its list>\" --fixable yes|no` "
-                "(yes if its verdict is fixable)."})
+                "substance: `autoharness review --by critic --diff \"<its list>\" --worst <its VERDICT>`."})
     return 0
 
 
@@ -259,7 +267,8 @@ def cmd_brief(args, project, catalog):
         library.validate_name(name)
     task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
                        "verify": args.verify, "candidates": args.candidates, "gaps": args.gaps}
-                      | ({"review": args.review} if args.review else {}))
+                      | ({"review": args.review} if args.review else {})
+                      | ({"fidelity": args.fidelity} if args.fidelity else {}))
     task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
         "no search ran for this task; run `autoharness search skill|mcp \"<query>\"` before deciding nothing fits"]
@@ -387,9 +396,13 @@ def cmd_teardown(args, project, catalog):
     info = task.info()
     blocking, skill_warnings = task.planned_skill_problems()
     blocking += evidence.problems(catalog, task)
-    if blocking and not args.force:
+    if blocking and args.accepted:
+        task._update_info(accepted_by_user=args.accepted)
+        task.log(f"user accepted the result as it is: {args.accepted}")
+    if blocking and not (args.force or args.accepted):
         out({"status": "incomplete", "task_id": task.id, "problems": blocking,
-             "next": "Fix these, then tear down again. Use --force only if the user agreed to skip them."})
+             "next": "Fix these, then tear down again. If the user decides the result is good enough as it is, "
+                     "run `autoharness teardown --accepted \"<their words>\"`."})
         return 1
     warnings += blocking + skill_warnings
     if not task.discovery_ran():
@@ -732,6 +745,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--notes")
     s.add_argument("--force", action="store_true",
                    help="tear down although a planned skill, evidence or a review is missing")
+    s.add_argument("--accepted", metavar="USER_WORDS",
+                   help="the user accepted the result as it is; their words go into the task log")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--keep", dest="policy", action="store_const", const="keep", help="keep it installed in the project")
     g.add_argument("--remove", dest="policy", action="store_const", const="remove", help="uninstall everything it added")
@@ -761,9 +776,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note", help="what it shows")
     s = sub.add_parser("review", help="record one review round of the latest result")
     s.add_argument("--diff", required=True, help="the differences found, most important first")
-    s.add_argument("--fixable", required=True, choices=["yes", "no"], help="is any of them fixable in the medium?")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--worst", choices=list(evidence.SEVERITIES),
+                   help="worst severity among the fixable differences (the critic's VERDICT)")
+    g.add_argument("--fixable", choices=["yes", "no"], help="short form: yes = major, no = none")
     s.add_argument("--by", choices=["self", "critic"], default="self")
-    sub.add_parser("critic", help="a prompt for an independent reviewer of the latest result")
+    s = sub.add_parser("critic", help="a prompt for an independent reviewer of the latest result")
+    s.add_argument("--dispute", help="a point of the last critic review you believe is wrong; a fresh critic decides")
     s = sub.add_parser("brief", help="record what a good result is, what is missing, and the verdict on candidates")
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
@@ -773,6 +792,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("--verify", "how the result will be checked, and against what"),
                        ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:
         s.add_argument(flag, required=True, help=what)
+    s.add_argument("--fidelity", help="the level to judge the result at, e.g. `stylised poster, not photographic`")
     s.add_argument("--review", choices=["critic"],
                    help="require an independent critic for this task even if its capabilities do not")
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")

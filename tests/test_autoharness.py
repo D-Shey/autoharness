@@ -1503,3 +1503,93 @@ def test_bootstrap_skill_teaches_evidence_and_the_critic():
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
     for phrase in ("autoharness evidence add", "autoharness review", "autoharness critic", "fresh subagent"):
         assert phrase in text, phrase
+
+
+# --- severity, disputes, loops, close-ups, user acceptance -------------------
+
+def critic_round(capsys, root, diff, worst):
+    return cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", diff, "--worst", worst)
+
+
+def ready_visual(capsys, project, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    for n in (1, 2):
+        ev(capsys, root, png(tmp_path / f"r{n}.png"), "result")
+    return root
+
+
+def test_minor_fixable_differences_do_not_block(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 hair lacks strands (minor)", "minor")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0
+
+
+def test_major_fixable_difference_blocks(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 mouth reads open (major)", "major")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "up to major" in " ".join(res["problems"])
+
+
+def test_critic_prompt_grades_severity_at_the_target_fidelity(project, capsys, tmp_path):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", BLADE_RUNNER)
+    cli_json(capsys, "--project", root, "brief", *BRIEF, "--fidelity", "stylised poster, not photographic")
+    ev(capsys, root, png(tmp_path / "r1.png"), "result")
+    ev(capsys, root, png(tmp_path / "face.png"), "result")  # a close-up of the same round
+    code, res = cli_json(capsys, "--project", root, "critic")
+    p = res["prompt"]
+    assert "stylised poster, not photographic" in p and "blocker" in p and "minor" in p
+    assert "VERDICT: blocker | major | minor | none" in p
+    assert len(res["results"]) == 2 and all(f in p for f in res["results"])
+    assert "--worst" in res["next"]
+
+
+def test_a_disputed_point_goes_to_a_fresh_critic_not_the_author(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    code, res = cli_json(capsys, "--project", root, "critic", "--dispute", "mouth is open")
+    assert code == 1 and "no critic review" in res["error"]
+    critic_round(capsys, root, "1 mouth reads open; 2 hand is a tube", "major")
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", "x", "--worst", "major")
+    ev(capsys, root, png(tmp_path / "mouth-closeup.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic", "--dispute", "mouth is open")
+    p = res["prompt"]
+    assert "The author disputes this point: mouth is open" in p and "mouth-closeup.png" in p
+    assert "trust the close-up" in p
+
+
+def test_same_top_problem_three_critic_rounds_asks_for_a_new_approach(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 Joi face flat cartoon profile; 2 hand", "major")
+    critic_round(capsys, root, "1 face flat and cartoon, profile weak; 2 hair", "major")
+    code, res = critic_round(capsys, root, "1 the face is still flat, cartoon profile; 2 K", "major")
+    assert res["review"]["repeats"] == 3 and "Change the approach" in res["next"]
+    code, res = critic_round(capsys, root, "1 K head too round; 2 face", "major")
+    assert res["review"]["repeats"] == 1
+
+
+def test_disagreeing_is_not_dropping(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    code, res = critic_round(capsys, root, "1 mouth reads open", "major")
+    assert "autoharness critic --dispute" in res["next"] and "do not drop it yourself" in res["next"]
+
+
+def test_user_can_accept_the_result_as_it_is(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 face flat", "major")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "--accepted" in res["next"]
+    task_dir = project.task().dir
+    code, res = cli_json(capsys, "--project", root, "teardown", "--accepted", "хватит, так нормально")
+    assert code == 0
+    assert "хватит, так нормально" in (task_dir / "harness.md").read_text("utf-8")
+    assert json.loads((task_dir / "task.json").read_text("utf-8"))["accepted_by_user"] == "хватит, так нормально"
+
+
+def test_bootstrap_skill_teaches_severity_disputes_and_acceptance():
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    for phrase in ("--worst", "--dispute", "--fidelity", "close-up", "--accepted"):
+        assert phrase in text, phrase

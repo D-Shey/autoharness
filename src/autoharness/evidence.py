@@ -18,13 +18,19 @@ critic` for any task. `media: image` limits the counted evidence to image files.
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import time
 from pathlib import Path
 
+from autoharness import text
 from autoharness.env import HarnessError, Task
 
 KINDS = ("reference", "result")
+# worst difference still fixable in a review; the task may stop once it is at most "minor"
+SEVERITIES = ("none", "minor", "major", "blocker")
+BLOCKING = ("major", "blocker")
+LOOP_ROUNDS = 3  # critic reviews in a row with the same top problem
 MEDIA = {"image": {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}}
 GENERIC_FOCUS = ("does it meet the quality bar and match the reference, what is missing or wrong, "
                  "which of the user's constraints it breaks")
@@ -58,16 +64,35 @@ def latest(task: Task, kind: str) -> dict | None:
     return items[-1] if items else None
 
 
-def review(task: Task, diff: str, fixable: bool, by: str) -> dict:
+def top_issue(diff: str) -> str:
+    """The first (most important) difference in a review's list."""
+    first = re.split(r"\s2[.)]?\s|;|\n", diff.strip(), maxsplit=1)[0]
+    return re.sub(r"^\s*1[.)]?\s*", "", first).strip()
+
+
+def same_issue(a: str, b: str) -> bool:
+    sa, sb = text.stems(a), text.stems(b)
+    return bool(sa and sb) and len(sa & sb) / min(len(sa), len(sb)) >= 0.5
+
+
+def review(task: Task, diff: str, worst: str, by: str) -> dict:
+    if worst not in SEVERITIES:
+        raise HarnessError(f"severity must be one of {', '.join(SEVERITIES)}")
     result = latest(task, "result")
     if not result:
         raise HarnessError("no result yet: `autoharness evidence add <file> --kind result` first")
     reviews = task.info().get("reviews", [])
-    item = {"round": len(reviews) + 1, "by": by, "result": result["n"], "diff": diff, "fixable": fixable,
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    item = {"round": len(reviews) + 1, "by": by, "result": result["n"], "diff": diff, "worst": worst,
+            "fixable": worst in BLOCKING, "top": top_issue(diff), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if by == "critic":
+        repeats = 1
+        for prev in reversed([r for r in reviews if r["by"] == "critic"]):
+            if not same_issue(prev.get("top") or top_issue(prev["diff"]), item["top"]):
+                break
+            repeats += 1
+        item["repeats"] = repeats
     task._update_info(reviews=reviews + [item])
-    task.log(f"review {item['round']} by {by} of result #{result['n']}: "
-             f"{'fixable differences left' if fixable else 'nothing fixable left'}: {diff}")
+    task.log(f"review {item['round']} by {by} of result #{result['n']}: worst fixable {worst}: {diff}")
     return item
 
 
@@ -89,17 +114,39 @@ def requirements(catalog, task: Task) -> dict:
     return need
 
 
-def critic_prompt(catalog, task: Task) -> dict:
+def round_results(task: Task) -> list[dict]:
+    """Results added since the last critic review: the whole result plus any close-ups of this round."""
+    info = task.info()
+    critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
+    after = critics[-1]["result"] if critics else 0
+    fresh = [e for e in info.get("evidence", []) if e["kind"] == "result" and e["n"] > after]
+    return fresh or [latest(task, "result")]
+
+
+def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
     """A self-contained prompt for a fresh reviewer that has not seen the author's reasoning."""
     info = task.info()
     result = latest(task, "result")
     if not result:
         raise HarnessError("no result yet: `autoharness evidence add <file> --kind result` first")
     refs = [e for e in info.get("evidence", []) if e["kind"] == "reference"]
+    results = round_results(task)
     brief = info.get("brief", {})
+    critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
+    if dispute and not critics:
+        raise HarnessError("nothing to dispute: no critic review yet")
     focus = "; ".join(c.review for c in _caps(catalog, task) if c.review) or GENERIC_FOCUS
-    ref_lines = "\n".join(f"- {e['file']}" + (f" ({e['note']})" if e["note"] else "") for e in refs) \
-        or "- none: judge against the task and the quality bar only"
+    lines = lambda items: "\n".join(f"- {e['file']}" + (f" ({e['note']})" if e["note"] else "")  # noqa: E731
+                                     for e in items)
+    ref_lines = lines(refs) or "- none: judge against the task and the quality bar only"
+    fidelity = brief.get("fidelity") or "the level the quality bar implies"
+    disputed = "" if not dispute else f"""
+A previous critic listed these differences:
+{critics[-1]["diff"]}
+The author disputes this point: {dispute}
+Check that point first, closely, in the files (close-ups are included where the author made them).
+Keep it only if the files show it is true. Then give your own full list as below.
+"""
     prompt = f"""You are an independent critic. You did not make this work and owe its author nothing.
 
 Task given to the author:
@@ -108,21 +155,28 @@ Task given to the author:
 Quality bar: {brief.get("goal", "(not recorded)")}
 The user's constraints: {brief.get("constraints", "(not recorded)")}
 
+Target fidelity: {fidelity}. Judge at that level: detail beyond it (for example photographic
+detail in a stylised drawing) is at most minor.
+
 Open and study these files yourself:
 Reference:
 {ref_lines}
-Result to judge (#{result['n']}):
-- {result['file']}
-
+Result to judge (the whole result, then any close-ups of it):
+{lines(results)}
+{disputed}
 List the most important differences between the result and the reference / quality bar,
 most important first, at most 8. Look in particular at: {focus}.
-For each one say whether it can be fixed within the user's constraints and the medium
-(fixable) or not. Do not praise, do not soften, do not suggest changing the constraints.
+Tag each one:
+- severity: blocker (the result fails its purpose), major (clearly wrong, noticeable at a glance),
+  or minor (polish, or detail beyond the target fidelity);
+- fixable or not within the user's constraints and the medium.
+Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up.
+Do not praise, do not soften, do not suggest changing the constraints.
 
-End with exactly one line:
-VERDICT: fixable   (if any difference above is fixable)
-VERDICT: done      (if nothing fixable is left)"""
-    return {"prompt": prompt, "result": result["file"], "references": [e["file"] for e in refs]}
+End with exactly one line naming the worst severity among the FIXABLE differences:
+VERDICT: blocker | major | minor | none"""
+    return {"prompt": prompt, "result": result["file"], "results": [e["file"] for e in results],
+            "references": [e["file"] for e in refs]}
 
 
 def problems(catalog, task: Task) -> list[str]:
@@ -151,7 +205,7 @@ def problems(catalog, task: Task) -> list[str]:
                        "did not make the work, and record the answer with `autoharness review --by critic ...`")
         elif last and critics[-1]["result"] != last["n"]:
             out.append(f"the latest result (#{last['n']}) was not reviewed by the critic: run `autoharness critic` again")
-        elif critics[-1]["fixable"]:
-            out.append("the last critic review lists fixable differences: fix them, add the new result, and ask "
-                       "the critic again")
+        elif critics[-1].get("worst", "major" if critics[-1]["fixable"] else "none") in BLOCKING:
+            out.append(f"the last critic review lists fixable differences up to "
+                       f"{critics[-1].get('worst', 'major')}: fix them, add the new result, and ask the critic again")
     return out
