@@ -2,8 +2,9 @@
 
 Мета-harness: агент стартует «голым» (только skill `autoharness`), сам определяет,
 какие capabilities нужны задаче, находит MCP-серверы и skills, проверяет их,
-ставит **только на эту задачу**, решает её и потом всё снимает. Удачные наборы
-сохраняются как recipes и переиспользуются.
+ставит их, решает задачу и в конце либо оставляет поставленное в проекте (по умолчанию),
+либо всё снимает — это настраивается. Удачные наборы сохраняются как recipes и
+переиспользуются.
 
 ```
 task → init → capabilities → recipe? → search → trust check → add → smoke-test
@@ -56,13 +57,36 @@ remote-серверы становятся `httpUrl`/`url`, для Codex сек�
 | `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
 | `inspect mcp\|skill <name>` | подробный trust-отчёт |
 | `add mcp <name>` / `add skill owner/repo@skill` | ставит в MCP-конфиг и папку skills агента и пишет в lockfile |
-| `remove mcp\|skill <name>` | снимает то, что поставила эта задача |
-| `status` | текущий harness и журнал |
-| `teardown [--save-recipe NAME --notes ...]` | удаляет всё, что добавила задача |
+| `remove mcp\|skill <name>` | снимает то, что поставила эта задача или сохранила в проекте прошлая |
+| `prune` | снимает всё, что прошлые задачи сохранили в проекте |
+| `status` | текущий harness, что сохранено в проекте, журнал |
+| `teardown [--keep\|--remove] [--save-recipe NAME --notes ...]` | завершает задачу по политике `teardown` |
+| `config get\|set [teardown keep\|remove] [--global]` | настройки |
 | `recipe list\|match\|show` | сохранённые наборы |
 | `agents` | поддерживаемые агенты и их пути |
 
 Всё печатается как JSON. Код выхода `3` = нужно согласие пользователя.
+
+## Что происходит в конце задачи
+
+Настройка `teardown`:
+
+- `keep` (по умолчанию) — поставленное остаётся в проекте. Записи о нём переходят из
+  lockfile задачи в `.autoharness/kept.json`, следующие задачи видят эти skills и MCP
+  как уже установленные (`add` отвечает `already_installed`). Снять: `remove` или `prune`.
+- `remove` — teardown удаляет всё, что поставила задача.
+
+Кто главнее, сверху вниз: флаг `teardown --keep|--remove`, `$AUTOHARNESS_TEARDOWN`,
+`.autoharness/config.json` проекта, `~/.autoharness/config.json`, значение по умолчанию.
+
+```bash
+autoharness config set teardown remove            # для этого проекта
+autoharness config set teardown remove --global   # для всех проектов
+autoharness config get                            # текущее значение и откуда оно
+```
+
+`.autoharness/.gitignore` пропускает `config.json` и `kept.json`, так что их можно
+закоммитить вместе с папкой skills; остальное состояние задач в git не попадает.
 
 ## Безопасность
 
@@ -73,9 +97,9 @@ remote-серверы становятся `httpUrl`/`url`, для Codex сек�
 - **Skills** сначала скачиваются во временную staging-папку, статически сканируются
   (чтение `~/.ssh`, `curl | sh`, «не говори пользователю», обфускация) и только
   потом копируются в проект. High-находки блокируют установку.
-- **Teardown трогает только то, что записано в lockfile задачи.** Ваши собственные
-  MCP и skills не перезаписываются и не удаляются; изменённый после установки skill
-  сохраняется в бэкап.
+- **Удаляется только то, что записано в lockfile задачи или в `kept.json`.** Ваши
+  собственные MCP и skills не перезаписываются и не удаляются; изменённый после
+  установки skill сохраняется в бэкап (кэши вроде `__pycache__` правкой не считаются).
 - Секреты не записываются: в конфиге только `${ENV_VAR}`.
 
 Состояние задачи: `.autoharness/tasks/<id>/` (`task.json`, `mcp.lock.json`,

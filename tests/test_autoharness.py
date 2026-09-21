@@ -54,7 +54,7 @@ def test_mcp_add_and_teardown_preserves_user_servers(project):
     with pytest.raises(HarnessError, match="not managed"):
         task.add_mcp("mine", {"command": "y"}, source="catalog", trust={}, permissions={})
 
-    removed = task.teardown()
+    removed = task.teardown("remove")["removed"]
     assert removed["mcp"] == ["playwright"]
     assert json.loads(project.mcp_path.read_text())["mcpServers"] == {"mine": {"command": "x"}}
     assert task.info()["status"] == "torn-down"
@@ -64,7 +64,7 @@ def test_mcp_add_and_teardown_preserves_user_servers(project):
 def test_mcp_json_created_by_task_is_deleted_on_teardown(project):
     task = project.init_task("t")
     task.add_mcp("context7", {"command": "npx"}, source="catalog", trust={}, permissions={})
-    task.teardown()
+    task.teardown("remove")
     assert not project.mcp_path.exists()
 
 
@@ -79,7 +79,7 @@ def test_skill_install_scan_and_teardown(project):
     task.add_skill("acme/skills@demo", trust={"level": "high"}, stage=fake_stager(SAFE_SKILL))
     assert (project.skills_dir / "demo" / "SKILL.md").exists()
     (project.skills_dir / "demo" / "SKILL.md").write_text("edited", "utf-8")
-    task.teardown()
+    task.teardown("remove")
     assert not (project.skills_dir / "demo").exists()
     assert (task.dir / "modified-skills" / "demo" / "SKILL.md").read_text() == "edited"
 
@@ -91,7 +91,7 @@ def test_runtime_caches_do_not_count_as_skill_edits(project):
     cache.mkdir(parents=True)
     (cache / "validate.cpython-314.pyc").write_bytes(b"\x00")
     (project.skills_dir / "demo" / ".DS_Store").write_bytes(b"\x00")
-    task.teardown()
+    task.teardown("remove")
     assert not (project.skills_dir / "demo").exists()
     assert not (task.dir / "modified-skills").exists()
 
@@ -240,7 +240,7 @@ def test_gemini_family_writes_settings_and_keeps_user_settings(tmp_path, agent, 
     task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
     assert (tmp_path / skills / "demo" / "SKILL.md").exists()
 
-    task.teardown()
+    task.teardown("remove")
     assert json.loads(settings.read_text()) == {"theme": "dark", "mcpServers": {"mine": {"command": "x"}}}
     assert not (tmp_path / skills / "demo").exists()
 
@@ -250,7 +250,7 @@ def test_gemini_settings_created_by_task_are_removed(tmp_path):
     task = project.init_task("t")
     task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
     assert (tmp_path / ".gemini" / "settings.json").exists()
-    task.teardown()
+    task.teardown("remove")
     assert not (tmp_path / ".gemini").exists()
 
 
@@ -280,14 +280,14 @@ def test_codex_toml_preserves_user_config(tmp_path):
     task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
     assert (tmp_path / ".agents" / "skills" / "demo" / "SKILL.md").exists()
 
-    task.teardown()
+    task.teardown("remove")
     assert cfg.read_text("utf-8") == user
 
 
 def test_codex_config_created_by_task_is_removed(tmp_path):
     task = Project(tmp_path, "codex").init_task("t")
     task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
-    task.teardown()
+    task.teardown("remove")
     assert not (tmp_path / ".codex").exists()
 
 
@@ -314,3 +314,112 @@ def test_install_skill_for_all_agents(tmp_path, capsys):
     codex_skill = (tmp_path / ".agents" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
     assert "autoharness --agent codex init" in codex_skill and "{{" not in codex_skill
     assert ".gigacode/settings.json" in (tmp_path / ".gigacode" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+
+
+# --- teardown policy: keep at project level by default ----------------------
+
+def cli_json(capsys, *argv):
+    code = cli.main(list(argv))
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_teardown_keeps_at_project_level_by_default(project):
+    project.mcp_path.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}), "utf-8")
+    task = project.init_task("t")
+    task.add_mcp("playwright", {"command": "npx"}, source="catalog", trust={}, permissions={})
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+
+    result = task.teardown()
+    assert result == {"removed": {"mcp": [], "skills": []}, "kept": {"mcp": ["playwright"], "skills": ["demo"]}}
+    assert set(json.loads(project.mcp_path.read_text())["mcpServers"]) == {"mine", "playwright"}
+    assert (project.skills_dir / "demo" / "SKILL.md").exists()
+    assert task.info()["status"] == "kept" and task.mcp_lock() == {} and task.skills_lock() == {}
+    kept = project.kept()
+    assert set(kept["mcp"]) == {"playwright"} and set(kept["skills"]) == {"demo"}
+    assert kept["skills"]["demo"]["task"] == task.id
+    assert project.active_id() is None
+
+    task2 = project.init_task("next")  # a kept harness does not block the next task
+    with pytest.raises(HarnessError, match="kept"):
+        task2.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+
+
+def test_teardown_policy_precedence(project, monkeypatch):
+    from autoharness import config
+    root = project.root
+    monkeypatch.delenv("AUTOHARNESS_TEARDOWN", raising=False)
+    assert config.teardown_policy(root) == ("keep", "default")
+    config.set_value(config.global_path(), "teardown", "remove")
+    assert config.teardown_policy(root) == ("remove", "global")
+    config.set_value(config.project_path(root), "teardown", "keep")
+    assert config.teardown_policy(root) == ("keep", "project")
+    monkeypatch.setenv("AUTOHARNESS_TEARDOWN", "remove")
+    assert config.teardown_policy(root) == ("remove", "env")
+    assert config.teardown_policy(root, flag="keep") == ("keep", "flag")
+    monkeypatch.setenv("AUTOHARNESS_TEARDOWN", "sometimes")
+    with pytest.raises(HarnessError, match="teardown"):
+        config.teardown_policy(root)
+    with pytest.raises(HarnessError, match="teardown"):
+        config.set_value(config.project_path(root), "teardown", "sometimes")
+
+
+def test_cli_teardown_follows_config_and_flags(project, capsys, monkeypatch):
+    monkeypatch.delenv("AUTOHARNESS_TEARDOWN", raising=False)
+    root = str(project.root)
+    code, res = cli_json(capsys, "--project", root, "config", "set", "teardown", "remove")
+    assert code == 0 and res["teardown"] == {"value": "remove", "source": "project"}
+
+    cli_json(capsys, "--project", root, "init", "t")
+    project.task().add_mcp("fetch", {"command": "uvx"}, source="catalog", trust={}, permissions={})
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0 and res["policy"] == "remove" and res["removed"]["mcp"] == ["fetch"]
+    assert not project.mcp_path.exists()
+
+    cli_json(capsys, "--project", root, "init", "t2")
+    project.task().add_mcp("fetch", {"command": "uvx"}, source="catalog", trust={}, permissions={})
+    code, res = cli_json(capsys, "--project", root, "teardown", "--keep")
+    assert res["policy"] == "keep" and res["policy_source"] == "flag" and res["kept"]["mcp"] == ["fetch"]
+    assert "prune" in res["next"]
+
+
+def test_cli_add_reports_kept_skill_as_installed(project, capsys):
+    root = str(project.root)
+    task = project.init_task("t")
+    task.add_skill("anthropics/skills@pptx", trust={}, stage=fake_stager(SAFE_SKILL))
+    task.teardown("keep")
+    cli_json(capsys, "--project", root, "init", "next")
+    code, res = cli_json(capsys, "--project", root, "add", "skill", "anthropics/skills@pptx")  # curated: no network
+    assert code == 0 and res["status"] == "ok" and res["already_installed"] == "pptx" and res["kept"]
+
+
+def test_remove_and_prune_kept_items_without_active_task(project, capsys):
+    root = str(project.root)
+    (project.skills_dir / "mine").mkdir(parents=True)
+    (project.skills_dir / "mine" / "SKILL.md").write_text("user skill", "utf-8")
+    task = project.init_task("t")
+    task.add_mcp("fetch", {"command": "uvx"}, source="catalog", trust={}, permissions={})
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+    task.add_skill("acme/skills@other", trust={}, stage=fake_stager(SAFE_SKILL))
+    task.teardown("keep")
+    (project.skills_dir / "other" / "SKILL.md").write_text("edited", "utf-8")
+
+    code, res = cli_json(capsys, "--project", root, "remove", "skill", "demo")
+    assert code == 0 and not (project.skills_dir / "demo").exists()
+    code, res = cli_json(capsys, "--project", root, "status")
+    assert code == 0 and res["task"] is None and set(res["kept"]["skills"]) == {"other"}
+
+    code, res = cli_json(capsys, "--project", root, "prune")
+    assert code == 0 and res["removed"] == {"mcp": ["fetch"], "skills": ["other"]}
+    assert project.kept() == {"mcp": {}, "skills": {}}
+    assert not project.mcp_path.exists() and not (project.skills_dir / "other").exists()
+    assert (project.state / "modified-skills" / "other" / "SKILL.md").read_text() == "edited"
+    assert (project.skills_dir / "mine" / "SKILL.md").read_text() == "user skill"
+
+    code, res = cli_json(capsys, "--project", root, "remove", "skill", "mine")
+    assert code == 1 and "not managed" in res["error"]
+
+
+def test_state_gitignore_lets_config_and_kept_through(project):
+    project.init_task("t")
+    lines = (project.state / ".gitignore").read_text("utf-8").split()
+    assert lines[0] == "*" and {"!config.json", "!kept.json", "!.gitignore"} <= set(lines)

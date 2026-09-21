@@ -4,6 +4,9 @@ Layout inside a project:
 
     .autoharness/
         active                  id of the current task
+        config.json             project settings (see config.py)
+        kept.json               what finished tasks left installed (teardown policy `keep`)
+        modified-skills/        backups of kept skills edited before removal
         tasks/<id>/
             task.json           task text, status, capabilities
             task.json           also records which agent the task targets
@@ -12,8 +15,8 @@ Layout inside a project:
             permissions.json    what each capability was granted
             harness.md          human-readable event log
 
-AutoHarness only ever removes what it recorded in its own lockfiles, so
-teardown never touches servers or skills the user set up by hand.
+AutoHarness only ever removes what it recorded in its own lockfiles or in
+kept.json, so it never touches servers or skills the user set up by hand.
 """
 
 from __future__ import annotations
@@ -75,6 +78,34 @@ def _hash_dir(root: Path) -> str:
     return h.hexdigest()
 
 
+STATE_GITIGNORE = "*\n!.gitignore\n!config.json\n!kept.json\n"
+
+
+def ensure_state_dir(state: Path) -> None:
+    """Create .autoharness/; its .gitignore keeps task state out of git but lets settings and kept.json in."""
+    state.mkdir(parents=True, exist_ok=True)
+    gitignore = state / ".gitignore"
+    if not gitignore.exists() or gitignore.read_text("utf-8") == "*\n":  # "*\n" = written by older versions
+        gitignore.write_text(STATE_GITIGNORE, "utf-8")
+
+
+def _uninstall_mcp(root: Path, agent: Agent, name: str, created: dict | None) -> None:
+    try:
+        agent.mcp_store(root).remove(name, created_file=created is not None, created_dir=bool(created and created["dir"]))
+    except AgentError as e:
+        raise HarnessError(str(e)) from e
+
+
+def _uninstall_skill(dest: Path, sha256: str, backup: Path) -> bool:
+    """Delete an installed skill; back it up first if it was edited. Returns whether it was."""
+    modified = dest.exists() and _hash_dir(dest) != sha256
+    if modified:
+        shutil.copytree(dest, backup, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*RUNTIME_JUNK))
+    if dest.exists():
+        shutil.rmtree(dest)
+    return modified
+
+
 def parse_skill_spec(spec: str) -> tuple[str, str]:
     """`owner/repo@skill` -> (`owner/repo`, `skill`)."""
     if "@" not in spec or spec.count("/") < 1:
@@ -121,6 +152,38 @@ class Project:
     def skills_dir(self) -> Path:
         return self.agent.skills_path(self.root)
 
+    def kept(self) -> dict:
+        return _read_json(self.state / "kept.json", {"mcp": {}, "skills": {}})
+
+    def _write_kept(self, kept: dict) -> None:
+        ensure_state_dir(self.state)
+        _write_json(self.state / "kept.json", kept)
+
+    def remove_kept(self, kind: str, name: str) -> dict:
+        """Uninstall one thing a finished task kept. `kind` is "mcp" or "skills"."""
+        kept = self.kept()
+        if name not in kept[kind]:
+            raise HarnessError(f"{name!r} is not managed by autoharness in this project")
+        entry = kept[kind].pop(name)
+        agent = _agent(entry.get("agent", "claude"))
+        result = {"removed": name}
+        if kind == "mcp":
+            _uninstall_mcp(self.root, agent, name, entry.get("created_mcp_config"))
+        else:
+            backup = self.state / "modified-skills" / name
+            if _uninstall_skill(agent.skills_path(self.root) / name, entry["sha256"], backup):
+                result["backup"] = str(backup)
+        self._write_kept(kept)
+        return result
+
+    def prune(self) -> dict:
+        kept = self.kept()
+        removed = {"mcp": list(kept["mcp"]), "skills": list(kept["skills"])}
+        for kind, names in removed.items():
+            for name in names:
+                self.remove_kept(kind, name)
+        return removed
+
     def active_id(self) -> str | None:
         p = self.state / "active"
         return p.read_text("utf-8").strip() if p.exists() else None
@@ -148,9 +211,7 @@ class Project:
         _write_json(t.dir / "permissions.json", {})
         (t.dir / "harness.md").write_text(f"# Harness for task {task_id}\n\n> {text}\n\n", "utf-8")
         (self.state / "active").write_text(task_id, "utf-8")
-        gitignore = self.state / ".gitignore"
-        if not gitignore.exists():
-            gitignore.write_text("*\n", "utf-8")
+        ensure_state_dir(self.state)
         return t
 
 
@@ -209,6 +270,8 @@ class Task:
         store = agent.mcp_store(self.project.root)
         path = agent.mcp_path(self.project.root)
         lock = self.mcp_lock()
+        if name in self.project.kept()["mcp"]:
+            raise HarnessError(f"MCP server {name!r} is already installed: kept in the project by an earlier task")
         if name not in lock and store.has(name):
             raise HarnessError(f"MCP server {name!r} already exists in {agent.mcp_file} and is not managed by autoharness")
         created = self.info().get("created_mcp_config", {})
@@ -233,15 +296,7 @@ class Task:
         lock = self.mcp_lock()
         if name not in lock:
             raise HarnessError(f"MCP server {name!r} was not added by this task")
-        agent = self.agent
-        created = self.info().get("created_mcp_config", {}).get(agent.name)
-        if created is None and self.info().get("created_mcp_json"):  # lockfiles from before adapters
-            created = {"dir": False}
-        try:
-            agent.mcp_store(self.project.root).remove(name, created_file=created is not None,
-                                                      created_dir=bool(created and created["dir"]))
-        except AgentError as e:
-            raise HarnessError(str(e)) from e
+        _uninstall_mcp(self.project.root, self.agent, name, self._created_mcp_config())
         del lock[name]
         _write_json(self.dir / "mcp.lock.json", lock)
         self.log(f"removed MCP `{name}`")
@@ -253,6 +308,8 @@ class Task:
         repo, skill = parse_skill_spec(spec)
         dest = self.skills_dir / skill
         lock = self.skills_lock()
+        if skill in self.project.kept()["skills"]:
+            raise HarnessError(f"skill {skill!r} is already installed: kept in the project by an earlier task")
         if dest.exists() and skill not in lock:
             raise HarnessError(f"skill {skill!r} already exists in {self.agent.skills_dir} and is not managed by autoharness")
         with tempfile.TemporaryDirectory(prefix="autoharness-stage-") as tmp:
@@ -275,31 +332,57 @@ class Task:
         lock = self.skills_lock()
         if skill not in lock:
             raise HarnessError(f"skill {skill!r} was not added by this task")
-        dest = self.skills_dir / skill
-        if dest.exists():
-            if _hash_dir(dest) != lock[skill]["sha256"]:
-                self.log(f"skill `{skill}` was modified after install; kept a backup")
-                shutil.copytree(dest, self.dir / "modified-skills" / skill, dirs_exist_ok=True,
-                                ignore=shutil.ignore_patterns(*RUNTIME_JUNK))
-            shutil.rmtree(dest)
+        if _uninstall_skill(self.skills_dir / skill, lock[skill]["sha256"], self.dir / "modified-skills" / skill):
+            self.log(f"skill `{skill}` was modified after install; kept a backup")
         del lock[skill]
         _write_json(self.dir / "skills.lock.json", lock)
         self.log(f"removed skill `{skill}`")
 
     # --- lifecycle -----------------------------------------------------------
 
-    def teardown(self) -> dict:
-        removed = {"mcp": list(self.mcp_lock()), "skills": list(self.skills_lock())}
-        for name in removed["mcp"]:
-            self.remove_mcp(name)
-        for skill in removed["skills"]:
-            self.remove_skill(skill)
-        self._update_info(status="torn-down", finished=time.strftime("%Y-%m-%dT%H:%M:%S"))
-        self.log("teardown complete")
+    def _created_mcp_config(self) -> dict | None:
+        created = self.info().get("created_mcp_config", {}).get(self.agent.name)
+        if created is None and self.info().get("created_mcp_json"):  # lockfiles from before adapters
+            created = {"dir": False}
+        return created
+
+    def _keep_all(self) -> dict:
+        """Hand everything this task installed over to the project's kept.json."""
+        kept = self.project.kept()
+        mcp, skills = self.mcp_lock(), self.skills_lock()
+        stamp = {"task": self.id, "agent": self.agent.name}
+        for name, entry in mcp.items():
+            kept["mcp"][name] = entry | stamp | {"created_mcp_config": self._created_mcp_config()}
+        for skill, entry in skills.items():
+            kept["skills"][skill] = entry | stamp
+        self.project._write_kept(kept)
+        _write_json(self.dir / "mcp.lock.json", {})
+        _write_json(self.dir / "skills.lock.json", {})
+        for name in [*mcp, *skills]:
+            self.log(f"kept `{name}` in the project")
+        return {"mcp": list(mcp), "skills": list(skills)}
+
+    def teardown(self, policy: str = "keep") -> dict:
+        """End the task. `keep` leaves its harness installed at project level, `remove` uninstalls it."""
+        nothing = {"mcp": [], "skills": []}
+        if policy == "keep":
+            result = {"removed": nothing, "kept": self._keep_all()}
+        elif policy == "remove":
+            removed = {"mcp": list(self.mcp_lock()), "skills": list(self.skills_lock())}
+            for name in removed["mcp"]:
+                self.remove_mcp(name)
+            for skill in removed["skills"]:
+                self.remove_skill(skill)
+            result = {"removed": removed, "kept": nothing}
+        else:
+            raise HarnessError(f"unknown teardown policy {policy!r}")
+        self._update_info(status="kept" if policy == "keep" else "torn-down",
+                          finished=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        self.log(f"teardown complete (policy: {policy})")
         active = self.project.state / "active"
         if active.exists() and active.read_text("utf-8").strip() == self.id:
             active.unlink()
-        return removed
+        return result
 
 
 class SkillRejected(HarnessError):

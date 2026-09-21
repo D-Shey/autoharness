@@ -12,7 +12,7 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, recipes, registry
+from autoharness import agents, config, recipes, registry
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected, parse_skill_spec
 from autoharness.trust import curated_report, score_registry_entry, score_skill
@@ -126,8 +126,18 @@ def cmd_inspect(args, project, catalog):
     return 0
 
 
+def already_kept(project, kind: str, name: str) -> int:
+    out({"status": "ok", "already_installed": name, "kept": project.kept()[kind][name].get("task"),
+         "next": "An earlier task kept this in the project; use it as is."})
+    return 0
+
+
 def cmd_add(args, project, catalog):
     task = project.task()
+    if args.kind == "mcp" and (args.as_name or local_mcp_name(args.name)) in project.kept()["mcp"]:
+        return already_kept(project, "mcp", args.as_name or local_mcp_name(args.name))
+    if args.kind == "skill" and parse_skill_spec(args.name)[1] in project.kept()["skills"]:
+        return already_kept(project, "skills", parse_skill_spec(args.name)[1])
     if args.kind == "mcp":
         report, source = resolve_mcp(catalog, args.name)
         if not report["config"]:
@@ -163,28 +173,61 @@ def cmd_add(args, project, catalog):
 
 
 def cmd_remove(args, project, catalog):
-    task = project.task()
-    if args.kind == "mcp":
+    """Remove from the active task if it added this, else from what earlier tasks kept in the project."""
+    task = project.task() if project.active_id() else None
+    if task and args.kind == "mcp" and args.name in task.mcp_lock():
         task.remove_mcp(args.name)
-    else:
+    elif task and args.kind == "skill" and args.name in task.skills_lock():
         task.remove_skill(args.name)
+    else:
+        out({"status": "ok"} | project.remove_kept("mcp" if args.kind == "mcp" else "skills", args.name))
+        return 0
     out({"status": "ok", "removed": args.name})
     return 0
 
 
+def cmd_prune(args, project, catalog):
+    out({"status": "ok", "removed": project.prune()})
+    return 0
+
+
+def kept_summary(project) -> dict:
+    kept = project.kept()
+    return {"mcp": {k: {"task": v.get("task"), "agent": v.get("agent")} for k, v in kept["mcp"].items()},
+            "skills": {k: {"spec": v["spec"], "task": v.get("task")} for k, v in kept["skills"].items()}}
+
+
 def cmd_status(args, project, catalog):
+    if not args.task_id and not project.active_id():
+        out({"task": None, "kept": kept_summary(project)})
+        return 0
     task = project.task(args.task_id)
     out({"task": task.info(), "mcp": task.mcp_lock(),
          "skills": {k: {"spec": v["spec"], "trust": v["trust"]} for k, v in task.skills_lock().items()},
-         "log": (task.dir / "harness.md").read_text("utf-8")})
+         "kept": kept_summary(project), "log": (task.dir / "harness.md").read_text("utf-8")})
     return 0
 
 
 def cmd_teardown(args, project, catalog):
     task = project.task(args.task_id)
     saved = str(recipes.save(task, args.save_recipe, args.notes or "")) if args.save_recipe else None
-    removed = [] if args.keep else task.teardown()
-    out({"status": "ok", "removed": removed, "recipe_saved": saved})
+    policy, source = config.teardown_policy(project.root, args.policy)
+    result = task.teardown(policy)
+    kept = result["kept"]["mcp"] + result["kept"]["skills"]
+    out({"status": "ok", "policy": policy, "policy_source": source} | result | {"recipe_saved": saved,
+         "next": (f"Tell the user these stay installed in the project: {', '.join(kept)}. "
+                  "They can remove one with `autoharness remove mcp|skill <name>`, or all with `autoharness prune`."
+                  if kept else "Tell the user what was removed.")})
+    return 0
+
+
+def cmd_config(args, project, catalog):
+    if args.action == "set":
+        if not args.value:
+            raise HarnessError("usage: autoharness config set <key> <value> [--global]")
+        config.set_value(config.global_path() if args.glob else config.project_path(project.root), args.key, args.value)
+    keys = [args.key] if args.key else list(config.SETTINGS)
+    out({k: dict(zip(("value", "source"), config.resolve(project.root, k))) for k in keys})
     return 0
 
 
@@ -254,16 +297,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--approve", action="store_true", help="the user explicitly approved this")
     s.add_argument("--force", action="store_true", help="install a skill despite high-severity scan findings")
     s.add_argument("--as", dest="as_name", help="local name for the MCP server")
-    s = sub.add_parser("remove", help="remove something this task added")
+    s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")
-    s = sub.add_parser("status", help="show the active task harness")
+    sub.add_parser("prune", help="remove everything earlier tasks kept in the project")
+    s = sub.add_parser("status", help="show the active task harness and what the project keeps")
     s.add_argument("task_id", nargs="?")
-    s = sub.add_parser("teardown", help="remove everything the task added")
+    s = sub.add_parser("teardown", help="end the task: keep its harness in the project, or remove it (setting `teardown`)")
     s.add_argument("task_id", nargs="?")
     s.add_argument("--save-recipe", metavar="NAME")
     s.add_argument("--notes")
-    s.add_argument("--keep", action="store_true", help="save the recipe but keep the harness")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--keep", dest="policy", action="store_const", const="keep", help="keep it installed in the project")
+    g.add_argument("--remove", dest="policy", action="store_const", const="remove", help="uninstall everything it added")
+    s = sub.add_parser("config", help="show or change settings (project, or --global)")
+    s.add_argument("action", choices=["get", "set"])
+    s.add_argument("key", nargs="?", choices=list(config.SETTINGS))
+    s.add_argument("value", nargs="?")
+    s.add_argument("--global", dest="glob", action="store_true", help="change ~/.autoharness/config.json")
     s = sub.add_parser("recipe", help="saved harness recipes")
     s.add_argument("action", choices=["list", "match", "show"])
     s.add_argument("value", nargs="?", default="")
@@ -275,7 +326,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect,
-            "add": cmd_add, "remove": cmd_remove, "status": cmd_status, "teardown": cmd_teardown,
+            "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
+            "teardown": cmd_teardown, "config": cmd_config,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents}
 
 

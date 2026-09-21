@@ -89,10 +89,17 @@ resume from where you were.
 ### 6. Finish
 
 1. Verify the result with the capabilities you installed. Run the checks; don't assume them.
-2. If the setup was useful, save it:
+2. End the task. If the setup was useful, save it as a recipe too:
    `autoharness teardown --save-recipe <short-name> --notes "<what it was good for>"`
    Otherwise `autoharness teardown`.
-3. Tell the user what you installed, what you removed, and anything left for
-   them to do (such as unsetting env vars or restarting to unload MCP servers).
+   What happens to the harness follows the `teardown` setting
+   (`autoharness config get`): `keep` (the default) leaves it installed in the
+   project for later tasks, `remove` uninstalls it. Pass `--keep` or `--remove`
+   only when the user asked for that.
+3. Tell the user what you installed, what stayed in the project and what was
+   removed, and anything left for them to do (such as unsetting env vars or
+   restarting to unload MCP servers). Kept items come off with
+   `autoharness remove mcp|skill <name>`, or all at once with `autoharness prune`.
 
-`autoharness status` shows the current harness and its log at any time.
+If `add` answers `already_installed`, an earlier task kept that item: use it.
+`autoharness status` shows the current harness, what the project keeps, and the log.
