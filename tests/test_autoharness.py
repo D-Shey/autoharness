@@ -550,3 +550,54 @@ def test_library_list_skips_broken_meta(tmp_path, lib_home):
     library.meta_path("pptx-qa").write_text("{broken", "utf-8")
     entries, warnings = library.list_skills()
     assert entries == [] and warnings and "pptx-qa" in warnings[0]
+
+
+from autoharness.env import parse_skill_spec
+
+
+def test_parse_local_spec():
+    assert parse_skill_spec("local:pptx-qa") == ("local", "pptx-qa")
+    with pytest.raises(HarnessError):
+        parse_skill_spec("local:Bad_Name")
+
+
+def test_new_skill_writes_template_and_lock(project):
+    task = project.init_task("t")
+    path = task.new_skill("pptx-qa", "Check .pptx slides visually")
+    assert path == project.skills_dir / "pptx-qa"
+    assert library.FILL_MARKER in (path / "SKILL.md").read_text("utf-8")
+    entry = task.skills_lock()["pptx-qa"]
+    assert entry["spec"] == "local:pptx-qa" and entry["source"] == "generated"
+
+
+def test_new_skill_refuses_taken_names(project):
+    (project.skills_dir / "mine").mkdir(parents=True)
+    library.save(write_skill(project.root / "src", "in-lib", FILLED.replace("pptx-qa", "in-lib")),
+                 {"description": "d", "capabilities": []})
+    task = project.init_task("t")
+    for name in ["mine", "in-lib", "Bad"]:
+        with pytest.raises(HarnessError):
+            task.new_skill(name, "d")
+
+
+def test_teardown_reports_and_backs_up_unsaved_generated(project):
+    task = project.init_task("t")
+    task.new_skill("pptx-qa", "d")
+    (project.skills_dir / "pptx-qa" / "SKILL.md").write_text(FILLED, "utf-8")
+    res = task.teardown("remove")
+    backup = task.dir / "generated-skills" / "pptx-qa"
+    assert res["unsaved_generated"] == [{"name": "pptx-qa", "backup": str(backup)}]
+    assert (backup / "SKILL.md").read_text("utf-8") == FILLED
+    assert not (project.skills_dir / "pptx-qa").exists()
+
+    task2 = project.init_task("t2")
+    task2.new_skill("other-qa", "d")
+    assert task2.teardown("keep")["unsaved_generated"] == [{"name": "other-qa", "backup": None}]
+
+
+def test_teardown_has_no_unsaved_key_when_generated_skill_was_saved(project):
+    task = project.init_task("t")
+    path = task.new_skill("pptx-qa", "d")
+    (path / "SKILL.md").write_text(FILLED, "utf-8")
+    library.save(path, {"description": "d", "capabilities": []})
+    assert "unsaved_generated" not in task.teardown("remove")

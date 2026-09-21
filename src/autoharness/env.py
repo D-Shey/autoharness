@@ -107,9 +107,13 @@ def _uninstall_skill(dest: Path, sha256: str, backup: Path) -> bool:
 
 
 def parse_skill_spec(spec: str) -> tuple[str, str]:
-    """`owner/repo@skill` -> (`owner/repo`, `skill`)."""
+    """`owner/repo@skill` -> (`owner/repo`, `skill`); `local:<name>` -> (`local`, `<name>`)."""
+    if spec.startswith("local:"):
+        from autoharness import library  # lazy: library imports env
+        library.validate_name(spec[len("local:"):])
+        return "local", spec[len("local:"):]
     if "@" not in spec or spec.count("/") < 1:
-        raise HarnessError(f"skill spec must look like owner/repo@skill, got {spec!r}")
+        raise HarnessError(f"skill spec must look like owner/repo@skill or local:<name>, got {spec!r}")
     repo, skill = spec.rsplit("@", 1)
     return repo, skill
 
@@ -338,6 +342,27 @@ class Task:
         _write_json(self.dir / "skills.lock.json", lock)
         self.log(f"removed skill `{skill}`")
 
+    def new_skill(self, name: str, description: str) -> Path:
+        """Scaffold a skill the agent will write itself; it is tracked like any installed skill."""
+        from autoharness import library  # lazy: library imports env
+        library.validate_name(name)
+        dest = self.skills_dir / name
+        if dest.exists():
+            raise HarnessError(f"{self.agent.skills_dir}/{name} already exists")
+        if library.exists(name):
+            raise HarnessError(f"skill {name!r} is already in the library; install it with `add skill local:{name}`")
+        if name in self.project.kept()["skills"]:
+            raise HarnessError(f"skill {name!r} is already kept in this project")
+        dest.mkdir(parents=True)
+        (dest / "SKILL.md").write_text(library.template(name, description), "utf-8")
+        lock = self.skills_lock()
+        lock[name] = {"spec": f"local:{name}", "source": "generated", "sha256": _hash_dir(dest),
+                      "trust": {"level": "high", "score": 100}, "findings": [],
+                      "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        _write_json(self.dir / "skills.lock.json", lock)
+        self.log(f"created skill `{name}` to write down what this task learned")
+        return dest
+
     # --- lifecycle -----------------------------------------------------------
 
     def _created_mcp_config(self) -> dict | None:
@@ -364,10 +389,19 @@ class Task:
 
     def teardown(self, policy: str = "keep") -> dict:
         """End the task. `keep` leaves its harness installed at project level, `remove` uninstalls it."""
+        from autoharness import library  # lazy: library imports env
         nothing = {"mcp": [], "skills": []}
+        unsaved = [s for s, e in self.skills_lock().items() if e.get("source") == "generated"
+                   and not library.exists(s) and (self.skills_dir / s).exists()]
+        backups = {}
         if policy == "keep":
             result = {"removed": nothing, "kept": self._keep_all()}
         elif policy == "remove":
+            for skill in unsaved:
+                backups[skill] = self.dir / "generated-skills" / skill
+                shutil.copytree(self.skills_dir / skill, backups[skill], dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns(*RUNTIME_JUNK))
+                self.log(f"skill `{skill}` was never saved to the library; copied to {backups[skill]}")
             removed = {"mcp": list(self.mcp_lock()), "skills": list(self.skills_lock())}
             for name in removed["mcp"]:
                 self.remove_mcp(name)
@@ -376,6 +410,9 @@ class Task:
             result = {"removed": removed, "kept": nothing}
         else:
             raise HarnessError(f"unknown teardown policy {policy!r}")
+        if unsaved:
+            result["unsaved_generated"] = [{"name": s, "backup": str(backups[s]) if s in backups else None}
+                                           for s in unsaved]
         self._update_info(status="kept" if policy == "keep" else "torn-down",
                           finished=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.log(f"teardown complete (policy: {policy})")
