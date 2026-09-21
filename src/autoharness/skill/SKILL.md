@@ -72,7 +72,8 @@ autoharness add skill <owner/repo@skill>
   user which env var to set.
 - If `add mcp` answers `via: gateway`, the server works right away: call
   `harness_tools` to see it, then `harness_call(server, tool, arguments)`, or the
-  native `<server>__<tool>` tools if your client shows them. No restart.
+  native `<server>__<tool>` tools if your client shows them (Claude Code lists them as
+  deferred tools: load them with tool search first). No restart.
 - Otherwise new MCP servers load at session start. They are written to `{{MCP_FILE}}`.
   After adding one, tell the user to {{RELOAD}}, then continue the parts of
   the task that don't depend on it. If `add` suggests `autoharness gateway install`,
