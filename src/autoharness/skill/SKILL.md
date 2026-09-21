@@ -1,13 +1,14 @@
 ---
 name: autoharness
-description: Use at the start of any non-trivial task in a bare agent setup, and whenever you are blocked because a tool or know-how is missing (not because you need to think harder). Figures out which capabilities the task needs, finds and vets MCP servers and skills, installs them for this task only, and removes them afterwards.
+description: Use at the start of any non-trivial task in a bare agent setup, and whenever you are blocked because a tool or know-how is missing (not because you need to think harder). Figures out which capabilities the task needs, finds and vets MCP servers and skills, installs them for the task, and at the end keeps them in the project or removes them (configurable).
 ---
 
 # AutoHarness
 
 You start almost bare. Instead of expecting a pre-built harness, you build one
-for this task, use it, and take it down afterwards. The `autoharness` CLI does
-the bookkeeping (lockfiles, trust checks, teardown); you do the thinking.
+for this task and use it; when the task ends it stays in the project or is
+taken down, as configured. The `autoharness` CLI does the bookkeeping
+(lockfiles, trust checks, teardown); you do the thinking.
 
 Every command prints JSON. Exit code `3` means **stop and ask the user**.
 
