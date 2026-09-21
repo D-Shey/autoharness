@@ -70,9 +70,13 @@ autoharness add skill <owner/repo@skill>
   one. Use `--force` only if the user read the findings and insists.
 - Never paste secrets into commands or files. When a server needs one, tell the
   user which env var to set.
-- New MCP servers load at session start. They are written to `{{MCP_FILE}}`.
+- If `add mcp` answers `via: gateway`, the server works right away: call
+  `harness_tools` to see it, then `harness_call(server, tool, arguments)`, or the
+  native `<server>__<tool>` tools if your client shows them. No restart.
+- Otherwise new MCP servers load at session start. They are written to `{{MCP_FILE}}`.
   After adding one, tell the user to {{RELOAD}}, then continue the parts of
-  the task that don't depend on it.
+  the task that don't depend on it. If `add` suggests `autoharness gateway install`,
+  offer it to the user once: one last restart, and later servers need none.
 
 ### 4. Smoke-test
 

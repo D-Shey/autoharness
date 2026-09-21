@@ -1016,3 +1016,9 @@ def test_cli_add_mcp_suggests_the_gateway(project, capsys):
     cli_json(capsys, "--project", root, "init", "t")
     code, res = cli_json(capsys, "--project", root, "add", "mcp", "fetch")
     assert code == 0 and "via" not in res and "gateway install" in res["next"]
+
+
+def test_bootstrap_skill_teaches_the_gateway():
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    assert "harness_tools" in text and "harness_call" in text and "gateway install" in text

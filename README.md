@@ -63,6 +63,8 @@ remote-серверы становятся `httpUrl`/`url`, для Codex сек�
 | `teardown [--keep\|--remove] [--save-recipe NAME --notes ...]` | завершает задачу по политике `teardown` |
 | `config get\|set [teardown keep\|remove] [--global]` | настройки |
 | `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
+| `gateway install\|uninstall\|status\|serve` | один MCP-сервер autoharness, через который новые серверы работают без перезапуска |
+| `add mcp <name> --direct` | мимо gateway, сразу в конфиг агента |
 | `recipe list\|match\|show` | сохранённые наборы |
 | `agents` | поддерживаемые агенты и их пути |
 
@@ -106,6 +108,26 @@ autoharness add skill local:pptx-qa         # в другом проекте
 ссылается на такой skill как `local:<name>`; `need` показывает skills из библиотеки
 с подходящей capability.
 
+## Gateway: серверы без перезапуска
+
+```bash
+autoharness gateway install     # один раз; после этого — последний перезапуск агента
+autoharness add mcp fetch       # доступен сразу: harness_tools / harness_call
+autoharness gateway status      # что запущено и что упало
+```
+
+Gateway — MCP-сервер `autoharness` в конфиге агента. Он запускает серверы из
+`.autoharness/gateway.json` (туда `add mcp` пишет, когда gateway установлен) и отдаёт агенту
+два неизменных инструмента: `harness_tools` (серверы и их инструменты со схемами) и
+`harness_call(server, tool, arguments)`. Они работают в любом агенте. Дополнительно gateway
+отдаёт родные инструменты `<server>__<tool>` и шлёт `tools/list_changed`, но на сентябрь 2026
+Claude Code, Codex и Gemini CLI обрабатывают это уведомление с ошибками, поэтому основной
+путь — мета-инструменты.
+
+Через gateway идут локальные серверы и HTTP-серверы с заголовками (токен из env).
+Серверы с OAuth-входом и `add mcp --direct` пишутся в конфиг агента, как раньше.
+Секреты подставляются из окружения процесса агента; лог — `.autoharness/gateway.log`.
+
 ## Безопасность
 
 - **Курированный каталог** (`src/autoharness/data/catalog.json`) — доверенная база.
@@ -126,9 +148,10 @@ autoharness add skill local:pptx-qa         # в другом проекте
 
 ## Ограничения MVP
 
-- Новые MCP-серверы агенты подхватывают только при старте сессии (Claude Code ещё через `/mcp`),
-  так что hot-load в середине задачи требует перезапуска. Следующий шаг — gateway-MCP,
-  который проксирует динамически добавленные серверы без рестарта.
+- Gateway не умеет OAuth-вход и устаревший SSE-транспорт: такие серверы по-прежнему пишутся
+  в конфиг агента и требуют перезапуска. Уведомления от HTTP-серверов gateway не слушает.
+- Родные инструменты `<server>__<tool>` появляются только в агентах, которые правильно
+  обрабатывают `tools/list_changed`; мета-инструменты работают везде.
 - Классификация задачи — подсказка по ключевым словам: сравнение идёт по словам с учётом русских
   и английских окончаний (`text.py`), без стеммера и без LLM. Если подсказок нет, `init` отдаёт
   список всех capabilities, и выбирает агент.
