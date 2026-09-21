@@ -78,6 +78,13 @@
       "skills": [],
       "search": ["svg illustration", "visual review"]
     },
+    "skill-authoring": {
+      "description": "Write a new skill when no existing one fits: when it triggers, the steps, how to verify.",
+      "keywords": ["skill", "скилл", "скил", "навык"],
+      "mcp": [],
+      "skills": ["anthropics/skills@skill-creator"],
+      "search": ["skill creator"]
+    },
     "mcp-development": {
       "description": "Build new MCP servers.",
       "keywords": ["mcp server", "build mcp", "model context protocol"],

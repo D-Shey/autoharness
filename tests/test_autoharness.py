@@ -1194,7 +1194,8 @@ def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
 
 
 BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--constraints", "no generators",
-         "--verify", "render and compare side by side", "--candidates", "svg-art: skip, it is a generator"]
+         "--verify", "render and compare side by side", "--candidates", "svg-art: skip, it is a generator",
+         "--gaps", "none: a browser and the shell cover every capability"]
 
 
 def brief(capsys, project, *extra):
@@ -1320,3 +1321,63 @@ def test_init_discovery_respects_its_time_budget(project, capsys, monkeypatch):
     mcp = [d for d in res["discovered"] if d["kind"] == "mcp"]
     assert mcp and all("timed out" in d["error"] for d in mcp)
     assert any(d.get("results") for d in res["discovered"] if d["kind"] == "skill")
+
+
+# --- no fitting skill: create one, use it, save it ---------------------------
+
+def start_task(capsys, project, gaps):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "draw a film scene in svg")
+    args = [a if a != "none: a browser and the shell cover every capability" else gaps for a in BRIEF]
+    return cli_json(capsys, "--project", root, "brief", *args)
+
+
+def test_brief_records_skills_to_create(project, capsys):
+    code, res = start_task(capsys, project, "create svg-scene-review: visual-review; create film-still-search: refs")
+    assert code == 0 and res["planned_skills"] == ["svg-scene-review", "film-still-search"]
+    assert "autoharness skill new svg-scene-review" in res["next"]
+    assert project.task().info()["planned_skills"] == ["svg-scene-review", "film-still-search"]
+
+
+def test_brief_gaps_must_create_or_say_none(project, capsys):
+    code, res = start_task(capsys, project, "we will see")
+    assert code == 1 and "create <skill-name>" in res["error"]
+
+
+def test_teardown_refuses_while_a_planned_skill_is_missing_or_unfilled(project, capsys, lib_home):
+    root = str(project.root)
+    start_task(capsys, project, "create svg-scene-review: visual-review")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and res["status"] == "incomplete" and "never created" in res["problems"][0]
+    assert project.active_id()  # the task stays open
+    cli_json(capsys, "--project", root, "skill", "new", "svg-scene-review", "--description", "review an svg scene")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "unfilled template" in res["problems"][0]
+    skill_md = project.root / ".claude/skills/svg-scene-review/SKILL.md"
+    skill_md.write_text(skill_md.read_text("utf-8").replace("<!-- autoharness: fill in -->", "Render and compare."), "utf-8")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0 and any("not in the library" in w for w in res["warnings"])
+
+
+def test_teardown_force_drops_a_planned_skill_with_a_warning(project, capsys):
+    root = str(project.root)
+    start_task(capsys, project, "create svg-scene-review: visual-review")
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert code == 0 and any("never created" in w for w in res["warnings"])
+
+
+def test_skill_authoring_capability_is_curated():
+    names = {c.name for c, _ in Catalog.load().classify("если скила нет, создай новый skill")}
+    assert "skill-authoring" in names
+    assert "anthropics/skills@skill-creator" in Catalog.load().capabilities["skill-authoring"].skills
+
+
+def test_fallback_query_skips_filler_words():
+    qs = cli.discovery_queries(Catalog.load(), "но у нас же было задумано что если надо переделать отчёт")
+    assert qs and not {"было", "задумано", "если", "надо"} & set(qs[0].split())
+
+
+def test_bootstrap_skill_teaches_creating_a_missing_skill_mid_task():
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    assert "--gaps" in text and "create <skill-name>" in text and "before producing" in text

@@ -93,7 +93,7 @@ def discovery_queries(catalog: Catalog, task_text: str) -> list[str]:
     for cap, matched in caps:
         queries += cap.search[1:2] + [" ".join(matched[:2])]
     if not queries:
-        queries.append(" ".join([w for w in text.words(task_text) if len(w) > 3 and w not in text.STOP][:5]))
+        queries.append(" ".join([w for w in text.words(task_text) if len(w) >= 5 and w not in text.STOP][:4]))
     return list(dict.fromkeys(q for q in queries if q.strip()))[:DISCOVERY_QUERIES]
 
 
@@ -166,8 +166,10 @@ def cmd_init(args, project, catalog):
         "Read `discovered`: these skills and MCP servers were found for this task. Search more with "
         "`autoharness search mcp|skill \"<query>\"` where it falls short. Then record "
         "`autoharness brief --goal ... --inputs ... --constraints ... --verify ... --candidates ...`, "
-        "with a take/skip verdict and reason for each candidate worth considering. Tools that do work "
-        "stay blocked until the brief is recorded.")
+        "with a take/skip verdict and reason for each candidate worth considering, and `--gaps`: for each "
+        "capability no found skill covers, `create <skill-name>: <capability>` (you write that skill before "
+        "producing the result), or `none: <why tools at hand cover it>`. Tools that do work stay blocked until "
+        "the brief is recorded.")
     if not suggested:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
     out(result)
@@ -208,15 +210,29 @@ def cmd_search(args, project, catalog):
     return 0
 
 
+CREATE_RE = re.compile(r"\bcreate\s+`?([a-z0-9][a-z0-9-]{1,63})`?")
+
+
 def cmd_brief(args, project, catalog):
     task = project.task()
+    planned = list(dict.fromkeys(CREATE_RE.findall(args.gaps)))
+    if not planned and not args.gaps.strip().lower().startswith("none"):
+        raise HarnessError("--gaps must name each skill you will create (`create <skill-name>: <capability>`) "
+                           "or start with `none:` and say why the tools at hand cover every capability")
+    for name in planned:
+        library.validate_name(name)
     task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
-                       "verify": args.verify, "candidates": args.candidates})
+                       "verify": args.verify, "candidates": args.candidates, "gaps": args.gaps})
+    task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
         "no search ran for this task; run `autoharness search skill|mcp \"<query>\"` before deciding nothing fits"]
-    out({"status": "ok", "task_id": task.id, "warnings": warnings,
-         "next": "Install what you decided to take, get the missing inputs first, then do the work and verify it "
-                 "the way the brief says."})
+    create = "".join(f" Create `{n}` now: `autoharness skill new {n} --description \"<when to use it>\"`, fill in "
+                     f"When to use / Steps / How to verify from what you found, then follow it for this task and "
+                     f"update it as you learn." for n in planned)
+    out({"status": "ok", "task_id": task.id, "planned_skills": planned, "warnings": warnings,
+         "next": "Install what you decided to take and get the missing inputs first." + create
+                 + " Then do the work and verify it the way the brief says. Teardown refuses while a planned "
+                   "skill is missing or unfilled."})
     return 0
 
 
@@ -332,6 +348,13 @@ def cmd_teardown(args, project, catalog):
                     for v in task.skills_lock().values()
                     if v["spec"].startswith("local:") and not library.exists(parse_skill_spec(v["spec"])[1])]
     info = task.info()
+    blocking, skill_warnings = task.planned_skill_problems()
+    if blocking and not args.force:
+        out({"status": "incomplete", "task_id": task.id, "problems": blocking,
+             "next": "Create and fill the skills the brief planned, then tear down again. Use --force only if the "
+                     "user agreed to drop them."})
+        return 1
+    warnings += blocking + skill_warnings
     if not task.discovery_ran():
         warnings.append("no discovery ran: no skill or MCP search was made for this task")
     if not info.get("brief"):
@@ -405,8 +428,10 @@ def cmd_skill(args, project, catalog):
             raise HarnessError("skill new needs --description: when should an agent use this skill?")
         path = project.task().new_skill(args.name, args.description)
         out({"status": "ok", "created": str(path),
-             "next": "Fill in every section of SKILL.md with what you learned, generalised: no absolute paths, "
-                     "secrets or people's names. Then run `autoharness skill save " + args.name + "`."})
+             "next": "Fill in every section of SKILL.md now, generalised (no absolute paths, secrets or people's "
+                     "names), from the references, docs and findings you have. It is your procedure for this task: "
+                     "follow it, and update it when you learn something. At the end run `autoharness skill save "
+                     + args.name + "` and ask the user."})
         return 0
 
     # save
@@ -668,6 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task_id", nargs="?")
     s.add_argument("--save-recipe", metavar="NAME")
     s.add_argument("--notes")
+    s.add_argument("--force", action="store_true", help="tear down although a planned skill is missing")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--keep", dest="policy", action="store_const", const="keep", help="keep it installed in the project")
     g.add_argument("--remove", dest="policy", action="store_const", const="remove", help="uninstall everything it added")
@@ -691,7 +717,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="install for every supported agent")
     sub.add_parser("hook", help="Claude Code UserPromptSubmit hook: reads the hook JSON on stdin")
     s = sub.add_parser("brief", help="record what a good result is, what is missing, and the verdict on candidates")
-    for flag, what in [("--goal", "what a good result looks like (the quality bar)"),
+    for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
+                                  "or `none: <why>`"),
+                       ("--goal", "what a good result looks like (the quality bar)"),
                        ("--inputs", "missing inputs and how you will get them (references, docs, data)"),
                        ("--constraints", "the user's constraints, verbatim"),
                        ("--verify", "how the result will be checked, and against what"),

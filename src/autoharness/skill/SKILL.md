@@ -87,12 +87,29 @@ Before producing anything, write down what you decided:
 ```bash
 autoharness brief --goal "<quality bar>" --inputs "<missing inputs and how you get them>" \
   --constraints "<the user's constraints, verbatim>" --verify "<checks, against what>" \
-  --candidates "<name>: take|skip, why; <name>: ...; searched: <queries>"
+  --candidates "<name>: take|skip, why; <name>: ...; searched: <queries>" \
+  --gaps "create <skill-name>: <capability>; ..."   # or: "none: <why tools at hand cover it>"
 ```
 
 Give a verdict for every discovered candidate that is plausibly relevant (skip the
 obvious noise in one phrase). Tools that do work are blocked until the brief exists.
 Show the user the brief in a few lines when you start.
+
+**No fitting skill? Create it now.** For every capability that no found skill covers
+and that takes real know-how (a procedure, a verification trick, domain rules), plan
+a skill in `--gaps` as `create <skill-name>: <capability>`. Use `none:` only when
+plain tools you already have cover everything. Then, before producing the result:
+
+1. `autoharness skill new <skill-name> --description "<when an agent should use it>"`.
+   For how to write a good skill, `anthropics/skills@skill-creator` is the curated guide
+   (`autoharness need skill-authoring`); a skill-writing skill you already have works too.
+2. Fill in When to use / Steps / How to verify from what you found: the references,
+   current docs, the user's constraints, the checks from your brief. Write it for any
+   project: no absolute paths, secrets, or names of people or clients.
+3. Follow it for this task, step by step, and update it whenever you learn something
+   (a step that did not work, a better check).
+
+Teardown refuses while a planned skill is missing or still an unfilled template.
 
 ### 4. Vet and install
 
@@ -152,13 +169,12 @@ resume from where you were.
    them, and repeat. One render is not a review: plan several rounds and stop when the
    remaining differences are small or cannot be fixed with the chosen medium. Tell
    the user which ones remain.
-2. If you learned something reusable that no installed skill covers (how to build or
-   check this kind of project, a verification trick, an API quirk), write it down:
-   `autoharness skill new <name> --description "<when to use it>"`, fill in every
-   section, then `autoharness skill save <name>`. It answers exit code 3: show the user
+2. Save the skills you created: bring each one up to date with what the task taught
+   you, then `autoharness skill save <name>`. If you learned something else reusable that
+   no skill covers (how to build or check this kind of project, an API quirk), write it
+   down the same way with `autoharness skill new`. Save answers exit code 3: show the user
    the name, description and warnings, and re-run with `--approve` only after a clear
-   yes. Write it for any project: no absolute paths, secrets, or names of people or
-   clients. If save reports `blocked`, remove what it flags.
+   yes. If save reports `blocked`, remove what it flags.
 3. End the task. If the setup was useful, save it as a recipe too:
    `autoharness teardown --save-recipe <short-name> --notes "<what it was good for>"`
    Otherwise `autoharness teardown`. If teardown warns that discovery or the brief

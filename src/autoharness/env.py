@@ -334,6 +334,23 @@ class Task:
         self._update_info(brief=brief)
         self.log("brief: " + "; ".join(f"{k}: {v}" for k, v in brief.items()))
 
+    def planned_skill_problems(self) -> tuple[list[str], list[str]]:
+        """(blocking, warnings) for the skills the brief said this task would create."""
+        from autoharness import library  # lazy: library imports env
+        blocking, warnings = [], []
+        lock = self.skills_lock()
+        for name in self.info().get("planned_skills", []):
+            skill_md = self.skills_dir / name / "SKILL.md"
+            if name not in lock:
+                blocking.append(f"planned skill `{name}` was never created: run `autoharness skill new {name} "
+                                f"--description ...`, fill it in and follow it")
+            elif skill_md.exists() and library.FILL_MARKER in skill_md.read_text("utf-8"):
+                blocking.append(f"planned skill `{name}` is still an unfilled template: fill in every section")
+            elif not library.exists(name):
+                warnings.append(f"planned skill `{name}` is not in the library: run `autoharness skill save {name}` "
+                                f"and ask the user; say so if they declined")
+        return blocking, warnings
+
     def discovery_ran(self) -> bool:
         info = self.info()
         return bool(info.get("searches")) or any("skipped" not in d for d in info.get("discovery", []))
@@ -456,7 +473,7 @@ class Task:
                       "trust": {"level": "high", "score": 100}, "findings": [],
                       "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
         _write_json(self.dir / "skills.lock.json", lock)
-        self.log(f"created skill `{name}` to write down what this task learned")
+        self.log(f"created skill `{name}`")
         return dest
 
     # --- lifecycle -----------------------------------------------------------
