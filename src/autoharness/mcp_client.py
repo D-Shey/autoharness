@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 from typing import Callable, Mapping
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
@@ -168,8 +170,71 @@ class StdioClient(_Client):
             proc.wait(timeout=3)
 
 
+class HttpClient(_Client):
+    transport = "http"
+
+    def start(self) -> None:
+        self._cfg = expand_secrets(self.config)
+        self.session: str | None = None
+        self._handshake()
+
+    def alive(self) -> bool:
+        return True
+
+    def _post(self, msg: dict) -> dict | None:
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                   **self._cfg.get("headers", {})}
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        if msg.get("method") != "initialize":
+            headers["MCP-Protocol-Version"] = self.protocol_version
+        req = urllib.request.Request(self._cfg["url"], data=json.dumps(msg).encode("utf-8"),
+                                     headers=headers, method="POST")
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout_s())
+        except urllib.error.HTTPError as e:
+            raise McpError(f"{self.name}: HTTP {e.code} {e.reason}") from e
+        except OSError as e:
+            raise McpError(f"{self.name}: {e}") from e
+        with resp:
+            self.session = resp.headers.get("Mcp-Session-Id") or self.session
+            if "id" not in msg or resp.status == 202:
+                return None
+            if resp.headers.get("Content-Type", "").startswith("text/event-stream"):
+                data: list[str] = []
+                for raw in resp:
+                    line = raw.decode("utf-8").rstrip("\r\n")
+                    if line.startswith("data:"):
+                        data.append(line[5:].lstrip())
+                    elif not line and data:
+                        event = json.loads("\n".join(data))
+                        data = []
+                        if event.get("id") == msg["id"] and ("result" in event or "error" in event):
+                            return event
+                raise McpError(f"{self.name}: event stream ended without a response")
+            return json.loads(resp.read().decode("utf-8"))
+
+    def request(self, method: str, params: dict | None = None) -> dict:
+        msg = self._post({"jsonrpc": "2.0", "id": self._new_id(), "method": method, "params": params or {}})
+        return self._raise_for(method, msg or {})
+
+    def notify(self, method: str, params: dict | None = None) -> None:
+        self._post({"jsonrpc": "2.0", "method": method, **({"params": params} if params else {})})
+
+    def close(self) -> None:
+        if getattr(self, "session", None):
+            req = urllib.request.Request(self._cfg["url"], method="DELETE",
+                                         headers={"Mcp-Session-Id": self.session, **self._cfg.get("headers", {})})
+            try:
+                urllib.request.urlopen(req, timeout=5).close()
+            except OSError:
+                pass
+
+
 def make_client(name: str, config: dict, log: Callable[[str], None] = _nothing,
                 on_tools_changed: Callable[[str], None] = _nothing, stderr=None) -> _Client:
     if "command" in config:
         return StdioClient(name, config, log, on_tools_changed, stderr)
+    if config.get("type") == "http":
+        return HttpClient(name, config, log, on_tools_changed, stderr)
     raise McpError(f"{name}: unsupported transport; only stdio and http servers go through the gateway")

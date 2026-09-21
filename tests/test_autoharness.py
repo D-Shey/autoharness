@@ -732,3 +732,68 @@ def test_stdio_client_command_not_found():
     assert isinstance(mcp_client.make_client("x", FAKE_CFG), mcp_client.StdioClient)
     with pytest.raises(mcp_client.McpError):
         mcp_client.make_client("x", {"type": "sse", "url": "https://x.io/sse"})
+
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class FakeHttpMcp(BaseHTTPRequestHandler):
+    def do_POST(self):
+        msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.seen.append(({k.lower(): v for k, v in self.headers.items()}, msg))
+        if "id" not in msg:
+            self.send_response(202)
+            self.end_headers()
+            return
+        extra = {}
+        if msg["method"] == "initialize":
+            result = {"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "fake-http", "version": "1"}}
+            extra["Mcp-Session-Id"] = "s-1"
+        elif msg["method"] == "tools/list":
+            result = {"tools": [{"name": "echo", "description": "Echo", "inputSchema": {"type": "object"}}]}
+        else:
+            result = {"content": [{"type": "text", "text": msg["params"]["arguments"]["text"]}]}
+        body = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+        if self.server.sse and msg["method"] == "tools/call":
+            data, ctype = f"event: message\ndata: {body}\n\n".encode(), "text/event-stream"
+        else:
+            data, ctype = body.encode(), "application/json"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in extra.items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_DELETE(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def http_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHttpMcp)
+    server.seen, server.sse = [], False
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server
+    server.shutdown()
+
+
+def test_http_client_json_and_sse(http_server, monkeypatch):
+    monkeypatch.setenv("FAKE_TOKEN", "t0k")
+    url = f"http://127.0.0.1:{http_server.server_port}/mcp"
+    c = mcp_client.make_client("remote", {"type": "http", "url": url, "headers": {"Authorization": "Bearer ${FAKE_TOKEN}"}})
+    assert isinstance(c, mcp_client.HttpClient)
+    c.start()
+    assert [t["name"] for t in c.list_tools()] == ["echo"]
+    http_server.sse = True
+    assert c.call_tool("echo", {"text": "via sse"})["content"][0]["text"] == "via sse"
+    c.close()
+    headers = [h for h, _ in http_server.seen]
+    assert all(h["authorization"] == "Bearer t0k" for h in headers)
+    assert headers[-1]["mcp-session-id"] == "s-1" and headers[-1]["mcp-protocol-version"]
