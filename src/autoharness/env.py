@@ -18,6 +18,7 @@ teardown never touches servers or skills the user set up by hand.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import shutil
@@ -57,10 +58,18 @@ def _write_json(path: Path, data) -> None:
     tmp.replace(path)
 
 
+# Files a skill's own scripts or the OS create at runtime; they are not user edits.
+RUNTIME_JUNK = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "*.pyc", ".DS_Store", "Thumbs.db")
+
+
+def _is_junk(rel: Path) -> bool:
+    return any(part == pat or fnmatch.fnmatch(part, pat) for part in rel.parts for pat in RUNTIME_JUNK)
+
+
 def _hash_dir(root: Path) -> str:
     h = hashlib.sha256()
     for p in sorted(root.rglob("*")):
-        if p.is_file():
+        if p.is_file() and not _is_junk(p.relative_to(root)):
             h.update(str(p.relative_to(root)).replace("\\", "/").encode())
             h.update(p.read_bytes())
     return h.hexdigest()
@@ -270,7 +279,8 @@ class Task:
         if dest.exists():
             if _hash_dir(dest) != lock[skill]["sha256"]:
                 self.log(f"skill `{skill}` was modified after install; kept a backup")
-                shutil.copytree(dest, self.dir / "modified-skills" / skill, dirs_exist_ok=True)
+                shutil.copytree(dest, self.dir / "modified-skills" / skill, dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns(*RUNTIME_JUNK))
             shutil.rmtree(dest)
         del lock[skill]
         _write_json(self.dir / "skills.lock.json", lock)

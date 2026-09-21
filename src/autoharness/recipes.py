@@ -14,7 +14,10 @@ from pathlib import Path
 
 from autoharness.env import Task
 
-WORD = re.compile(r"[\w-]{3,}", re.UNICODE)
+WORD = re.compile(r"[^\W_]{3,}", re.UNICODE)
+STEM = 5  # crude stemming by prefix: "сделай"/"сделать", "презентацию"/"презентация" meet
+STOP = {"the", "and", "for", "with", "from", "into", "this", "that",
+        "для", "как", "что", "это", "или", "при", "без", "все", "под"}
 
 
 def home() -> Path:
@@ -28,7 +31,7 @@ def recipes_dir() -> Path:
 
 
 def _tokens(text: str) -> set[str]:
-    return {w.lower() for w in WORD.findall(text)}
+    return {w[:STEM] for w in (m.lower() for m in WORD.findall(text)) if w not in STOP}
 
 
 def save(task: Task, name: str, notes: str = "") -> Path:
@@ -56,13 +59,15 @@ def load_all() -> list[dict]:
 
 
 def match(task_text: str, limit: int = 3) -> list[tuple[float, dict]]:
-    """Rank saved recipes by Jaccard overlap between task words and the recipe's example + capabilities."""
+    """Rank saved recipes by the share of task words found in the recipe's example, capabilities and notes.
+
+    Containment rather than Jaccard, so long notes widen what a recipe matches instead of diluting its score."""
     want = _tokens(task_text)
     scored = []
     for r in load_all():
         have = _tokens(r.get("task_example", "") + " " + " ".join(r.get("capabilities", [])) + " " + r.get("notes", ""))
         if want and have:
-            score = len(want & have) / len(want | have)
+            score = len(want & have) / len(want)
             if score > 0:
                 scored.append((round(score, 3), r))
     scored.sort(key=lambda s: s[0], reverse=True)

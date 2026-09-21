@@ -148,7 +148,11 @@ SKILL_PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("high", "instructs the agent to hide actions", re.compile(r"(do not|don't|never) (tell|inform|mention to) the user|without (telling|asking) the user", re.I)),
     ("medium", "decodes obfuscated payloads", re.compile(r"base64\s+(-d|--decode)|FromBase64String|atob\(", re.I)),
     ("medium", "posts data to a remote endpoint", re.compile(r"curl[^\n]*(-d|--data|-F|-X\s*POST)|requests\.post\(|fetch\([^)]*method:\s*['\"]POST", re.I)),
-    ("medium", "dumps environment variables", re.compile(r"\bprintenv\b|os\.environ(?!\.get)|process\.env\b(?!\.)", re.I)),
+    # Whole-environment dumps only: copying the env for a subprocess or reading one variable is ordinary.
+    ("medium", "dumps environment variables", re.compile(
+        r"\bprintenv\b|\b(Get-ChildItem|gci|dir|ls)\s+env:|os\.environ\.items\(\)|Object\.(entries|keys)\(process\.env\)"
+        r"|\b(print|pprint|dumps?|repr|str|write|log|stringify|send|post)\s*\([^)\n]*\b(os\.environ|process\.env)\b(?!\s*[.\[])",
+        re.I)),
     ("low", "disables safety checks", re.compile(r"--no-verify|--dangerously|bypassPermissions", re.I)),
 ]
 
