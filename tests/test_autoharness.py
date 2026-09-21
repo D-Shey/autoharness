@@ -1117,8 +1117,8 @@ def test_hook_points_the_agent_at_autoharness_for_a_matching_task(project, capsy
     assert "autoharness" in ctx and "visual-reference" in ctx and "visual-review" in ctx
 
 
-@pytest.mark.parametrize("prompt", ["да", "ok thanks", "hello there, how are you today?"])
-def test_hook_stays_silent_for_short_or_unmatched_prompts(project, capsys, monkeypatch, prompt):
+@pytest.mark.parametrize("prompt", ["да", "ok thanks", "сделай коммит"])
+def test_hook_stays_silent_for_short_replies(project, capsys, monkeypatch, prompt):
     assert run_hook(capsys, monkeypatch, project, prompt) == (0, None)
 
 
@@ -1145,9 +1145,12 @@ def test_install_hook_merges_and_removes_cleanly(tmp_path, capsys):
     assert data["model"] == "opus"
     cmds = [h["command"] for e in data["hooks"]["UserPromptSubmit"] for h in e["hooks"]]
     assert cmds.count("autoharness hook") == 1 and "echo mine" in cmds
+    pre = data["hooks"]["PreToolUse"]
+    assert len(pre) == 1 and pre[0]["matcher"] == cli.PRE_TOOL_MATCHER and pre[0]["hooks"][0]["command"] == "autoharness hook"
     code, res = cli_json(capsys, "install-hook", "--settings", str(settings), "--remove")
     data = json.loads(settings.read_text("utf-8"))
     assert [h["command"] for e in data["hooks"]["UserPromptSubmit"] for h in e["hooks"]] == ["echo mine"]
+    assert "PreToolUse" not in data["hooks"] and res["status"] == "removed"
 
 
 def test_bootstrap_skill_description_does_not_require_a_bare_setup():
@@ -1166,3 +1169,68 @@ def test_bootstrap_skill_frontmatter_is_plain_yaml():
     for line in front:
         key, value = line.split(": ", 1)
         assert ": " not in value and " #" not in value, key
+
+
+# --- session gate: every real task goes through autoharness -------------------
+
+def hook_event(capsys, monkeypatch, project, **payload):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    code = cli.main(["--project", str(project.root), "hook"])
+    raw = capsys.readouterr().out
+    assert code == 0
+    return json.loads(raw) if raw.strip() else None
+
+
+def prompt(capsys, monkeypatch, project, text, sid="s1"):
+    return hook_event(capsys, monkeypatch, project, hook_event_name="UserPromptSubmit", session_id=sid, prompt=text)
+
+
+def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
+    res = hook_event(capsys, monkeypatch, project, hook_event_name="PreToolUse", session_id=sid,
+                     tool_name=name, tool_input=tool_input)
+    return res and res["hookSpecificOutput"]["permissionDecision"]
+
+
+def test_gate_blocks_work_until_the_skill_is_invoked(project, capsys, monkeypatch):
+    res = prompt(capsys, monkeypatch, project, "fix the flaky login form in the settings page")
+    assert "autoharness waive s1" in res["hookSpecificOutput"]["additionalContext"]
+    for name, inp in [("Write", {"file_path": "x"}), ("Edit", {}), ("Bash", {"command": "ls"}),
+                      ("mcp__playwright__browser_navigate", {})]:
+        assert tool(capsys, monkeypatch, project, name, **inp) == "deny", name
+    assert tool(capsys, monkeypatch, project, "Read") is None
+    assert tool(capsys, monkeypatch, project, "Bash", command="autoharness --agent claude init x") is None
+    assert tool(capsys, monkeypatch, project, "Write") == "deny"  # a CLI call alone does not open the gate
+    assert tool(capsys, monkeypatch, project, "Skill", skill="autoharness") is None
+    assert tool(capsys, monkeypatch, project, "Write") is None
+    # once done, later prompts in the session are left alone
+    assert prompt(capsys, monkeypatch, project, "now also update the readme with the new steps") is None
+    assert tool(capsys, monkeypatch, project, "Edit") is None
+
+
+def test_gate_accepts_plugin_qualified_skill_name(project, capsys, monkeypatch):
+    prompt(capsys, monkeypatch, project, "draw a logo for the new product page")
+    assert tool(capsys, monkeypatch, project, "Skill", skill="someplugin:autoharness") is None
+    assert tool(capsys, monkeypatch, project, "Write") is None
+
+
+def test_gate_opens_when_a_task_is_active(project, capsys, monkeypatch):
+    prompt(capsys, monkeypatch, project, "draw a logo for the new product page")
+    project.init_task("draw a logo")
+    assert tool(capsys, monkeypatch, project, "Write") is None
+
+
+def test_gate_is_per_session_and_waivable(project, capsys, monkeypatch):
+    prompt(capsys, monkeypatch, project, "draw a logo for the new product page", sid="a")
+    assert tool(capsys, monkeypatch, project, "Write", sid="b") is None  # other session untouched
+    code, res = cli_json(capsys, "--project", str(project.root), "waive", "a", "--reason", "user: no autoharness")
+    assert code == 0 and res["status"] == "waived"
+    assert tool(capsys, monkeypatch, project, "Write", sid="a") is None
+    assert prompt(capsys, monkeypatch, project, "and another longer request here", sid="a") is None
+    from autoharness import recipes as rec
+    assert "user: no autoharness" in (rec.home() / "waivers.log").read_text("utf-8")
+
+
+def test_short_replies_do_not_start_the_gate(project, capsys, monkeypatch):
+    assert prompt(capsys, monkeypatch, project, "да") is None
+    assert tool(capsys, monkeypatch, project, "Write") is None

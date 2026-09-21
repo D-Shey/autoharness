@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
+import time
 from importlib import resources
 from pathlib import Path
 
@@ -387,58 +389,135 @@ def cmd_install_skill(args, project, catalog):
 
 HOOK_COMMAND = "autoharness hook"
 HOOK_MIN_WORDS = 4
+# tools that do work; reading and tool discovery stay open so the agent can look around
+GATED_TOOLS = re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|mcp__.*)$")
+PRE_TOOL_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Skill|mcp__.*"
 
 
-def hook_context(catalog: Catalog, prompt: str) -> str | None:
-    """The reminder a prompt hook injects, or None when the prompt gives no reason for one."""
+def session_file(session_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", session_id)[:80]
+    return recipes.home() / "sessions" / f"{safe}.json"
+
+
+def session_state(session_id: str) -> dict:
+    try:
+        return json.loads(session_file(session_id).read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def set_session_state(session_id: str, **state) -> None:
+    f = session_file(session_id)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(state, ensure_ascii=False), "utf-8")
+
+
+def hook_context(catalog: Catalog, prompt: str, session_id: str = "") -> str | None:
+    """The reminder a prompt hook injects, or None for short replies."""
     if len(text.words(prompt)) < HOOK_MIN_WORDS:
         return None
     caps = catalog.classify(prompt)
-    if not caps:
-        return None
-    listed = "; ".join(f"{c.name} ({c.description})" for c, _ in caps)
-    return ("autoharness: this task likely needs these capabilities: " + listed + ". "
-            "Before starting, invoke the `autoharness` skill: it asks what a good result looks like, "
-            "which inputs are missing (references, docs, data), what the user's constraints are, "
-            "and how the result will be verified. Skip it only if the task is trivial.")
+    listed = ("This task likely needs: " + "; ".join(f"{c.name} ({c.description})" for c, _ in caps) + ". "
+              if caps else "")
+    gate = (f" Until then Write, Edit, shell and MCP tools are blocked. Only if the user explicitly said not to "
+            f"use autoharness, run `autoharness waive {session_id} --reason \"<their words>\"`." if session_id else "")
+    return ("autoharness: invoke the `autoharness` skill as your first step, before producing anything. "
+            + listed + "It works out what a good result looks like, which inputs are missing (references, docs, "
+            "data), what the user's constraints are, and how the result will be verified." + gate)
+
+
+def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
+    if tool == "Skill":
+        return str(tool_input.get("skill", "")).split(":")[-1] == "autoharness"
+    return tool in ("Bash", "PowerShell") and str(tool_input.get("command", "")).lstrip().startswith("autoharness")
 
 
 def cmd_hook(args, project, catalog):
-    """UserPromptSubmit hook: point the agent at autoharness when the prompt matches the catalog.
+    """Claude Code hook for UserPromptSubmit and PreToolUse: make every real task go through autoharness.
 
-    Must never break the user's prompt, so every failure is silent.
+    The first substantial prompt of a session puts it in `pending`; tools that do work are denied until the
+    agent invokes the skill, starts a task, or the user waives it. Must never break the session, so any
+    internal failure lets the call through.
     """
     try:
-        prompt = json.loads(sys.stdin.read() or "{}").get("prompt", "")
-        if project.active_id():
-            return 0  # a harness is already being built for this task
-        ctx = hook_context(catalog, prompt)
-    except Exception:  # noqa: BLE001 - a hook must not fail the prompt
+        data = json.loads(sys.stdin.read() or "{}")
+        event = data.get("hook_event_name", "UserPromptSubmit")
+        sid = str(data.get("session_id") or "")
+        state = session_state(sid).get("state") if sid else None
+        if project.active_id():  # a harness is already being built here
+            if sid and state != "done":
+                set_session_state(sid, state="done", via="active task")
+            return 0
+        if event == "UserPromptSubmit":
+            if state in ("done", "waived"):
+                return 0
+            ctx = hook_context(catalog, data.get("prompt", ""), sid)
+            if not ctx:
+                return 0
+            if sid:
+                set_session_state(sid, state="pending", prompt=data.get("prompt", "")[:300])
+            out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+            return 0
+        if event == "PreToolUse":
+            tool, tool_input = data.get("tool_name", ""), data.get("tool_input") or {}
+            if _is_autoharness_call(tool, tool_input):
+                # the skill itself opens the gate; its CLI calls just pass (init opens it via the active task)
+                if sid and state == "pending" and tool == "Skill":
+                    set_session_state(sid, state="done", via=tool)
+                return 0
+            if state == "pending" and GATED_TOOLS.match(tool):
+                out({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "autoharness first: invoke the `autoharness` skill (Skill tool) before using " + tool + ". "
+                        "Reading files is still allowed. If the user explicitly said not to use it, run "
+                        f"`autoharness waive {sid} --reason \"<their words>\"` and tell the user.")}})
         return 0
-    if ctx:
-        out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+    except Exception:  # noqa: BLE001 - a hook must not break the session
+        return 0
+
+
+def cmd_waive(args, project, catalog):
+    set_session_state(args.session_id, state="waived", reason=args.reason)
+    log = recipes.home() / "waivers.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "session": args.session_id,
+                            "project": str(project.root), "reason": args.reason}, ensure_ascii=False) + "\n")
+    out({"status": "waived", "session": args.session_id,
+         "next": "Tell the user autoharness was skipped for this session, and why."})
     return 0
 
 
 def install_hook(settings: Path, remove: bool = False) -> str:
-    """Add or remove the prompt hook in a Claude Code settings file, keeping everything else."""
+    """Add or remove the autoharness hooks in a Claude Code settings file, keeping everything else."""
     data = json.loads(settings.read_text("utf-8")) if settings.exists() else {}
-    entries = data.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+    hooks = data.setdefault("hooks", {})
     ours = lambda h: h.get("command") == HOOK_COMMAND  # noqa: E731
-    present = any(ours(h) for e in entries for h in e.get("hooks", []))
-    if remove:
-        for e in entries:
-            e["hooks"] = [h for h in e.get("hooks", []) if not ours(h)]
-        data["hooks"]["UserPromptSubmit"] = [e for e in entries if e["hooks"]]
-        status = "removed" if present else "not_installed"
-    elif present:
-        return "already_installed"
-    else:
-        entries.append({"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 10}]})
-        status = "installed"
+    wanted = {"UserPromptSubmit": None, "PreToolUse": PRE_TOOL_MATCHER}
+    changed = False
+    for event, matcher in wanted.items():
+        entries = hooks.setdefault(event, [])
+        mine = [e for e in entries if any(ours(h) for h in e.get("hooks", []))]
+        if remove or (mine and mine[0].get("matcher") != matcher):
+            for e in mine:
+                e["hooks"] = [h for h in e["hooks"] if not ours(h)]
+            hooks[event] = entries = [e for e in entries if e.get("hooks")]
+            changed = changed or bool(mine)
+            mine = []
+        if not remove and not mine:
+            entry = {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 10}]}
+            if matcher:
+                entry = {"matcher": matcher, **entry}
+            entries.append(entry)
+            changed = True
+        if not hooks[event]:
+            del hooks[event]
+    if not changed:
+        return "not_installed" if remove else "already_installed"
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", "utf-8")
-    return status
+    return "removed" if remove else "installed"
 
 
 def cmd_install_hook(args, project, catalog):
@@ -522,6 +601,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--user", action="store_true", help="install to the agent's user skills dir instead of the project")
     s.add_argument("--all", action="store_true", help="install for every supported agent")
     sub.add_parser("hook", help="Claude Code UserPromptSubmit hook: reads the hook JSON on stdin")
+    s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
+    s.add_argument("session_id")
+    s.add_argument("--reason", required=True, help="the user's words")
     s = sub.add_parser("install-hook", help="add the prompt hook to Claude Code settings (project, or --user)")
     s.add_argument("--user", action="store_true", help="~/.claude/settings.json instead of the project")
     s.add_argument("--settings", help="explicit settings file")
@@ -534,7 +616,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
-            "hook": cmd_hook, "install-hook": cmd_install_hook}
+            "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive}
 
 
 def main(argv: list[str] | None = None) -> int:

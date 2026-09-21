@@ -12,6 +12,11 @@ taken down, as configured. The `autoharness` CLI does the bookkeeping
 
 Every command prints JSON. Exit code `3` means **stop and ask the user**.
 
+If `autoharness install-hook` was run, a hook sends every substantial request of a
+session here first: until you invoke this skill (or start a task with `init`), tools
+that do work are blocked, while reading files stays open. Skip it only when the user
+explicitly said so: `autoharness waive <session id> --reason "<their words>"`, then tell them.
+
 ## Loop
 
 ```
