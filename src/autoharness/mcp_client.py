@@ -97,6 +97,7 @@ class StdioClient(_Client):
             raise McpError(f"command not found: {cfg['command']}")
         self._pending: dict[int, dict] = {}
         self._write_lock = threading.Lock()
+        self._eof = False
         self.proc = subprocess.Popen([exe, *cfg.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.stderr if self.stderr is not None else subprocess.DEVNULL,
                                      env={**os.environ, **cfg.get("env", {})})
@@ -104,7 +105,8 @@ class StdioClient(_Client):
         self._handshake()
 
     def alive(self) -> bool:
-        return getattr(self, "proc", None) is not None and self.proc.poll() is None
+        # stdout reaching EOF is the first sign of a dead server; poll() can lag behind it
+        return getattr(self, "proc", None) is not None and not self._eof and self.proc.poll() is None
 
     def _send(self, msg: dict) -> None:
         data = (json.dumps(msg) + "\n").encode("utf-8")
@@ -134,6 +136,7 @@ class StdioClient(_Client):
                     pass
             elif msg.get("method") == "notifications/tools/list_changed":
                 threading.Thread(target=self.on_tools_changed, args=(self.name,), daemon=True).start()
+        self._eof = True
         for rid in list(self._pending):
             slot = self._pending.pop(rid, None)
             if slot:

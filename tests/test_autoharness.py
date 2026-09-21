@@ -858,3 +858,80 @@ def test_old_state_gitignore_is_upgraded(project):
     (project.state / ".gitignore").write_text("*\n!.gitignore\n!config.json\n!kept.json\n", "utf-8")
     project.init_task("t")
     assert "!gateway.json" in (project.state / ".gitignore").read_text("utf-8").split()
+
+
+from autoharness import gateway
+
+
+def make_gateway(root):
+    sent = []
+    return gateway.Gateway(root, sent.append, lambda line: None), sent
+
+
+def rpc(gw, method, params=None, rid=1):
+    return gw.handle({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+
+
+def call(gw, name, args=None):
+    return rpc(gw, "tools/call", {"name": name, "arguments": args or {}})["result"]
+
+
+def settled(gw):
+    return all(s["status"] != "starting" for s in gw.status.values())
+
+
+def test_gateway_meta_and_native_tools(project):
+    project.save_gateway_registry({"installed": ["claude"], "servers": {"fake": FAKE_CFG}})
+    gw, sent = make_gateway(project.root)
+    init = rpc(gw, "initialize", {"protocolVersion": "2025-06-18"})["result"]
+    assert init["protocolVersion"] == "2025-06-18" and init["capabilities"]["tools"]["listChanged"] is True
+    assert rpc(gw, "initialize", {"protocolVersion": "1999-01-01"})["result"]["protocolVersion"] == mcp_client.PROTOCOL_VERSIONS[0]
+    assert gw.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    assert gw.sync()
+    wait_for(lambda: gw.status.get("fake", {}).get("status") == "running")
+    assert {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"} in sent
+    names = [t["name"] for t in rpc(gw, "tools/list")["result"]["tools"]]
+    assert names[:2] == ["harness_tools", "harness_call"] and "fake__echo" in names
+    described = json.loads(call(gw, "harness_tools")["content"][0]["text"])
+    assert described["servers"]["fake"]["status"] == "running"
+    assert {"name": "echo", "native_name": "fake__echo"}.items() <= described["servers"]["fake"]["tools"][0].items()
+    assert call(gw, "harness_call", {"server": "fake", "tool": "echo", "arguments": {"text": "a"}})["content"][0]["text"] == "a"
+    assert call(gw, "fake__echo", {"text": "b"})["content"][0]["text"] == "b"
+    assert call(gw, "nope__x")["isError"] and call(gw, "harness_call", {"server": "ghost", "tool": "x"})["isError"]
+    assert rpc(gw, "ping")["result"] == {} and rpc(gw, "resources/list")["error"]["code"] == -32601
+    assert json.loads((project.state / "gateway.state.json").read_text("utf-8"))["servers"]["fake"]["status"] == "running"
+
+    call(gw, "fake__add_tool")                                   # the server's own list_changed
+    wait_for(lambda: any(t["name"] == "extra" for t in gw.tools["fake"]))
+    sent.clear()
+    project.save_gateway_registry({"installed": ["claude"], "servers": {}})
+    assert gw.sync() and sent
+    assert "fake__echo" not in [t["name"] for t in rpc(gw, "tools/list")["result"]["tools"]]
+    gw.close_all()
+
+
+def test_gateway_reports_errors_and_recovers(project, monkeypatch):
+    monkeypatch.delenv("NO_SUCH_TOKEN", raising=False)
+    project.save_gateway_registry({"installed": [], "servers": {
+        "needs-secret": {**FAKE_CFG, "env": {"T": "${NO_SUCH_TOKEN}"}},
+        "missing": {"command": "definitely-not-a-command-xyz"},
+        "fake": FAKE_CFG}})
+    gw, _ = make_gateway(project.root)
+    gw.sync()
+    wait_for(lambda: settled(gw) and len(gw.status) == 3)
+    servers = json.loads(call(gw, "harness_tools")["content"][0]["text"])["servers"]
+    assert "NO_SUCH_TOKEN" in servers["needs-secret"]["error"] and "not found" in servers["missing"]["error"]
+    assert call(gw, "fake__crash")["isError"]
+    assert call(gw, "fake__echo", {"text": "back"})["content"][0]["text"] == "back"      # restarted once
+    monkeypatch.setenv("AUTOHARNESS_GATEWAY_TIMEOUT", "0.5")
+    assert "timed out" in call(gw, "fake__slow", {"seconds": 3})["content"][0]["text"]
+    (project.state / "gateway.json").write_text("{broken", "utf-8")
+    assert not gw.sync() and gw.registry_error and "fake" in gw.status
+    gw.close_all()
+
+
+def test_find_project(tmp_path):
+    (tmp_path / ".autoharness").mkdir()
+    (tmp_path / ".autoharness" / "gateway.json").write_text("{}", "utf-8")
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    assert gateway.find_project(tmp_path / "a" / "b") == tmp_path
