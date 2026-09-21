@@ -24,7 +24,7 @@ analyse task → capabilities → reuse recipe? → discover → vet → install
 ### 1. Analyse and start
 
 ```bash
-autoharness init "<the user's task, verbatim>"
+autoharness --agent {{AGENT}} init "<the user's task, verbatim>"
 ```
 
 The output has keyword `suggested` capabilities and matching `recipes`. Treat
@@ -67,8 +67,8 @@ autoharness add skill <owner/repo@skill>
   one. Use `--force` only if the user read the findings and insists.
 - Never paste secrets into commands or files. When a server needs one, tell the
   user which env var to set.
-- New MCP servers load at session start. After adding one, tell the user to
-  restart the session or run `/mcp` and approve it, then continue the parts of
+- New MCP servers load at session start. They are written to `{{MCP_FILE}}`.
+  After adding one, tell the user to {{RELOAD}}, then continue the parts of
   the task that don't depend on it.
 
 ### 4. Smoke-test

@@ -12,7 +12,7 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-from autoharness import recipes, registry
+from autoharness import agents, recipes, registry
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected, parse_skill_spec
 from autoharness.trust import curated_report, score_registry_entry, score_skill
@@ -80,7 +80,9 @@ def cmd_plan(args, project, catalog):
 
 def cmd_init(args, project, catalog):
     task = project.init_task(args.task)
+    agent = task.agent
     out({"status": "ok", "task_id": task.id, "dir": str(task.dir),
+         "agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
          "suggested": suggestions(catalog, catalog.classify(args.task)),
          "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
                       "mcp": list(r["mcp"]), "skills": r["skills"]} for s, r in recipes.match(args.task)]})
@@ -133,13 +135,16 @@ def cmd_add(args, project, catalog):
         if report["requires_approval"] and not args.approve:
             return need_approval(f"add MCP server {args.name}", report)
         local = args.as_name or local_mcp_name(args.name)
-        task.add_mcp(local, report["config"], source=source, permissions=report["permissions"],
-                     trust={"score": report["score"], "level": report["level"]})
+        warnings = task.add_mcp(local, report["config"], source=source, permissions=report["permissions"],
+                                trust={"score": report["score"], "level": report["level"]})
         secrets = report["permissions"].get("secrets", [])
-        out({"status": "ok", "added": local, "config": report["config"],
+        agent = task.agent
+        out({"status": "ok", "added": local, "agent": agent.name, "file": agent.mcp_file,
+             "config": agent.translate(report["config"])[0], "warnings": warnings,
              "secrets_to_set": secrets,
-             "next": "MCP servers load at session start: ask the user to restart Claude Code (or run /mcp) and approve the project server."
-                     + (f" The user must set env vars: {', '.join(secrets)}." if secrets else "")})
+             "next": f"MCP servers load at session start: ask the user to {agent.reload_hint}."
+                     + (f" The user must set env vars: {', '.join(secrets)}." if secrets else "")
+                     + (" Resolve the warnings before relying on this server." if warnings else "")})
     else:
         report = resolve_skill(catalog, args.name)
         if report["requires_approval"] and not args.approve:
@@ -153,7 +158,7 @@ def cmd_add(args, project, catalog):
             return 1
         out({"status": "ok", "added": parse_skill_spec(args.name)[1],
              "scan_findings": [f.__dict__ for f in findings],
-             "next": "Skill is in .claude/skills; invoke it by name (restart the session if it does not show up)."})
+             "next": f"Skill is in {task.agent.skills_dir}; invoke it by name (restart the session if it does not show up)."})
     return 0
 
 
@@ -199,18 +204,34 @@ def cmd_recipe(args, project, catalog):
 
 
 def cmd_install_skill(args, project, catalog):
-    src = resources.files("autoharness").joinpath("skill/SKILL.md")
-    base = Path.home() / ".claude" / "skills" if args.user else project.skills_dir
-    dest = base / "autoharness" / "SKILL.md"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(src.read_text("utf-8"), "utf-8")
-    out({"status": "ok", "installed": str(dest)})
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    names = list(agents.AGENTS) if args.all else [project.agent.name]
+    installed = {}
+    for name in names:
+        agent = agents.AGENTS[name]
+        base = agent.user_skills_path() if args.user else agent.skills_path(project.root)
+        dest = base / "autoharness" / "SKILL.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text.replace("{{AGENT}}", agent.name).replace("{{MCP_FILE}}", agent.mcp_file)
+                        .replace("{{RELOAD}}", agent.reload_hint), "utf-8")
+        installed[name] = str(dest)
+    out({"status": "ok", "installed": installed})
+    return 0
+
+
+def cmd_agents(args, project, catalog):
+    detected = agents.detect()
+    out({"detected": detected, "default": agents.DEFAULT_AGENT,
+         "agents": {a.name: {"title": a.title, "mcp_config": a.mcp_file, "skills_dir": a.skills_dir,
+                             "user_skills_dir": "~/" + a.user_skills_dir} for a in agents.AGENTS.values()}})
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="autoharness", description=__doc__.split("\n")[0])
     p.add_argument("--project", default=".", help="project root (default: cwd)")
+    p.add_argument("--agent", choices=list(agents.AGENTS),
+                   help="target coding agent (default: the task's agent, else $AUTOHARNESS_AGENT, else auto-detect, else claude)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("plan", help="suggest capabilities for a task (no side effects)")
@@ -247,20 +268,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", choices=["list", "match", "show"])
     s.add_argument("value", nargs="?", default="")
     s = sub.add_parser("install-skill", help="install the autoharness bootstrap skill")
-    s.add_argument("--user", action="store_true", help="install to ~/.claude/skills instead of the project")
+    s.add_argument("--user", action="store_true", help="install to the agent's user skills dir instead of the project")
+    s.add_argument("--all", action="store_true", help="install for every supported agent")
+    s = sub.add_parser("agents", help="supported agents and where they keep MCP servers and skills")
     return p
 
 
 COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect,
             "add": cmd_add, "remove": cmd_remove, "status": cmd_status, "teardown": cmd_teardown,
-            "recipe": cmd_recipe, "install-skill": cmd_install_skill}
+            "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents}
 
 
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
-    project = Project(Path(args.project).resolve())
+    project = Project(Path(args.project).resolve(), args.agent)
     try:
         return COMMANDS[args.cmd](args, project, Catalog.load())
     except HarnessError as e:

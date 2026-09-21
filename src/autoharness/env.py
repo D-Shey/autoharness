@@ -6,8 +6,9 @@ Layout inside a project:
         active                  id of the current task
         tasks/<id>/
             task.json           task text, status, capabilities
-            mcp.lock.json       MCP servers this task added to .mcp.json
-            skills.lock.json    skills this task added to .claude/skills
+            task.json           also records which agent the task targets
+            mcp.lock.json       MCP servers this task added (canonical config)
+            skills.lock.json    skills this task added to the agent's skills dir
             permissions.json    what each capability was granted
             harness.md          human-readable event log
 
@@ -27,11 +28,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from autoharness import agents
+from autoharness.agents import Agent, AgentError
 from autoharness.trust import ScanFinding, is_blocking, scan_skill
 
 
 class HarnessError(Exception):
     pass
+
+
+def _agent(name: str | None) -> Agent:
+    try:
+        return agents.get(name)
+    except AgentError as e:
+        raise HarnessError(str(e)) from e
 
 
 def _read_json(path: Path, default):
@@ -84,18 +94,23 @@ Stager = Callable[[str, str, Path], Path]
 @dataclass
 class Project:
     root: Path
+    agent_name: str | None = None   # None: detect from the environment
 
     @property
     def state(self) -> Path:
         return self.root / ".autoharness"
 
     @property
-    def mcp_json(self) -> Path:
-        return self.root / ".mcp.json"
+    def agent(self) -> Agent:
+        return _agent(self.agent_name)
+
+    @property
+    def mcp_path(self) -> Path:
+        return self.agent.mcp_path(self.root)
 
     @property
     def skills_dir(self) -> Path:
-        return self.root / ".claude" / "skills"
+        return self.agent.skills_path(self.root)
 
     def active_id(self) -> str | None:
         p = self.state / "active"
@@ -108,6 +123,8 @@ class Project:
         t = Task(self, task_id)
         if not t.dir.exists():
             raise HarnessError(f"unknown task {task_id}")
+        if self.agent_name and self.agent_name != t.agent.name:
+            raise HarnessError(f"task {task_id} targets {t.agent.name}, not {self.agent_name}")
         return t
 
     def init_task(self, text: str) -> "Task":
@@ -115,7 +132,7 @@ class Project:
             raise HarnessError(f"task {active} is still active; run `autoharness teardown` first")
         task_id = time.strftime("%Y%m%d-%H%M%S") + "-" + hashlib.sha1(text.encode()).hexdigest()[:6]
         t = Task(self, task_id)
-        _write_json(t.dir / "task.json", {"id": task_id, "task": text, "status": "active",
+        _write_json(t.dir / "task.json", {"id": task_id, "task": text, "agent": self.agent.name, "status": "active",
                                           "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "capabilities": []})
         _write_json(t.dir / "mcp.lock.json", {})
         _write_json(t.dir / "skills.lock.json", {})
@@ -139,6 +156,14 @@ class Task:
 
     def info(self) -> dict:
         return _read_json(self.dir / "task.json", {})
+
+    @property
+    def agent(self) -> Agent:
+        return _agent(self.info().get("agent", "claude"))  # tasks from before adapters were Claude-only
+
+    @property
+    def skills_dir(self) -> Path:
+        return self.agent.skills_path(self.project.root)
 
     def _update_info(self, **fields) -> None:
         info = self.info()
@@ -169,32 +194,45 @@ class Task:
 
     # --- MCP -----------------------------------------------------------------
 
-    def add_mcp(self, name: str, config: dict, *, source: str, trust: dict, permissions: dict) -> None:
-        if not self.project.mcp_json.exists():
-            self._update_info(created_mcp_json=True)
-        mcp = _read_json(self.project.mcp_json, {"mcpServers": {}})
-        servers = mcp.setdefault("mcpServers", {})
+    def add_mcp(self, name: str, config: dict, *, source: str, trust: dict, permissions: dict) -> list[str]:
+        """Write `config` (canonical form) into the agent's MCP file; returns translation warnings."""
+        agent = self.agent
+        store = agent.mcp_store(self.project.root)
+        path = agent.mcp_path(self.project.root)
         lock = self.mcp_lock()
-        if name in servers and name not in lock:
-            raise HarnessError(f"MCP server {name!r} already exists in .mcp.json and is not managed by autoharness")
-        servers[name] = config
-        _write_json(self.project.mcp_json, mcp)
-        lock[name] = {"config": config, "source": source, "trust": trust,
+        if name not in lock and store.has(name):
+            raise HarnessError(f"MCP server {name!r} already exists in {agent.mcp_file} and is not managed by autoharness")
+        created = self.info().get("created_mcp_config", {})
+        if not path.exists() and agent.name not in created:
+            created[agent.name] = {"dir": not path.parent.exists()}
+            self._update_info(created_mcp_config=created)
+        native, warnings = agent.translate(config)
+        try:
+            store.add(name, native)
+        except AgentError as e:
+            raise HarnessError(str(e)) from e
+        lock[name] = {"config": config, "source": source, "trust": trust, "agent": agent.name,
                       "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
         _write_json(self.dir / "mcp.lock.json", lock)
         self._grant(f"mcp:{name}", permissions)
-        self.log(f"added MCP `{name}` from {source} (trust {trust.get('level')}, {trust.get('score')})")
+        self.log(f"added MCP `{name}` to {agent.mcp_file} from {source} (trust {trust.get('level')}, {trust.get('score')})")
+        for w in warnings:
+            self.log(f"warning for `{name}`: {w}")
+        return warnings
 
     def remove_mcp(self, name: str) -> None:
         lock = self.mcp_lock()
         if name not in lock:
             raise HarnessError(f"MCP server {name!r} was not added by this task")
-        mcp = _read_json(self.project.mcp_json, {"mcpServers": {}})
-        mcp.get("mcpServers", {}).pop(name, None)
-        if not mcp.get("mcpServers") and set(mcp) <= {"mcpServers"} and self.info().get("created_mcp_json"):
-            self.project.mcp_json.unlink(missing_ok=True)
-        else:
-            _write_json(self.project.mcp_json, mcp)
+        agent = self.agent
+        created = self.info().get("created_mcp_config", {}).get(agent.name)
+        if created is None and self.info().get("created_mcp_json"):  # lockfiles from before adapters
+            created = {"dir": False}
+        try:
+            agent.mcp_store(self.project.root).remove(name, created_file=created is not None,
+                                                      created_dir=bool(created and created["dir"]))
+        except AgentError as e:
+            raise HarnessError(str(e)) from e
         del lock[name]
         _write_json(self.dir / "mcp.lock.json", lock)
         self.log(f"removed MCP `{name}`")
@@ -204,10 +242,10 @@ class Task:
     def add_skill(self, spec: str, *, trust: dict, force: bool = False,
                   stage: Stager = npx_stage_skill) -> list[ScanFinding]:
         repo, skill = parse_skill_spec(spec)
-        dest = self.project.skills_dir / skill
+        dest = self.skills_dir / skill
         lock = self.skills_lock()
         if dest.exists() and skill not in lock:
-            raise HarnessError(f"skill {skill!r} already exists in .claude/skills and is not managed by autoharness")
+            raise HarnessError(f"skill {skill!r} already exists in {self.agent.skills_dir} and is not managed by autoharness")
         with tempfile.TemporaryDirectory(prefix="autoharness-stage-") as tmp:
             staged = stage(repo, skill, Path(tmp))
             findings = scan_skill(staged)
@@ -228,7 +266,7 @@ class Task:
         lock = self.skills_lock()
         if skill not in lock:
             raise HarnessError(f"skill {skill!r} was not added by this task")
-        dest = self.project.skills_dir / skill
+        dest = self.skills_dir / skill
         if dest.exists():
             if _hash_dir(dest) != lock[skill]["sha256"]:
                 self.log(f"skill `{skill}` was modified after install; kept a backup")
