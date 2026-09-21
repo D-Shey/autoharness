@@ -13,7 +13,7 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, config, library, recipes, registry
+from autoharness import agents, config, library, recipes, registry, text
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected, Task, npx_stage_skill, parse_skill_spec
 from autoharness.trust import curated_report, score_registry_entry, score_skill
@@ -109,8 +109,11 @@ def cmd_need(args, project, catalog):
     if cap:
         out({"status": "ok", "capability": cap.name, "curated": {"mcp": cap.mcp, "skills": cap.skills}, "local": local})
     else:
-        out({"status": "ok", "capability": args.capability, "curated": None, "local": local,
-             "next": f"No curated entry. Try `autoharness search mcp \"{args.capability}\"` and `autoharness search skill \"{args.capability}\"`."})
+        # the name may just be phrased differently from a curated capability
+        related = suggestions(catalog, catalog.classify(f"{args.capability.replace('-', ' ')} {args.reason or ''}"))
+        out({"status": "ok", "capability": args.capability, "curated": None, "local": local, "related": related,
+             "next": ("No curated entry under this name. Check `related` first; if none fits, try "
+                      f"`autoharness search mcp \"{args.capability}\"` and `autoharness search skill \"{args.capability}\"`.")})
     return 0
 
 
@@ -382,6 +385,75 @@ def cmd_install_skill(args, project, catalog):
     return 0
 
 
+HOOK_COMMAND = "autoharness hook"
+HOOK_MIN_WORDS = 4
+
+
+def hook_context(catalog: Catalog, prompt: str) -> str | None:
+    """The reminder a prompt hook injects, or None when the prompt gives no reason for one."""
+    if len(text.words(prompt)) < HOOK_MIN_WORDS:
+        return None
+    caps = catalog.classify(prompt)
+    if not caps:
+        return None
+    listed = "; ".join(f"{c.name} ({c.description})" for c, _ in caps)
+    return ("autoharness: this task likely needs these capabilities: " + listed + ". "
+            "Before starting, invoke the `autoharness` skill: it asks what a good result looks like, "
+            "which inputs are missing (references, docs, data), what the user's constraints are, "
+            "and how the result will be verified. Skip it only if the task is trivial.")
+
+
+def cmd_hook(args, project, catalog):
+    """UserPromptSubmit hook: point the agent at autoharness when the prompt matches the catalog.
+
+    Must never break the user's prompt, so every failure is silent.
+    """
+    try:
+        prompt = json.loads(sys.stdin.read() or "{}").get("prompt", "")
+        if project.active_id():
+            return 0  # a harness is already being built for this task
+        ctx = hook_context(catalog, prompt)
+    except Exception:  # noqa: BLE001 - a hook must not fail the prompt
+        return 0
+    if ctx:
+        out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+    return 0
+
+
+def install_hook(settings: Path, remove: bool = False) -> str:
+    """Add or remove the prompt hook in a Claude Code settings file, keeping everything else."""
+    data = json.loads(settings.read_text("utf-8")) if settings.exists() else {}
+    entries = data.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+    ours = lambda h: h.get("command") == HOOK_COMMAND  # noqa: E731
+    present = any(ours(h) for e in entries for h in e.get("hooks", []))
+    if remove:
+        for e in entries:
+            e["hooks"] = [h for h in e.get("hooks", []) if not ours(h)]
+        data["hooks"]["UserPromptSubmit"] = [e for e in entries if e["hooks"]]
+        status = "removed" if present else "not_installed"
+    elif present:
+        return "already_installed"
+    else:
+        entries.append({"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 10}]})
+        status = "installed"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", "utf-8")
+    return status
+
+
+def cmd_install_hook(args, project, catalog):
+    if args.settings:
+        settings = Path(args.settings)
+    elif args.user:
+        settings = Path.home() / ".claude" / "settings.json"
+    else:
+        settings = project.root / ".claude" / "settings.json"
+    status = install_hook(settings, remove=args.remove)
+    out({"status": status, "settings": str(settings), "command": HOOK_COMMAND,
+         "next": "Takes effect in new Claude Code sessions (or open /hooks once in a running one)."})
+    return 0
+
+
 def cmd_agents(args, project, catalog):
     detected = agents.detect()
     out({"detected": detected, "default": agents.DEFAULT_AGENT,
@@ -449,6 +521,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("install-skill", help="install the autoharness bootstrap skill")
     s.add_argument("--user", action="store_true", help="install to the agent's user skills dir instead of the project")
     s.add_argument("--all", action="store_true", help="install for every supported agent")
+    sub.add_parser("hook", help="Claude Code UserPromptSubmit hook: reads the hook JSON on stdin")
+    s = sub.add_parser("install-hook", help="add the prompt hook to Claude Code settings (project, or --user)")
+    s.add_argument("--user", action="store_true", help="~/.claude/settings.json instead of the project")
+    s.add_argument("--settings", help="explicit settings file")
+    s.add_argument("--remove", action="store_true", help="take the hook out again")
     s = sub.add_parser("agents", help="supported agents and where they keep MCP servers and skills")
     return p
 
@@ -456,7 +533,8 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
-            "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents}
+            "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
+            "hook": cmd_hook, "install-hook": cmd_install_hook}
 
 
 def main(argv: list[str] | None = None) -> int:

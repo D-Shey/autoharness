@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import shutil
 import subprocess
@@ -24,7 +25,10 @@ def _curl_get_json(url: str, timeout: float) -> dict:
                           capture_output=True, timeout=timeout + 5)
     if proc.returncode != 0:
         raise OSError(proc.stderr.decode("utf-8", "replace").strip() or f"curl exit {proc.returncode}")
-    return json.loads(proc.stdout.decode("utf-8"))
+    try:
+        return json.loads(proc.stdout.decode("utf-8"))
+    except ValueError as e:
+        raise OSError(f"bad JSON from {url}: {e}") from e
 
 
 def http_get_json(url: str, timeout: float = 20.0, retries: int = 1) -> dict:
@@ -34,7 +38,8 @@ def http_get_json(url: str, timeout: float = 20.0, retries: int = 1) -> dict:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
-        except OSError:
+        except (OSError, http.client.HTTPException, ValueError):
+            # ValueError covers a truncated or non-JSON body
             if attempt < retries:
                 time.sleep(1)
     return _curl_get_json(url, timeout)

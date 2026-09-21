@@ -1,6 +1,6 @@
 ---
 name: autoharness
-description: Use at the start of any non-trivial task in a bare agent setup, and whenever you are blocked because a tool or know-how is missing (not because you need to think harder). Figures out which capabilities the task needs, finds and vets MCP servers and skills, installs them for the task, and at the end keeps them in the project or removes them (configurable).
+description: Use at the start of any non-trivial task, even when many tools are already available: especially work that must match something real (a film scene, a design, a product, a brand, an API) and so needs references, current docs or data you have not looked at yet, or a way to check the result against them. Also use whenever you are blocked because a tool, input or know-how is missing (not because you need to think harder). Works out what a good result is and what is missing, finds and vets MCP servers and skills against the user's constraints, installs them for the task, and at the end keeps them in the project or removes them (configurable).
 ---
 
 # AutoHarness
@@ -35,6 +35,22 @@ write them down as a short list: *capability — why — how I will verify it wo
 Pick the smallest set that lets you **verify** the result, not only produce it
 (a web task needs a browser to check the page, not just an editor).
 
+Before you list tools, answer three questions in writing:
+
+1. **What does a good result look like, and how will I tell?** Name the quality bar
+   and the check, not just "it renders" or "it runs".
+2. **What missing input do I need?** The subject you must match (a film still, a
+   product photo, a design, an API's current docs, sample data), a spec, examples.
+   Working from memory when the real thing can be looked up is a capability gap,
+   often the biggest one. Plan to get the input first, before you produce anything.
+3. **What are the user's constraints?** Write them down verbatim ("no external
+   generators", "no new dependencies", "must run offline"). Every candidate you
+   discover is checked against them in step 3.
+
+Missing input and know-how are capabilities too: a way to see references, a way to
+compare your output with them. They often need no install at all: a web search
+tool, a browser or a headless render you already have. Say how you will cover them.
+
 If a recipe scores above ~0.3 and fits, `autoharness recipe show <name>` and
 reuse its entries rather than searching again.
 
@@ -63,6 +79,14 @@ autoharness add mcp <name>
 autoharness add skill <owner/repo@skill>
 ```
 
+- Check each candidate against the user's constraints before you propose it. Read
+  what it actually does (for a skill, its SKILL.md and scripts; `inspect` for a
+  server). A skill whose main content breaks a constraint (for example SVG
+  generator scripts when the user said "no generators") is not a candidate, even
+  if its name fits. If you find this out only after installing, `autoharness remove`
+  it and say so.
+- A low-trust skill that brings little is worse than no skill. When the know-how is
+  thin (an SVG primer, a generic checklist), skip it and write down what you know.
 - If `add` exits `3` (`approval_required`), show the user the name, trust
   score, reasons and any secrets it needs, in one short message. Re-run with
   `--approve` only after a clear yes. Never add `--approve` on your own.
@@ -91,13 +115,20 @@ it and try the next candidate. Do not debug a third-party tool for long.
 Work on the task normally. When you get stuck, ask: *would more thinking fix
 this, or am I missing a capability?* Signs of a real gap: you cannot observe
 the thing you need to check (a UI, network traffic, a database, logs), or you
-keep guessing at an API whose current docs you cannot see. Then go back to
+keep guessing at an API whose current docs you cannot see, or you are drawing,
+designing or matching something you have not looked at (no reference in front of you). Then go back to
 step 2 with `autoharness need <capability> --reason "<what blocked me>"`, and
 resume from where you were.
 
 ### 6. Finish
 
 1. Verify the result with the capabilities you installed. Run the checks; don't assume them.
+   Verify against the quality bar from step 1, not only that it works. When there is a
+   reference, put your output and the reference side by side, list the biggest
+   differences (scale, composition, angle, palette, likeness, missing elements), fix
+   them, and repeat. One render is not a review: plan several rounds and stop when the
+   remaining differences are small or cannot be fixed with the chosen medium. Tell
+   the user which ones remain.
 2. If you learned something reusable that no installed skill covers (how to build or
    check this kind of project, a verification trick, an API quirk), write it down:
    `autoharness skill new <name> --description "<when to use it>"`, fill in every

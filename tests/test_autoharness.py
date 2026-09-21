@@ -1030,3 +1030,129 @@ def test_bootstrap_skill_teaches_the_gateway():
     from importlib import resources
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
     assert "harness_tools" in text and "harness_call" in text and "gateway install" in text
+
+
+# --- lessons from a visual task (hand-drawn SVG film scene) ------------------
+
+BLADE_RUNNER = ("Draw a scene from the movie Blade Runner 2049 using SVG graphics, where Ryan Gosling's "
+                "character is looking at a hologram of an AI girl in purple light. Don't use external svg generators")
+
+
+def test_classify_visual_task_needs_reference_and_review_not_devtools():
+    names = {c.name for c, _ in Catalog.load().classify(BLADE_RUNNER)}
+    assert {"visual-reference", "visual-review"} <= names, names
+    assert "browser-devtools" not in names, names
+
+
+@pytest.mark.parametrize("task, expected", [
+    ("нарисуй иллюстрацию по кадру из фильма", {"visual-reference", "visual-review"}),
+    ("сделай логотип в svg", {"visual-review"}),
+])
+def test_classify_visual_tasks_in_russian(task, expected):
+    names = {c.name for c, _ in Catalog.load().classify(task)}
+    assert expected <= names, names
+
+
+def test_short_word_does_not_match_longer_keyword():
+    from autoharness import text
+    assert not text.matches("lighthouse", text.words("in purple light"))
+    assert text.matches("lighthouse", text.words("run lighthouse audits"))
+    assert text.matches("документация", text.words("по документации"))
+
+
+def test_http_get_json_falls_back_to_curl_on_broken_read(monkeypatch):
+    import http.client
+    import urllib.request
+
+    def broken(*a, **k):
+        raise http.client.IncompleteRead(b"")
+    monkeypatch.setattr(urllib.request, "urlopen", broken)
+    monkeypatch.setattr(registry, "_curl_get_json", lambda url, timeout: {"ok": True})
+    monkeypatch.setattr(registry.time, "sleep", lambda s: None)
+    assert registry.http_get_json("https://example.invalid") == {"ok": True}
+
+
+def test_cli_search_reports_network_errors_as_json(project, capsys, monkeypatch):
+    def down(*a, **k):
+        raise OSError("network down")
+    monkeypatch.setattr(registry, "http_get_json", down)
+    monkeypatch.setattr(registry, "search_skills",
+                        lambda q, limit=10, fetch=None: down())
+    cli_json(capsys, "--project", str(project.root), "init", "t")
+    code, res = cli_json(capsys, "--project", str(project.root), "search", "skill", "svg")
+    assert code == 1 and res["status"] == "error" and "network down" in res["error"]
+
+
+def test_need_unknown_capability_points_to_related_curated_ones(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    code, res = cli_json(capsys, "--project", root, "need", "svg-illustration",
+                         "--reason", "draw a film scene as an illustration")
+    assert code == 0 and res["curated"] is None
+    assert {"visual-reference", "visual-review"} <= {r["capability"] for r in res["related"]}
+
+
+def test_bootstrap_skill_teaches_inputs_constraints_and_reference_checks():
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    for phrase in ("missing input", "user's constraints", "reference", "side by side"):
+        assert phrase in text, phrase
+
+
+# --- prompt hook: the skill must not depend on the model noticing it --------
+
+def run_hook(capsys, monkeypatch, project, prompt):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": prompt})))
+    code = cli.main(["--project", str(project.root), "hook"])
+    raw = capsys.readouterr().out
+    return code, (json.loads(raw) if raw.strip() else None)
+
+
+def test_hook_points_the_agent_at_autoharness_for_a_matching_task(project, capsys, monkeypatch):
+    code, res = run_hook(capsys, monkeypatch, project, BLADE_RUNNER)
+    assert code == 0
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert res["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "autoharness" in ctx and "visual-reference" in ctx and "visual-review" in ctx
+
+
+@pytest.mark.parametrize("prompt", ["да", "ok thanks", "hello there, how are you today?"])
+def test_hook_stays_silent_for_short_or_unmatched_prompts(project, capsys, monkeypatch, prompt):
+    assert run_hook(capsys, monkeypatch, project, prompt) == (0, None)
+
+
+def test_hook_stays_silent_while_a_task_is_active(project, capsys, monkeypatch):
+    project.init_task("t")
+    assert run_hook(capsys, monkeypatch, project, BLADE_RUNNER) == (0, None)
+
+
+def test_hook_never_fails_on_bad_input(project, capsys, monkeypatch):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
+    assert cli.main(["--project", str(project.root), "hook"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_install_hook_merges_and_removes_cleanly(tmp_path, capsys):
+    settings = tmp_path / "settings.json"
+    mine = {"type": "command", "command": "echo mine"}
+    settings.write_text(json.dumps({"model": "opus", "hooks": {"UserPromptSubmit": [{"hooks": [mine]}]}}), "utf-8")
+    for _ in range(2):  # idempotent
+        code, res = cli_json(capsys, "install-hook", "--settings", str(settings))
+        assert code == 0
+    data = json.loads(settings.read_text("utf-8"))
+    assert data["model"] == "opus"
+    cmds = [h["command"] for e in data["hooks"]["UserPromptSubmit"] for h in e["hooks"]]
+    assert cmds.count("autoharness hook") == 1 and "echo mine" in cmds
+    code, res = cli_json(capsys, "install-hook", "--settings", str(settings), "--remove")
+    data = json.loads(settings.read_text("utf-8"))
+    assert [h["command"] for e in data["hooks"]["UserPromptSubmit"] for h in e["hooks"]] == ["echo mine"]
+
+
+def test_bootstrap_skill_description_does_not_require_a_bare_setup():
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    description = text.split("description:", 1)[1].split("\n", 1)[0]
+    assert "bare" not in description
+    assert "reference" in description

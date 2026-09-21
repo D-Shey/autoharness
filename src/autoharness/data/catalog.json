@@ -1,5 +1,5 @@
 {
-  "_comment": "Curated capabilities. Entries here are trusted baselines; anything found only through registry search is scored and may need approval. Keywords match by word (text.py): 5+ letters compare by their first 5, shorter ones are stems that take a common ending, under 3 letters match whole words only.",
+  "_comment": "Curated capabilities. Entries here are trusted baselines; anything found only through registry search is scored and may need approval. Keywords match by word (text.py): 5+ letters compare by their first 5 (and must share all but the keyword's last 4), shorter ones are stems that take a common ending, under 3 letters match whole words only.",
   "capabilities": {
     "browser-automation": {
       "description": "Drive a real browser: navigate, click, fill forms, screenshots, E2E flows.",
@@ -54,6 +54,18 @@
       "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "таблица", "презентация"],
       "mcp": [],
       "skills": ["anthropics/skills@pdf", "anthropics/skills@docx", "anthropics/skills@xlsx", "anthropics/skills@pptx"]
+    },
+    "visual-reference": {
+      "description": "Find and study reference images of the real subject (a film still, product, place or brand) before drawing or designing it: note composition, scale, camera angle and palette.",
+      "keywords": ["movie", "film", "scene", "poster", "reference", "фильм", "кадр", "сцен", "постер", "персонаж", "референс"],
+      "mcp": ["playwright"],
+      "skills": []
+    },
+    "visual-review": {
+      "description": "Render a visual result (SVG, canvas, HTML, chart) to an image and critique it side by side with the reference, over several rounds.",
+      "keywords": ["svg", "draw", "drawing", "illustration", "graphics", "image", "picture", "logo", "icon", "canvas", "mockup", "нарису", "рисун", "иллюстрация", "картинк", "изображение", "логотип", "иконк", "макет"],
+      "mcp": ["playwright"],
+      "skills": []
     },
     "mcp-development": {
       "description": "Build new MCP servers.",

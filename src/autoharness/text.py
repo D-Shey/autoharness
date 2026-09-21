@@ -3,7 +3,10 @@
 No stemmer library (stdlib only), so two cheap rules stand in for one:
 
 - words of STEM letters or more compare by their first STEM letters
-  ("документация" / "документацию", "исследуй" / "исследовать");
+  ("документация" / "документацию", "исследуй" / "исследовать"), as long as
+  the shared start covers all but the last SLACK letters of the keyword, so a
+  short word is not taken for a long keyword that merely starts with it
+  ("light" is not "lighthouse");
 - shorter keywords are written as stems in the catalog ("баз", "тест", "форм")
   and match a word that is the stem plus a common English or Russian ending
   ("базе", "тесты", "forms"), but not a longer word that merely starts with it
@@ -13,10 +16,12 @@ No stemmer library (stdlib only), so two cheap rules stand in for one:
 
 from __future__ import annotations
 
+import os
 import re
 
 WORD = re.compile(r"[^\W_]+", re.UNICODE)
 STEM = 5
+SLACK = 4
 STOP = {"the", "and", "for", "with", "from", "into", "this", "that",
         "для", "как", "что", "это", "или", "при", "без", "все", "под"}
 ENDINGS = {"", "s", "es", "ed", "ing", "er", "ers",
@@ -37,7 +42,8 @@ def _word_matches(keyword: str, word: str) -> bool:
     if len(keyword) < 3:
         return word == keyword
     if len(keyword) >= STEM:
-        return word[:STEM] == keyword[:STEM]
+        shared = len(os.path.commonprefix([keyword, word]))
+        return shared >= max(STEM, len(keyword) - SLACK)
     return word.startswith(keyword) and word[len(keyword):] in ENDINGS
 
 
