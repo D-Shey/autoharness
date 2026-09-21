@@ -1,0 +1,93 @@
+{
+  "_comment": "Curated capabilities. Entries here are trusted baselines; anything found only through registry search is scored and may need approval.",
+  "capabilities": {
+    "browser-automation": {
+      "description": "Drive a real browser: navigate, click, fill forms, screenshots, E2E flows.",
+      "keywords": ["browser", "playwright", "e2e", "website", "web app", "ui test", "screenshot", "click", "form", "сайт", "браузер", "веб"],
+      "mcp": ["playwright"],
+      "skills": ["microsoft/playwright-cli@playwright-cli", "anthropics/skills@webapp-testing"]
+    },
+    "browser-devtools": {
+      "description": "Inspect network, console, performance traces of a live page.",
+      "keywords": ["devtools", "network", "console", "performance", "lighthouse", "core web vitals", "500", "request", "запрос", "производительность"],
+      "mcp": ["chrome-devtools"],
+      "skills": []
+    },
+    "library-docs": {
+      "description": "Current documentation for libraries, frameworks and SDKs.",
+      "keywords": ["docs", "documentation", "api reference", "library", "framework", "sdk", "upgrade", "migrate", "документация", "миграция"],
+      "mcp": ["context7"],
+      "skills": []
+    },
+    "github": {
+      "description": "Issues, pull requests, code search and repos on GitHub.",
+      "keywords": ["github", "pull request", "pr ", "issue", "repository", "репозиторий", "пулл"],
+      "mcp": ["github"],
+      "skills": []
+    },
+    "postgres": {
+      "description": "Inspect and query a PostgreSQL database (read-only by default).",
+      "keywords": ["postgres", "postgresql", "sql", "database", "schema", "база данных", "бд"],
+      "mcp": ["postgres"],
+      "skills": []
+    },
+    "web-fetch": {
+      "description": "Fetch and read arbitrary web pages as markdown.",
+      "keywords": ["fetch", "scrape", "research", "article", "url", "исследуй", "найди в интернете"],
+      "mcp": ["fetch"],
+      "skills": []
+    },
+    "debugging": {
+      "description": "Disciplined root-cause debugging.",
+      "keywords": ["bug", "debug", "error", "crash", "fails", "broken", "flaky", "баг", "ошибк", "падает", "не работает"],
+      "mcp": [],
+      "skills": ["obra/superpowers@systematic-debugging"]
+    },
+    "testing": {
+      "description": "Test-first development and verification before claiming done.",
+      "keywords": ["test", "tdd", "coverage", "pytest", "jest", "unit test", "тест", "покрыти"],
+      "mcp": [],
+      "skills": ["obra/superpowers@test-driven-development", "obra/superpowers@verification-before-completion"]
+    },
+    "documents": {
+      "description": "Read and produce PDF, Word, Excel, PowerPoint files.",
+      "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "таблиц", "презентац"],
+      "mcp": [],
+      "skills": ["anthropics/skills@pdf", "anthropics/skills@docx", "anthropics/skills@xlsx", "anthropics/skills@pptx"]
+    },
+    "mcp-development": {
+      "description": "Build new MCP servers.",
+      "keywords": ["mcp server", "build mcp", "model context protocol"],
+      "mcp": [],
+      "skills": ["anthropics/skills@mcp-builder"]
+    }
+  },
+  "mcp_servers": {
+    "playwright": {
+      "config": {"command": "npx", "args": ["-y", "@playwright/mcp@latest"]},
+      "permissions": {"network": "any", "filesystem": "write-temp", "shell": false, "secrets": []}
+    },
+    "chrome-devtools": {
+      "config": {"command": "npx", "args": ["-y", "chrome-devtools-mcp@latest"]},
+      "permissions": {"network": "any", "filesystem": "write-temp", "shell": false, "secrets": []}
+    },
+    "context7": {
+      "config": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+      "permissions": {"network": "context7.com", "filesystem": "none", "shell": false, "secrets": []}
+    },
+    "github": {
+      "config": {"type": "http", "url": "https://api.githubcopilot.com/mcp/", "headers": {"Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"}},
+      "permissions": {"network": "api.githubcopilot.com", "filesystem": "none", "shell": false, "secrets": ["GITHUB_PERSONAL_ACCESS_TOKEN"]}
+    },
+    "postgres": {
+      "config": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-postgres", "${POSTGRES_URL}"]},
+      "permissions": {"network": "database-host", "filesystem": "none", "shell": false, "secrets": ["POSTGRES_URL"]}
+    },
+    "fetch": {
+      "config": {"command": "uvx", "args": ["mcp-server-fetch"]},
+      "permissions": {"network": "any", "filesystem": "none", "shell": false, "secrets": []}
+    }
+  },
+  "trusted_mcp_publishers": ["microsoft", "github", "modelcontextprotocol", "anthropics", "upstash", "cloudflare", "stripe", "supabase", "vercel", "googleapis", "aws", "awslabs", "chromedevtools", "getsentry", "neondatabase", "grafana"],
+  "trusted_skill_owners": ["anthropics", "microsoft", "obra", "vercel-labs", "github", "openai", "google", "cloudflare"]
+}
