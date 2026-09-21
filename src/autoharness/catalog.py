@@ -16,6 +16,7 @@ class Capability:
     keywords: list[str]
     mcp: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
+    search: list[str] = field(default_factory=list)  # queries for skills.sh / the MCP registry
 
 
 @dataclass
@@ -30,7 +31,7 @@ class Catalog:
         raw = json.loads(resources.files("autoharness").joinpath("data/catalog.json").read_text("utf-8"))
         caps = {
             name: Capability(name=name, description=c["description"], keywords=c["keywords"],
-                             mcp=c.get("mcp", []), skills=c.get("skills", []))
+                             mcp=c.get("mcp", []), skills=c.get("skills", []), search=c.get("search", []))
             for name, c in raw["capabilities"].items()
         }
         return cls(caps, raw["mcp_servers"], set(raw["trusted_skill_owners"]),

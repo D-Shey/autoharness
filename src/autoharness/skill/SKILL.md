@@ -13,8 +13,8 @@ taken down, as configured. The `autoharness` CLI does the bookkeeping
 Every command prints JSON. Exit code `3` means **stop and ask the user**.
 
 If `autoharness install-hook` was run, a hook sends every substantial request of a
-session here first: until you invoke this skill (or start a task with `init`), tools
-that do work are blocked, while reading files stays open. Skip it only when the user
+session here first: tools that do work stay blocked until you have run `init` and
+recorded a `brief` (step 3), while reading files stays open. Skip it only when the user
 explicitly said so: `autoharness waive <session id> --reason "<their words>"`, then tell them.
 
 ## Loop
@@ -33,8 +33,9 @@ analyse task → capabilities → reuse recipe? → discover → vet → install
 autoharness --agent {{AGENT}} init "<the user's task, verbatim>"
 ```
 
-The output has keyword `suggested` capabilities, matching `recipes` and the full
-catalog in `all_capabilities`. Treat the suggestions as hints: they come from
+The output has keyword `suggested` capabilities, matching `recipes`, the full
+catalog in `all_capabilities`, and `discovered`: skills from skills.sh and servers
+from the MCP registry that `init` already searched for this task. Treat the suggestions as hints: they come from
 keywords and can miss or over-match. Decide yourself which capabilities the task really needs and
 write them down as a short list: *capability — why — how I will verify it works*.
 Pick the smallest set that lets you **verify** the result, not only produce it
@@ -59,9 +60,11 @@ tool, a browser or a headless render you already have. Say how you will cover th
 If a recipe scores above ~0.3 and fits, `autoharness recipe show <name>` and
 reuse its entries rather than searching again.
 
-### 2. Discover
+### 2. Discover (never skip)
 
-For each capability:
+Looking is cheap; missing a skill that already solves the task is expensive. Read
+every entry in `discovered` before deciding anything. Then, for each capability on
+your list, and with your own words for the task where `discovered` falls short:
 
 ```bash
 autoharness need <capability> --reason "<why>"      # curated candidates first
@@ -72,11 +75,26 @@ autoharness search skill "<query>"                   # skills.sh
 `need` also lists skills you or earlier agents wrote and saved (`local`); install one with
 `autoharness add skill local:<name>`. Prefer, in order: local skill → curated entry →
 high-trust registry/skill result → nothing.
-A capability you can cover with tools you already have (shell, a CLI such as
-`gh`, `psql`, `npx playwright`) does not need an MCP server. Do not install
-something just because it exists.
+"Everything I need is already at hand" is a conclusion you reach after looking, not
+a reason to skip looking. Then install only what beats what you already have: a
+capability you can cover with tools you already have (shell, a CLI such as `gh`,
+`psql`, `npx playwright`) does not need an MCP server.
 
-### 3. Vet and install
+### 3. Brief
+
+Before producing anything, write down what you decided:
+
+```bash
+autoharness brief --goal "<quality bar>" --inputs "<missing inputs and how you get them>" \
+  --constraints "<the user's constraints, verbatim>" --verify "<checks, against what>" \
+  --candidates "<name>: take|skip, why; <name>: ...; searched: <queries>"
+```
+
+Give a verdict for every discovered candidate that is plausibly relevant (skip the
+obvious noise in one phrase). Tools that do work are blocked until the brief exists.
+Show the user the brief in a few lines when you start.
+
+### 4. Vet and install
 
 ```bash
 autoharness inspect mcp <name>
@@ -109,13 +127,13 @@ autoharness add skill <owner/repo@skill>
   the task that don't depend on it. If `add` suggests `autoharness gateway install`,
   offer it to the user once: one last restart, and later servers need none.
 
-### 4. Smoke-test
+### 5. Smoke-test
 
 Before relying on a new capability, make one cheap call that proves it works
 (open a page, list a schema, read one doc). If it fails, `autoharness remove`
 it and try the next candidate. Do not debug a third-party tool for long.
 
-### 5. Execute, and notice capability gaps
+### 6. Execute, and notice capability gaps
 
 Work on the task normally. When you get stuck, ask: *would more thinking fix
 this, or am I missing a capability?* Signs of a real gap: you cannot observe
@@ -125,10 +143,10 @@ designing or matching something you have not looked at (no reference in front of
 step 2 with `autoharness need <capability> --reason "<what blocked me>"`, and
 resume from where you were.
 
-### 6. Finish
+### 7. Finish
 
 1. Verify the result with the capabilities you installed. Run the checks; don't assume them.
-   Verify against the quality bar from step 1, not only that it works. When there is a
+   Verify against the quality bar from your brief, not only that it works. When there is a
    reference, put your output and the reference side by side, list the biggest
    differences (scale, composition, angle, palette, likeness, missing elements), fix
    them, and repeat. One render is not a review: plan several rounds and stop when the
@@ -143,7 +161,8 @@ resume from where you were.
    clients. If save reports `blocked`, remove what it flags.
 3. End the task. If the setup was useful, save it as a recipe too:
    `autoharness teardown --save-recipe <short-name> --notes "<what it was good for>"`
-   Otherwise `autoharness teardown`.
+   Otherwise `autoharness teardown`. If teardown warns that discovery or the brief
+   was skipped, tell the user.
    What happens to the harness follows the `teardown` setting
    (`autoharness config get`): `keep` (the default) leaves it installed in the
    project for later tasks, `remove` uninstalls it. Pass `--keep` or `--remove`

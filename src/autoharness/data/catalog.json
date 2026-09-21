@@ -5,73 +5,85 @@
       "description": "Drive a real browser: navigate, click, fill forms, screenshots, E2E flows.",
       "keywords": ["browser", "playwright", "e2e", "website", "web app", "ui test", "screenshot", "click", "form", "сайт", "браузер", "веб", "форм", "скриншот", "кнопк"],
       "mcp": ["playwright"],
-      "skills": ["microsoft/playwright-cli@playwright-cli", "anthropics/skills@webapp-testing"]
+      "skills": ["microsoft/playwright-cli@playwright-cli", "anthropics/skills@webapp-testing"],
+      "search": ["browser automation", "playwright"]
     },
     "browser-devtools": {
       "description": "Inspect network, console, performance traces of a live page.",
       "keywords": ["devtools", "network", "console", "performance", "lighthouse", "core web vitals", "500", "request", "запрос", "производительность", "консоль"],
       "mcp": ["chrome-devtools"],
-      "skills": []
+      "skills": [],
+      "search": ["chrome devtools", "web performance"]
     },
     "library-docs": {
       "description": "Current documentation for libraries, frameworks and SDKs.",
       "keywords": ["docs", "documentation", "api reference", "library", "framework", "sdk", "upgrade", "migrate", "документация", "миграция", "библиотека", "фреймворк"],
       "mcp": ["context7"],
-      "skills": []
+      "skills": [],
+      "search": ["library documentation"]
     },
     "github": {
       "description": "Issues, pull requests, code search and repos on GitHub.",
       "keywords": ["github", "pull request", "pr", "issue", "repository", "репозиторий", "пулл"],
       "mcp": ["github"],
-      "skills": []
+      "skills": [],
+      "search": ["github"]
     },
     "postgres": {
       "description": "Inspect and query a PostgreSQL database (read-only by default).",
       "keywords": ["postgres", "postgresql", "sql", "database", "schema", "баз данных", "бд", "схем"],
       "mcp": ["postgres"],
-      "skills": []
+      "skills": [],
+      "search": ["postgres"]
     },
     "web-fetch": {
       "description": "Fetch and read arbitrary web pages as markdown.",
       "keywords": ["fetch", "scrape", "research", "article", "url", "исследуй", "интернет"],
       "mcp": ["fetch"],
-      "skills": []
+      "skills": [],
+      "search": ["web research", "fetch web page"]
     },
     "debugging": {
       "description": "Disciplined root-cause debugging.",
       "keywords": ["bug", "debug", "error", "crash", "fail", "flaky", "баг", "ошибка", "пада", "не работает"],
       "mcp": [],
-      "skills": ["obra/superpowers@systematic-debugging"]
+      "skills": ["obra/superpowers@systematic-debugging"],
+      "search": ["debugging"]
     },
     "testing": {
       "description": "Test-first development and verification before claiming done.",
       "keywords": ["test", "tdd", "coverage", "pytest", "jest", "unit test", "ci", "тест", "тестирование", "покрытие"],
       "mcp": [],
-      "skills": ["obra/superpowers@test-driven-development", "obra/superpowers@verification-before-completion"]
+      "skills": ["obra/superpowers@test-driven-development", "obra/superpowers@verification-before-completion"],
+      "search": ["testing", "test driven development"]
     },
     "documents": {
       "description": "Read and produce PDF, Word, Excel, PowerPoint files.",
       "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "таблица", "презентация"],
       "mcp": [],
-      "skills": ["anthropics/skills@pdf", "anthropics/skills@docx", "anthropics/skills@xlsx", "anthropics/skills@pptx"]
+      "skills": ["anthropics/skills@pdf", "anthropics/skills@docx", "anthropics/skills@xlsx", "anthropics/skills@pptx"],
+      "search": ["pdf docx xlsx pptx"]
     },
     "visual-reference": {
       "description": "Find and study reference images of the real subject (a film still, product, place or brand) before drawing or designing it: note composition, scale, camera angle and palette.",
       "keywords": ["movie", "film", "scene", "poster", "reference", "фильм", "кадр", "сцен", "постер", "персонаж", "референс"],
       "mcp": ["playwright"],
-      "skills": []
+      "skills": [],
+      "search": ["reference images", "image search"]
     },
     "visual-review": {
       "description": "Render a visual result (SVG, canvas, HTML, chart) to an image and critique it side by side with the reference, over several rounds.",
       "keywords": ["svg", "draw", "drawing", "illustration", "graphics", "image", "picture", "logo", "icon", "canvas", "mockup", "нарису", "рисун", "иллюстрация", "картинк", "изображение", "логотип", "иконк", "макет"],
       "mcp": ["playwright"],
-      "skills": []
+      "skills": [],
+      "search": ["svg illustration", "visual review"]
     },
     "mcp-development": {
       "description": "Build new MCP servers.",
       "keywords": ["mcp server", "build mcp", "model context protocol"],
       "mcp": [],
-      "skills": ["anthropics/skills@mcp-builder"]
+      "skills": ["anthropics/skills@mcp-builder"],
+      "search": ["mcp server builder"]
     }
   },
   "mcp_servers": {

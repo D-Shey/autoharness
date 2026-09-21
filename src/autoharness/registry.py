@@ -32,7 +32,16 @@ def _curl_get_json(url: str, timeout: float) -> dict:
 
 
 def http_get_json(url: str, timeout: float = 20.0, retries: int = 1) -> dict:
-    """GET JSON with urllib, falling back to curl (some Windows setups reset Python TLS reads)."""
+    """GET JSON with curl when it is installed, else urllib with curl as a last resort.
+
+    curl goes first because on some Windows setups Python's TLS reads stall until the
+    timeout (measured: urllib 9-15 s per search, curl 1-3 s).
+    """
+    if shutil.which("curl"):
+        try:
+            return _curl_get_json(url, timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     req = urllib.request.Request(url, headers={"User-Agent": "autoharness/0.1", "Accept": "application/json"})
     for attempt in range(retries + 1):
         try:

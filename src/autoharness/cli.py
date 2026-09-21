@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
 import time
+import threading
 from importlib import resources
 from pathlib import Path
 
@@ -77,6 +79,68 @@ def suggestions(catalog: Catalog, caps) -> list[dict]:
              "mcp": c.mcp, "skills": c.skills} for c, m in caps]
 
 
+DISCOVERY_QUERIES = 4
+DISCOVERY_RESULTS = 5
+DISCOVERY_BUDGET = 15.0  # seconds for all searches together
+
+
+def discovery_queries(catalog: Catalog, task_text: str) -> list[str]:
+    """Search terms for a task: each matched capability's curated queries, then the words that matched it."""
+    queries = []
+    caps = catalog.classify(task_text)[:3]
+    for cap, _ in caps:
+        queries += cap.search[:1] or [cap.name.replace("-", " ")]
+    for cap, matched in caps:
+        queries += cap.search[1:2] + [" ".join(matched[:2])]
+    if not queries:
+        queries.append(" ".join([w for w in text.words(task_text) if len(w) > 3 and w not in text.STOP][:5]))
+    return list(dict.fromkeys(q for q in queries if q.strip()))[:DISCOVERY_QUERIES]
+
+
+def _search(catalog: Catalog, kind: str, query: str) -> dict:
+    fetch = lambda url: registry.http_get_json(url, timeout=8, retries=0)  # noqa: E731
+    try:
+        if kind == "skill":
+            found = [score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict() | {"installs": r["installs"]}
+                     for r in registry.search_skills(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
+            found.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
+            results = [{"name": r["name"], "score": r["score"], "level": r["level"], "installs": r["installs"]} for r in found]
+        else:
+            results = [score_registry_entry(e, catalog.trusted_mcp_publishers).to_dict()
+                       | {"description": e["server"].get("description", "")[:140]}
+                       for e in registry.search_mcp(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
+            results = [{"name": r["name"], "score": r["score"], "level": r["level"], "description": r["description"]}
+                       for r in sorted(results, key=lambda r: r["score"], reverse=True)]
+        return {"kind": kind, "query": query, "results": results}
+    except Exception as e:  # noqa: BLE001 - one failed source must not stop init
+        return {"kind": kind, "query": query, "error": str(e)}
+
+
+def discover(catalog: Catalog, task_text: str) -> list[dict]:
+    """Search skills.sh and the MCP registry for the task, in parallel. Never raises."""
+    if os.environ.get("AUTOHARNESS_OFFLINE"):
+        return [{"skipped": "AUTOHARNESS_OFFLINE is set"}]
+    queries = discovery_queries(catalog, task_text)
+    # the MCP registry matches one substring of a server name and slows down under parallel load,
+    # so it gets at most two single-word queries
+    mcp_queries = list(dict.fromkeys(q.split()[0] for q in queries))[:2]
+    jobs = [("skill", q) for q in queries] + [("mcp", q) for q in mcp_queries]
+    results: list[dict | None] = [None] * len(jobs)
+
+    def run(i: int, kind: str, query: str) -> None:
+        results[i] = _search(catalog, kind, query)
+
+    # daemon threads: a slow registry must not hold up init past the budget, nor the process exit
+    threads = [threading.Thread(target=run, args=(i, *j), daemon=True) for i, j in enumerate(jobs)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + DISCOVERY_BUDGET
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    return [r or {"kind": k, "query": q, "error": f"timed out ({DISCOVERY_BUDGET:.0f}s budget)"}
+            for r, (k, q) in zip(results, jobs)]
+
+
 # --- commands ---------------------------------------------------------------
 
 def cmd_plan(args, project, catalog):
@@ -96,9 +160,16 @@ def cmd_init(args, project, catalog):
               "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
                            "mcp": list(r["mcp"]), "skills": r["skills"]} for s, r in recipes.match(args.task)],
               "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
+    result["discovered"] = discovered = discover(catalog, args.task)
+    task.record_discovery(discovered)
+    result["next"] = (
+        "Read `discovered`: these skills and MCP servers were found for this task. Search more with "
+        "`autoharness search mcp|skill \"<query>\"` where it falls short. Then record "
+        "`autoharness brief --goal ... --inputs ... --constraints ... --verify ... --candidates ...`, "
+        "with a take/skip verdict and reason for each candidate worth considering. Tools that do work "
+        "stay blocked until the brief is recorded.")
     if not suggested:
-        result["next"] = ("No keyword hints. Pick capabilities from all_capabilities yourself, or look further with "
-                          "`autoharness search mcp|skill \"<your query>\"`.")
+        result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
     out(result)
     return 0
 
@@ -131,7 +202,21 @@ def cmd_search(args, project, catalog):
             rep = score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict()
             results.append(rep | {"installs": r["installs"]})
         results.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
+    if project.active_id():
+        project.task().note_search(args.kind, args.query, [r["name"] for r in results[:DISCOVERY_RESULTS]])
     out({"query": args.query, "kind": args.kind, "results": results})
+    return 0
+
+
+def cmd_brief(args, project, catalog):
+    task = project.task()
+    task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
+                       "verify": args.verify, "candidates": args.candidates})
+    warnings = [] if task.discovery_ran() else [
+        "no search ran for this task; run `autoharness search skill|mcp \"<query>\"` before deciding nothing fits"]
+    out({"status": "ok", "task_id": task.id, "warnings": warnings,
+         "next": "Install what you decided to take, get the missing inputs first, then do the work and verify it "
+                 "the way the brief says."})
     return 0
 
 
@@ -246,6 +331,11 @@ def cmd_teardown(args, project, catalog):
                     f"{parse_skill_spec(v['spec'])[1]}` or the recipe cannot install it"
                     for v in task.skills_lock().values()
                     if v["spec"].startswith("local:") and not library.exists(parse_skill_spec(v["spec"])[1])]
+    info = task.info()
+    if not task.discovery_ran():
+        warnings.append("no discovery ran: no skill or MCP search was made for this task")
+    if not info.get("brief"):
+        warnings.append("no brief recorded: goal, missing inputs, constraints and verification were never written down")
     policy, source = config.teardown_policy(project.root, args.policy)
     result = task.teardown(policy)
     kept = result["kept"]["mcp"] + result["kept"]["skills"]
@@ -419,7 +509,8 @@ def hook_context(catalog: Catalog, prompt: str, session_id: str = "") -> str | N
     caps = catalog.classify(prompt)
     listed = ("This task likely needs: " + "; ".join(f"{c.name} ({c.description})" for c, _ in caps) + ". "
               if caps else "")
-    gate = (f" Until then Write, Edit, shell and MCP tools are blocked. Only if the user explicitly said not to "
+    gate = (f" Tools that do work (Write, Edit, shell, MCP) stay blocked until `autoharness init` has run and "
+            f"`autoharness brief` is recorded. Only if the user explicitly said not to "
             f"use autoharness, run `autoharness waive {session_id} --reason \"<their words>\"`." if session_id else "")
     return ("autoharness: invoke the `autoharness` skill as your first step, before producing anything. "
             + listed + "It works out what a good result looks like, which inputs are missing (references, docs, "
@@ -444,12 +535,12 @@ def cmd_hook(args, project, catalog):
         event = data.get("hook_event_name", "UserPromptSubmit")
         sid = str(data.get("session_id") or "")
         state = session_state(sid).get("state") if sid else None
-        if project.active_id():  # a harness is already being built here
-            if sid and state != "done":
-                set_session_state(sid, state="done", via="active task")
-            return 0
+        active = project.active_id()
+        if active and Task(project, active).info().get("brief") and sid and state != "done":
+            set_session_state(sid, state="done", via="brief")
+            state = "done"
         if event == "UserPromptSubmit":
-            if state in ("done", "waived"):
+            if state in ("done", "waived") or active:
                 return 0
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
             if not ctx:
@@ -461,15 +552,13 @@ def cmd_hook(args, project, catalog):
         if event == "PreToolUse":
             tool, tool_input = data.get("tool_name", ""), data.get("tool_input") or {}
             if _is_autoharness_call(tool, tool_input):
-                # the skill itself opens the gate; its CLI calls just pass (init opens it via the active task)
-                if sid and state == "pending" and tool == "Skill":
-                    set_session_state(sid, state="done", via=tool)
-                return 0
+                return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
             if state == "pending" and GATED_TOOLS.match(tool):
                 out({"hookSpecificOutput": {
                     "hookEventName": "PreToolUse", "permissionDecision": "deny",
                     "permissionDecisionReason": (
-                        "autoharness first: invoke the `autoharness` skill (Skill tool) before using " + tool + ". "
+                        "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
+                        "MCP servers it discovers, and record `autoharness brief ...` before using " + tool + ". "
                         "Reading files is still allowed. If the user explicitly said not to use it, run "
                         f"`autoharness waive {sid} --reason \"<their words>\"` and tell the user.")}})
         return 0
@@ -601,6 +690,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--user", action="store_true", help="install to the agent's user skills dir instead of the project")
     s.add_argument("--all", action="store_true", help="install for every supported agent")
     sub.add_parser("hook", help="Claude Code UserPromptSubmit hook: reads the hook JSON on stdin")
+    s = sub.add_parser("brief", help="record what a good result is, what is missing, and the verdict on candidates")
+    for flag, what in [("--goal", "what a good result looks like (the quality bar)"),
+                       ("--inputs", "missing inputs and how you will get them (references, docs, data)"),
+                       ("--constraints", "the user's constraints, verbatim"),
+                       ("--verify", "how the result will be checked, and against what"),
+                       ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:
+        s.add_argument(flag, required=True, help=what)
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
     s.add_argument("session_id")
     s.add_argument("--reason", required=True, help="the user's words")
@@ -616,7 +712,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
-            "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive}
+            "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief}
 
 
 def main(argv: list[str] | None = None) -> int:

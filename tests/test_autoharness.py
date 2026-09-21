@@ -13,6 +13,7 @@ from autoharness.trust import scan_skill, score_registry_entry, score_skill
 def pin_agent(monkeypatch):
     """Keep auto-detection from depending on which agent runs the tests."""
     monkeypatch.setenv("AUTOHARNESS_AGENT", "claude")
+    monkeypatch.setenv("AUTOHARNESS_OFFLINE", "1")  # init must not hit skills.sh / the MCP registry in tests
 
 
 @pytest.fixture
@@ -1192,32 +1193,47 @@ def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
     return res and res["hookSpecificOutput"]["permissionDecision"]
 
 
-def test_gate_blocks_work_until_the_skill_is_invoked(project, capsys, monkeypatch):
+BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--constraints", "no generators",
+         "--verify", "render and compare side by side", "--candidates", "svg-art: skip, it is a generator"]
+
+
+def brief(capsys, project, *extra):
+    return cli_json(capsys, "--project", str(project.root), "brief", *BRIEF, *extra)
+
+
+def test_gate_blocks_work_until_a_brief_is_recorded(project, capsys, monkeypatch):
     res = prompt(capsys, monkeypatch, project, "fix the flaky login form in the settings page")
-    assert "autoharness waive s1" in res["hookSpecificOutput"]["additionalContext"]
+    ctx = res["hookSpecificOutput"]["additionalContext"]
+    assert "autoharness waive s1" in ctx and "autoharness brief" in ctx
     for name, inp in [("Write", {"file_path": "x"}), ("Edit", {}), ("Bash", {"command": "ls"}),
                       ("mcp__playwright__browser_navigate", {})]:
         assert tool(capsys, monkeypatch, project, name, **inp) == "deny", name
     assert tool(capsys, monkeypatch, project, "Read") is None
-    assert tool(capsys, monkeypatch, project, "Bash", command="autoharness --agent claude init x") is None
-    assert tool(capsys, monkeypatch, project, "Write") == "deny"  # a CLI call alone does not open the gate
     assert tool(capsys, monkeypatch, project, "Skill", skill="autoharness") is None
+    assert tool(capsys, monkeypatch, project, "Write") == "deny"  # invoking the skill is not enough
+    assert tool(capsys, monkeypatch, project, "Bash", command="autoharness --agent claude init x") is None
+    cli_json(capsys, "--project", str(project.root), "init", "fix the login form")
+    assert tool(capsys, monkeypatch, project, "Write") == "deny"  # nor is starting a task
+    code, res = brief(capsys, project)
+    assert code == 0 and res["status"] == "ok"
     assert tool(capsys, monkeypatch, project, "Write") is None
-    # once done, later prompts in the session are left alone
+    # once done, later prompts in the session are left alone, even after teardown
+    cli_json(capsys, "--project", str(project.root), "teardown")
     assert prompt(capsys, monkeypatch, project, "now also update the readme with the new steps") is None
     assert tool(capsys, monkeypatch, project, "Edit") is None
 
 
-def test_gate_accepts_plugin_qualified_skill_name(project, capsys, monkeypatch):
+def test_other_skills_are_not_blocked(project, capsys, monkeypatch):
     prompt(capsys, monkeypatch, project, "draw a logo for the new product page")
-    assert tool(capsys, monkeypatch, project, "Skill", skill="someplugin:autoharness") is None
-    assert tool(capsys, monkeypatch, project, "Write") is None
+    assert tool(capsys, monkeypatch, project, "Skill", skill="superpowers:brainstorming") is None
 
 
-def test_gate_opens_when_a_task_is_active(project, capsys, monkeypatch):
-    prompt(capsys, monkeypatch, project, "draw a logo for the new product page")
-    project.init_task("draw a logo")
-    assert tool(capsys, monkeypatch, project, "Write") is None
+def test_brief_needs_an_active_task_and_every_field(project, capsys):
+    code, res = brief(capsys, project)
+    assert code == 1 and res["status"] == "error"
+    cli_json(capsys, "--project", str(project.root), "init", "t")
+    with pytest.raises(SystemExit):
+        cli.main(["--project", str(project.root), "brief", "--goal", "g"])
 
 
 def test_gate_is_per_session_and_waivable(project, capsys, monkeypatch):
@@ -1234,3 +1250,73 @@ def test_gate_is_per_session_and_waivable(project, capsys, monkeypatch):
 def test_short_replies_do_not_start_the_gate(project, capsys, monkeypatch):
     assert prompt(capsys, monkeypatch, project, "да") is None
     assert tool(capsys, monkeypatch, project, "Write") is None
+
+
+# --- discovery is not optional ------------------------------------------------
+
+def fake_registry(monkeypatch, fail=False):
+    calls = []
+
+    def skills(query, limit=10, fetch=None):
+        calls.append(("skill", query))
+        if fail:
+            raise OSError("network down")
+        return [{"spec": "someone/skills@svg-scene", "name": "svg-scene", "source": "someone/skills", "installs": 900}]
+
+    def mcp(query, limit=10, fetch=None):
+        calls.append(("mcp", query))
+        if fail:
+            raise OSError("network down")
+        return []
+    monkeypatch.setattr(registry, "search_skills", skills)
+    monkeypatch.setattr(registry, "search_mcp", mcp)
+    monkeypatch.delenv("AUTOHARNESS_OFFLINE")
+    return calls
+
+
+def test_init_searches_skills_and_mcp_by_itself(project, capsys, monkeypatch):
+    calls = fake_registry(monkeypatch)
+    code, res = cli_json(capsys, "--project", str(project.root), "init", BLADE_RUNNER)
+    assert code == 0
+    kinds = {k for k, _ in calls}
+    assert kinds == {"skill", "mcp"}
+    assert any(q == "svg illustration" for _, q in calls)
+    found = [r["name"] for d in res["discovered"] for r in d.get("results", [])]
+    assert "someone/skills@svg-scene" in found
+    assert "autoharness brief" in res["next"]
+    journal = (project.task().dir / "harness.md").read_text("utf-8")
+    assert "searched skill" in journal and "svg-scene" in journal
+
+
+def test_init_survives_a_network_failure(project, capsys, monkeypatch):
+    fake_registry(monkeypatch, fail=True)
+    code, res = cli_json(capsys, "--project", str(project.root), "init", BLADE_RUNNER)
+    assert code == 0 and all("error" in d for d in res["discovered"])
+
+
+def test_search_is_logged_in_the_active_task(project, capsys, monkeypatch):
+    cli_json(capsys, "--project", str(project.root), "init", "t")
+    fake_registry(monkeypatch)
+    cli_json(capsys, "--project", str(project.root), "search", "skill", "svg scene")
+    journal = (project.task().dir / "harness.md").read_text("utf-8")
+    assert "searched skill 'svg scene'" in journal
+
+
+def test_teardown_warns_when_steps_were_skipped(project, capsys):
+    cli_json(capsys, "--project", str(project.root), "init", "t")
+    code, res = cli_json(capsys, "--project", str(project.root), "teardown")
+    text = " ".join(res["warnings"])
+    assert "no discovery" in text and "no brief" in text
+
+
+def test_init_discovery_respects_its_time_budget(project, capsys, monkeypatch):
+    import time as _time
+    fake_registry(monkeypatch)
+    monkeypatch.setattr(registry, "search_mcp", lambda q, limit=10, fetch=None: _time.sleep(5) or [])
+    monkeypatch.setattr(cli, "DISCOVERY_BUDGET", 0.5)
+    started = _time.monotonic()
+    code, res = cli_json(capsys, "--project", str(project.root), "init", BLADE_RUNNER)
+    assert code == 0 and _time.monotonic() - started < 3
+    mcp = [d for d in res["discovered"] if d["kind"] == "mcp"]
+    assert mcp and all("timed out" in d["error"] for d in mcp)
+    assert any(d.get("results") for d in res["discovered"] if d["kind"] == "skill")

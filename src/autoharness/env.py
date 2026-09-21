@@ -313,6 +313,31 @@ class Task:
         grants[key] = perms
         _write_json(self.dir / "permissions.json", grants)
 
+    def record_discovery(self, discovered: list[dict]) -> None:
+        self._update_info(discovery=discovered)
+        for d in discovered:
+            if "skipped" in d:
+                self.log(f"discovery skipped: {d['skipped']}")
+            elif "error" in d:
+                self.log(f"searched {d['kind']} '{d['query']}': failed ({d['error']})")
+            else:
+                names = ", ".join(r["name"] for r in d["results"]) or "nothing"
+                self.log(f"searched {d['kind']} '{d['query']}': {names}")
+
+    def note_search(self, kind: str, query: str, names: list[str]) -> None:
+        searches = self.info().get("searches", [])
+        searches.append({"kind": kind, "query": query, "results": names})
+        self._update_info(searches=searches)
+        self.log(f"searched {kind} '{query}': {', '.join(names) or 'nothing'}")
+
+    def record_brief(self, brief: dict) -> None:
+        self._update_info(brief=brief)
+        self.log("brief: " + "; ".join(f"{k}: {v}" for k, v in brief.items()))
+
+    def discovery_ran(self) -> bool:
+        info = self.info()
+        return bool(info.get("searches")) or any("skipped" not in d for d in info.get("discovery", []))
+
     def note_capability(self, capability: str, reason: str = "") -> None:
         caps = self.info().get("capabilities", [])
         if capability not in caps:
