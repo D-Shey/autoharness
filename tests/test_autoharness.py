@@ -507,3 +507,46 @@ def test_check_warns_about_paths_and_emails(tmp_path):
                                     FILLED + "\nSee C:\\Users\\rda44\\deck and ask dev@example.com\n"))
     assert res.status == "ok"
     assert any("path" in w for w in res.warnings) and any("email" in w for w in res.warnings)
+
+
+@pytest.fixture
+def lib_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTOHARNESS_HOME", str(tmp_path / "home"))
+    return tmp_path / "home"
+
+
+def test_library_save_list_stage_delete(tmp_path, lib_home):
+    src = write_skill(tmp_path / "proj", "pptx-qa", FILLED)
+    (src / "__pycache__").mkdir()
+    (src / "__pycache__" / "x.pyc").write_bytes(b"\0")
+    dest = library.save(src, {"description": "Check .pptx slides visually", "capabilities": ["documents"],
+                              "task": "t1", "project": "p"})
+    assert dest == lib_home / "skills" / "pptx-qa" and (dest / "SKILL.md").read_text("utf-8") == FILLED
+    assert not (dest / "__pycache__").exists() and library.exists("pptx-qa")
+    meta = json.loads(library.meta_path("pptx-qa").read_text("utf-8"))
+    assert meta["name"] == "pptx-qa" and meta["capabilities"] == ["documents"] and meta["sha256"] and meta["saved"]
+
+    entries, warnings = library.list_skills()
+    assert [e["name"] for e in entries] == ["pptx-qa"] and warnings == []
+    assert library.with_capability("documents") == [{"name": "pptx-qa", "description": "Check .pptx slides visually"}]
+    assert library.with_capability("testing") == []
+    assert library.stage_from_library("local", "pptx-qa", tmp_path / "stage") == dest
+    assert library.trust_report("local:pptx-qa")["requires_approval"] is False
+
+    (src / "SKILL.md").write_text(FILLED.replace("Look at every PNG.", "Look twice."), "utf-8")
+    library.save(src, {"description": "d", "capabilities": [], "task": "t2", "project": "p"})
+    assert "Look twice." in (dest / "SKILL.md").read_text("utf-8")
+
+    library.delete("pptx-qa")
+    assert not library.exists("pptx-qa") and not library.meta_path("pptx-qa").exists()
+    with pytest.raises(HarnessError):
+        library.delete("pptx-qa")
+    with pytest.raises(HarnessError, match="skill list"):
+        library.stage_from_library("local", "pptx-qa", tmp_path / "stage")
+
+
+def test_library_list_skips_broken_meta(tmp_path, lib_home):
+    library.save(write_skill(tmp_path, "pptx-qa", FILLED), {"description": "d", "capabilities": []})
+    library.meta_path("pptx-qa").write_text("{broken", "utf-8")
+    entries, warnings = library.list_skills()
+    assert entries == [] and warnings and "pptx-qa" in warnings[0]

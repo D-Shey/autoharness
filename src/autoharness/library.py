@@ -10,12 +10,16 @@ guards the agent against dangerous instructions.
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from autoharness.env import HarnessError
-from autoharness.trust import scan_skill
+from autoharness.env import RUNTIME_JUNK, HarnessError, _hash_dir
+from autoharness.recipes import home
+from autoharness.trust import TrustReport, scan_skill
 
 FILL_MARKER = "<!-- autoharness: fill in -->"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
@@ -108,3 +112,72 @@ def check(src: Path) -> CheckResult:
                 if pattern.search(line):
                     warnings.append(f"{label} at {path.relative_to(src)}:{i}")
     return CheckResult("ok", description, [], warnings)
+
+
+def root() -> Path:
+    return home() / "skills"
+
+
+def skill_dir(name: str) -> Path:
+    return root() / name
+
+
+def meta_path(name: str) -> Path:
+    return root() / f"{name}.meta.json"
+
+
+def exists(name: str) -> bool:
+    return skill_dir(name).is_dir()
+
+
+def save(src: Path, meta: dict) -> Path:
+    """Copy `src` into the library, replacing any earlier version, and record where it came from."""
+    validate_name(src.name)
+    dest = skill_dir(src.name)
+    if dest.exists():
+        shutil.rmtree(dest)
+    root().mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*RUNTIME_JUNK))
+    record = meta | {"name": src.name, "saved": time.strftime("%Y-%m-%dT%H:%M:%S"), "sha256": _hash_dir(dest)}
+    meta_path(src.name).write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", "utf-8")
+    return dest
+
+
+def list_skills() -> tuple[list[dict], list[str]]:
+    entries, warnings = [], []
+    if not root().exists():
+        return entries, warnings
+    for path in sorted(root().glob("*.meta.json")):
+        try:
+            m = json.loads(path.read_text("utf-8"))
+            entries.append({"name": m["name"], "description": m.get("description", ""),
+                            "capabilities": m.get("capabilities", []), "saved": m.get("saved")})
+        except (ValueError, KeyError):
+            warnings.append(f"unreadable metadata {path.name}; skipped")
+    return entries, warnings
+
+
+def delete(name: str) -> None:
+    validate_name(name)
+    if not exists(name):
+        raise HarnessError(f"no skill {name!r} in the library")
+    shutil.rmtree(skill_dir(name))
+    meta_path(name).unlink(missing_ok=True)
+
+
+def with_capability(capability: str) -> list[dict]:
+    return [{"name": e["name"], "description": e["description"]}
+            for e in list_skills()[0] if capability in e["capabilities"]]
+
+
+def stage_from_library(repo: str, skill: str, stage_dir: Path) -> Path:
+    """Stager for `local:<name>`: the library copy is the staged skill (add_skill scans, then copies it)."""
+    if not exists(skill):
+        raise HarnessError(f"no skill {skill!r} in the library; see `autoharness skill list`")
+    return skill_dir(skill)
+
+
+def trust_report(spec: str) -> dict:
+    return TrustReport(spec, 100, "high", ["saved to the local library with the user's approval",
+                                           "skills run with full agent permissions; content is statically scanned before install"],
+                       False, None, {"runs_with": "full agent permissions"}).to_dict()
