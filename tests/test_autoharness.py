@@ -1327,7 +1327,7 @@ def test_init_discovery_respects_its_time_budget(project, capsys, monkeypatch):
 
 def start_task(capsys, project, gaps):
     root = str(project.root)
-    cli_json(capsys, "--project", root, "init", "draw a film scene in svg")
+    cli_json(capsys, "--project", root, "init", "prepare the quarterly report")
     args = [a if a != "none: a browser and the shell cover every capability" else gaps for a in BRIEF]
     return cli_json(capsys, "--project", root, "brief", *args)
 
@@ -1381,3 +1381,125 @@ def test_bootstrap_skill_teaches_creating_a_missing_skill_mid_task():
     from importlib import resources
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
     assert "--gaps" in text and "create <skill-name>" in text and "before producing" in text
+
+
+# --- evidence, review rounds, independent critic -----------------------------
+
+def png(path: Path) -> Path:
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + path.name.encode())
+    return path
+
+
+def visual_task(capsys, project):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", BLADE_RUNNER)
+    cli_json(capsys, "--project", root, "brief", *BRIEF)
+    return root
+
+
+def ev(capsys, root, path, kind):
+    return cli_json(capsys, "--project", root, "evidence", "add", str(path), "--kind", kind)
+
+
+def test_evidence_takes_any_file_and_copies_it(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    notes = tmp_path / "api-sample.json"
+    notes.write_text("{}", "utf-8")
+    code, res = ev(capsys, root, notes, "reference")
+    assert code == 0 and res["evidence"]["media"] is None
+    assert Path(res["evidence"]["file"]).parent == project.task().dir / "evidence"
+    code, res = ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    assert res["evidence"]["media"] == "image"
+
+
+def test_review_needs_a_result(project, capsys):
+    root = visual_task(capsys, project)
+    code, res = cli_json(capsys, "--project", root, "review", "--diff", "x", "--fixable", "no")
+    assert code == 1 and "no result" in res["error"]
+
+
+def test_critic_prompt_points_at_the_files_the_bar_and_the_focus(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    ev(capsys, root, png(tmp_path / "r1.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    p = res["prompt"]
+    assert code == 0 and res["result"] in p and res["references"][0] in p
+    assert "matches the film frame" in p and "no generators" in p and "VERDICT" in p
+    assert "camera angle" in p  # focus from the visual-review capability
+    assert "fresh subagent" in res["next"]
+
+
+def test_visual_teardown_needs_image_references_results_and_a_final_critic(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    text = " ".join(res["problems"])
+    assert code == 1 and "image reference" in text and "result(s)" in text and "independent review" in text
+
+    notes = tmp_path / "scene-notes.md"
+    notes.write_text("pink Joi, blue hair", "utf-8")
+    ev(capsys, root, notes, "reference")  # a text note does not count for a visual task
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert "image reference" in " ".join(res["problems"])
+
+    ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    for n in (1, 2):
+        ev(capsys, root, png(tmp_path / f"r{n}.png"), "result")
+    cli_json(capsys, "--project", root, "review", "--by", "self", "--diff", "looks fine", "--fixable", "no")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "independent review" in " ".join(res["problems"])  # self-review is not enough
+
+    cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", "K too big", "--fixable", "yes")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "fixable differences" in " ".join(res["problems"])
+
+    ev(capsys, root, png(tmp_path / "r3.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "was not reviewed" in " ".join(res["problems"])
+
+    cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", "flat style only", "--fixable", "no")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0 and res["status"] == "ok"
+
+
+def test_any_task_can_opt_into_the_critic_with_any_files(project, capsys, tmp_path):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "rewrite the onboarding guide for new engineers")
+    cli_json(capsys, "--project", root, "brief", *BRIEF, "--review", "critic")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "independent review" in " ".join(res["problems"])
+    guide = tmp_path / "guide.md"
+    guide.write_text("# Onboarding", "utf-8")
+    ev(capsys, root, guide, "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert "what is missing or wrong" in res["prompt"]  # generic focus, nothing about images
+    assert "camera" not in res["prompt"]
+    cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", "ok", "--fixable", "no")
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0
+
+
+def test_non_visual_task_needs_no_evidence(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "fix the flaky login form in the settings page")
+    cli_json(capsys, "--project", root, "brief", *BRIEF)
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0
+
+
+def test_docker_image_is_not_a_visual_task():
+    names = {c.name for c, _ in Catalog.load().classify("rebuild the docker image and push it")}
+    assert "visual-review" not in names
+
+
+def test_force_skips_evidence_with_warnings(project, capsys):
+    root = visual_task(capsys, project)
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert code == 0 and any("reference" in w for w in res["warnings"])
+
+
+def test_bootstrap_skill_teaches_evidence_and_the_critic():
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    for phrase in ("autoharness evidence add", "autoharness review", "autoharness critic", "fresh subagent"):
+        assert phrase in text, phrase

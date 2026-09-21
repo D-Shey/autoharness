@@ -69,14 +69,17 @@
       "keywords": ["movie", "film", "scene", "poster", "reference", "фильм", "кадр", "сцен", "постер", "персонаж", "референс"],
       "mcp": ["playwright"],
       "skills": [],
-      "search": ["reference images", "image search"]
+      "search": ["reference images", "image search"],
+      "requires": {"reference": 1, "media": "image"}
     },
     "visual-review": {
       "description": "Render a visual result (SVG, canvas, HTML, chart) to an image and critique it side by side with the reference, over several rounds.",
-      "keywords": ["svg", "draw", "drawing", "illustration", "graphics", "image", "picture", "logo", "icon", "canvas", "mockup", "нарису", "рисун", "иллюстрация", "картинк", "изображение", "логотип", "иконк", "макет"],
+      "keywords": ["svg", "draw", "drawing", "illustration", "graphics", "picture", "logo", "icon", "canvas", "mockup", "нарису", "рисун", "иллюстрация", "картинк", "логотип", "иконк", "макет"],
       "mcp": ["playwright"],
       "skills": [],
-      "search": ["svg illustration", "visual review"]
+      "search": ["svg illustration", "visual review"],
+      "requires": {"result": 2, "critic": 1, "media": "image"},
+      "review": "scale and composition, camera angle, anatomy and pose, likeness of the signature details, palette and light"
     },
     "skill-authoring": {
       "description": "Write a new skill when no existing one fits: when it triggers, the steps, how to verify.",

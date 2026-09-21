@@ -17,7 +17,7 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, config, library, recipes, registry, text
+from autoharness import agents, config, evidence, library, recipes, registry, text
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected, Task, npx_stage_skill, parse_skill_spec
 from autoharness.trust import curated_report, score_registry_entry, score_skill
@@ -213,6 +213,42 @@ def cmd_search(args, project, catalog):
 CREATE_RE = re.compile(r"\bcreate\s+`?([a-z0-9][a-z0-9-]{1,63})`?")
 
 
+def cmd_evidence(args, project, catalog):
+    task = project.task()
+    if args.action == "list":
+        out({"evidence": task.info().get("evidence", []), "reviews": task.info().get("reviews", [])})
+        return 0
+    if not args.file or not args.kind:
+        raise HarnessError("usage: autoharness evidence add <file> --kind reference|result [--note ...]")
+    item = evidence.add(task, Path(args.file), args.kind, args.note or "")
+    nxt = ("Study it and write down what the result must match."
+           if args.kind == "reference" else
+           "Review this result: record your own pass with `autoharness review --by self ...`, then get an "
+           "independent one with `autoharness critic`.")
+    out({"status": "ok", "evidence": item, "next": nxt})
+    return 0
+
+
+def cmd_review(args, project, catalog):
+    item = evidence.review(project.task(), args.diff, args.fixable == "yes", args.by)
+    nxt = ("Fix the fixable differences, produce the result again, `evidence add` it, and review again."
+           if item["fixable"] else
+           "Nothing fixable left in this review." + ("" if item["by"] == "critic" else
+                                                     " Confirm with an independent critic: `autoharness critic`."))
+    out({"status": "ok", "review": item, "next": nxt})
+    return 0
+
+
+def cmd_critic(args, project, catalog):
+    res = evidence.critic_prompt(catalog, project.task())
+    out({"status": "ok"} | res | {
+        "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
+                "elsewhere a new session). Do not add your own opinion to it. Record its answer verbatim in "
+                "substance: `autoharness review --by critic --diff \"<its list>\" --fixable yes|no` "
+                "(yes if its verdict is fixable)."})
+    return 0
+
+
 def cmd_brief(args, project, catalog):
     task = project.task()
     planned = list(dict.fromkeys(CREATE_RE.findall(args.gaps)))
@@ -222,7 +258,8 @@ def cmd_brief(args, project, catalog):
     for name in planned:
         library.validate_name(name)
     task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
-                       "verify": args.verify, "candidates": args.candidates, "gaps": args.gaps})
+                       "verify": args.verify, "candidates": args.candidates, "gaps": args.gaps}
+                      | ({"review": args.review} if args.review else {}))
     task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
         "no search ran for this task; run `autoharness search skill|mcp \"<query>\"` before deciding nothing fits"]
@@ -349,10 +386,10 @@ def cmd_teardown(args, project, catalog):
                     if v["spec"].startswith("local:") and not library.exists(parse_skill_spec(v["spec"])[1])]
     info = task.info()
     blocking, skill_warnings = task.planned_skill_problems()
+    blocking += evidence.problems(catalog, task)
     if blocking and not args.force:
         out({"status": "incomplete", "task_id": task.id, "problems": blocking,
-             "next": "Create and fill the skills the brief planned, then tear down again. Use --force only if the "
-                     "user agreed to drop them."})
+             "next": "Fix these, then tear down again. Use --force only if the user agreed to skip them."})
         return 1
     warnings += blocking + skill_warnings
     if not task.discovery_ran():
@@ -693,7 +730,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task_id", nargs="?")
     s.add_argument("--save-recipe", metavar="NAME")
     s.add_argument("--notes")
-    s.add_argument("--force", action="store_true", help="tear down although a planned skill is missing")
+    s.add_argument("--force", action="store_true",
+                   help="tear down although a planned skill, evidence or a review is missing")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--keep", dest="policy", action="store_const", const="keep", help="keep it installed in the project")
     g.add_argument("--remove", dest="policy", action="store_const", const="remove", help="uninstall everything it added")
@@ -716,6 +754,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--user", action="store_true", help="install to the agent's user skills dir instead of the project")
     s.add_argument("--all", action="store_true", help="install for every supported agent")
     sub.add_parser("hook", help="Claude Code UserPromptSubmit hook: reads the hook JSON on stdin")
+    s = sub.add_parser("evidence", help="record a file you checked: a reference, or what a round produced")
+    s.add_argument("action", choices=["add", "list"])
+    s.add_argument("file", nargs="?")
+    s.add_argument("--kind", choices=list(evidence.KINDS))
+    s.add_argument("--note", help="what it shows")
+    s = sub.add_parser("review", help="record one review round of the latest result")
+    s.add_argument("--diff", required=True, help="the differences found, most important first")
+    s.add_argument("--fixable", required=True, choices=["yes", "no"], help="is any of them fixable in the medium?")
+    s.add_argument("--by", choices=["self", "critic"], default="self")
+    sub.add_parser("critic", help="a prompt for an independent reviewer of the latest result")
     s = sub.add_parser("brief", help="record what a good result is, what is missing, and the verdict on candidates")
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
@@ -725,6 +773,8 @@ def build_parser() -> argparse.ArgumentParser:
                        ("--verify", "how the result will be checked, and against what"),
                        ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:
         s.add_argument(flag, required=True, help=what)
+    s.add_argument("--review", choices=["critic"],
+                   help="require an independent critic for this task even if its capabilities do not")
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
     s.add_argument("session_id")
     s.add_argument("--reason", required=True, help="the user's words")
@@ -740,7 +790,8 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
-            "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief}
+            "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief,
+            "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic}
 
 
 def main(argv: list[str] | None = None) -> int:

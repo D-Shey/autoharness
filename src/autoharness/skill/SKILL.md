@@ -48,7 +48,9 @@ Before you list tools, answer three questions in writing:
 2. **What missing input do I need?** The subject you must match (a film still, a
    product photo, a design, an API's current docs, sample data), a spec, examples.
    Working from memory when the real thing can be looked up is a capability gap,
-   often the biggest one. Plan to get the input first, before you produce anything.
+   often the biggest one. Plan to get the input first, before you produce anything,
+   and get the thing itself, not a description of it: the still, not an article
+   about the scene; the API's actual response, not a blog post about it.
 3. **What are the user's constraints?** Write them down verbatim ("no external
    generators", "no new dependencies", "must run offline"). Every candidate you
    discover is checked against them in step 3.
@@ -89,6 +91,7 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs and how you g
   --constraints "<the user's constraints, verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; <name>: ...; searched: <queries>" \
   --gaps "create <skill-name>: <capability>; ..."   # or: "none: <why tools at hand cover it>"
+  # optional: --review critic   (require an independent critic even if no capability does)
 ```
 
 Give a verdict for every discovered candidate that is plausibly relevant (skip the
@@ -162,13 +165,28 @@ resume from where you were.
 
 ### 7. Finish
 
-1. Verify the result with the capabilities you installed. Run the checks; don't assume them.
-   Verify against the quality bar from your brief, not only that it works. When there is a
-   reference, put your output and the reference side by side, list the biggest
-   differences (scale, composition, angle, palette, likeness, missing elements), fix
-   them, and repeat. One render is not a review: plan several rounds and stop when the
-   remaining differences are small or cannot be fixed with the chosen medium. Tell
-   the user which ones remain.
+1. Verify against the quality bar from your brief, not only that it works, and keep
+   the evidence. This works for any task; what counts as a reference and a result
+   depends on it (a film still and a screenshot; a spec and a test log; the old
+   report and the new one):
+
+   ```bash
+   autoharness evidence add <file> --kind reference   # what the result must match; the thing itself
+   autoharness evidence add <file> --kind result      # what this round produced
+   autoharness review --by self --diff "<differences, most important first>" --fixable yes|no
+   autoharness critic                                 # prompt for an independent reviewer
+   autoharness review --by critic --diff "<its list>" --fixable yes|no
+   ```
+
+   Rounds: produce, add the result, compare it side by side with the reference, fix the
+   most important differences, repeat. One pass is not a review. You are not the judge
+   of your own work: give the `critic` prompt to a fresh subagent that did not make it
+   (Claude Code: the Agent tool; elsewhere a new session), unchanged, and record its
+   answer as it is. Stop only when the critic's verdict on the latest result is that
+   nothing fixable is left; "the medium cannot do it" must be the critic's call, not
+   yours. Some capabilities require this (visual ones need image references, at least
+   two results and a final critic); teardown refuses until it is done. Tell the user
+   which differences remain.
 2. Save the skills you created: bring each one up to date with what the task taught
    you, then `autoharness skill save <name>`. If you learned something else reusable that
    no skill covers (how to build or check this kind of project, an API quirk), write it
