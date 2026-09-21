@@ -601,3 +601,63 @@ def test_teardown_has_no_unsaved_key_when_generated_skill_was_saved(project):
     (path / "SKILL.md").write_text(FILLED, "utf-8")
     library.save(path, {"description": "d", "capabilities": []})
     assert "unsaved_generated" not in task.teardown("remove")
+
+
+def test_cli_generated_skill_full_cycle(tmp_path, lib_home, capsys):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    cli_json(capsys, "--project", str(a), "init", "сделать pptx")
+    cli_json(capsys, "--project", str(a), "need", "documents")
+    code, res = cli_json(capsys, "--project", str(a), "skill", "new", "pptx-qa", "--description", "Check .pptx slides visually")
+    assert code == 0
+    skill_md = a / ".claude" / "skills" / "pptx-qa" / "SKILL.md"
+    code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
+    assert code == 1 and res["status"] == "invalid"
+
+    skill_md.write_text(FILLED + "\nTried on C:\\Users\\rda44\\deck\n", "utf-8")
+    code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
+    assert code == 3 and res["status"] == "approval_required" and res["overwrites"] is False
+    assert any("path" in w for w in res["warnings"]) and not library.exists("pptx-qa")
+    code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa", "--approve")
+    assert code == 0 and library.exists("pptx-qa")
+    assert json.loads(library.meta_path("pptx-qa").read_text("utf-8"))["capabilities"] == ["documents"]
+    code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
+    assert code == 3 and res["overwrites"] is True
+
+    cli_json(capsys, "--project", str(b), "init", "другая презентация")
+    code, res = cli_json(capsys, "--project", str(b), "need", "documents")
+    assert res["local"] == [{"name": "pptx-qa", "description": "Check .pptx slides visually"}]
+    code, res = cli_json(capsys, "--project", str(b), "add", "skill", "local:pptx-qa")
+    assert code == 0 and res["added"] == "pptx-qa"
+    assert (b / ".claude" / "skills" / "pptx-qa" / "SKILL.md").exists()
+    assert Project(b, "claude").task().skills_lock()["pptx-qa"]["spec"] == "local:pptx-qa"
+
+    code, res = cli_json(capsys, "--project", str(b), "skill", "list")
+    assert [e["name"] for e in res["skills"]] == ["pptx-qa"]
+    code, res = cli_json(capsys, "--project", str(b), "skill", "delete", "pptx-qa")
+    assert code == 0 and not library.exists("pptx-qa")
+    assert (b / ".claude" / "skills" / "pptx-qa" / "SKILL.md").exists()
+
+
+def test_cli_skill_save_blocks_secrets_even_with_approve(tmp_path, lib_home, capsys):
+    cli_json(capsys, "--project", str(tmp_path), "init", "t")
+    cli_json(capsys, "--project", str(tmp_path), "skill", "new", "pptx-qa", "--description", "d")
+    (tmp_path / ".claude" / "skills" / "pptx-qa" / "SKILL.md").write_text(FILLED + "\nghp_" + "a" * 36 + "\n", "utf-8")
+    code, res = cli_json(capsys, "--project", str(tmp_path), "skill", "save", "pptx-qa", "--approve")
+    assert code == 1 and res["status"] == "blocked" and not library.exists("pptx-qa")
+
+
+def test_cli_skill_save_refuses_third_party_skills(project, lib_home, capsys):
+    task = project.init_task("t")
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+    code, res = cli_json(capsys, "--project", str(project.root), "skill", "save", "demo", "--approve")
+    assert code == 1 and "skill new" in res["error"]
+
+
+def test_cli_teardown_warns_about_unsaved_local_skills_in_recipe(tmp_path, lib_home, capsys):
+    cli_json(capsys, "--project", str(tmp_path), "init", "t")
+    cli_json(capsys, "--project", str(tmp_path), "skill", "new", "pptx-qa", "--description", "d")
+    code, res = cli_json(capsys, "--project", str(tmp_path), "teardown", "--keep", "--save-recipe", "deck")
+    assert code == 0 and any("local:pptx-qa" in w for w in res["warnings"])
+    assert res["unsaved_generated"] == [{"name": "pptx-qa", "backup": None}]
+    assert "skill save" in res["next"]

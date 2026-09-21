@@ -12,9 +12,9 @@ import sys
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, config, recipes, registry
+from autoharness import agents, config, library, recipes, registry
 from autoharness.catalog import Catalog
-from autoharness.env import HarnessError, Project, SkillRejected, parse_skill_spec
+from autoharness.env import HarnessError, Project, SkillRejected, Task, npx_stage_skill, parse_skill_spec
 from autoharness.trust import curated_report, score_registry_entry, score_skill
 
 EXIT_APPROVAL = 3
@@ -47,7 +47,12 @@ def local_mcp_name(name: str) -> str:
 
 
 def resolve_skill(catalog: Catalog, spec: str) -> dict:
-    curated = {s for c in catalog.capabilities.values() for s in c.skills}
+    if spec.startswith("local:"):
+        name = parse_skill_spec(spec)[1]
+        if not library.exists(name):
+            raise HarnessError(f"no skill {name!r} in the library; see `autoharness skill list`")
+        return library.trust_report(spec)
+    curated ={s for c in catalog.capabilities.values() for s in c.skills}
     if spec in curated:
         report = score_skill(spec, 10_000, catalog.trusted_skill_owners).to_dict()
         report["reasons"].insert(0, "curated catalog entry")
@@ -99,10 +104,11 @@ def cmd_need(args, project, catalog):
     task = project.task()
     task.note_capability(args.capability, args.reason or "")
     cap = catalog.capabilities.get(args.capability)
+    local = library.with_capability(args.capability)
     if cap:
-        out({"status": "ok", "capability": cap.name, "curated": {"mcp": cap.mcp, "skills": cap.skills}})
+        out({"status": "ok", "capability": cap.name, "curated": {"mcp": cap.mcp, "skills": cap.skills}, "local": local})
     else:
-        out({"status": "ok", "capability": args.capability, "curated": None,
+        out({"status": "ok", "capability": args.capability, "curated": None, "local": local,
              "next": f"No curated entry. Try `autoharness search mcp \"{args.capability}\"` and `autoharness search skill \"{args.capability}\"`."})
     return 0
 
@@ -166,7 +172,8 @@ def cmd_add(args, project, catalog):
         if report["requires_approval"] and not args.approve:
             return need_approval(f"add skill {args.name}", report)
         try:
-            findings = task.add_skill(args.name, force=args.force,
+            stage = library.stage_from_library if args.name.startswith("local:") else npx_stage_skill
+            findings = task.add_skill(args.name, force=args.force, stage=stage,
                                       trust={"score": report["score"], "level": report["level"]})
         except SkillRejected as e:
             out({"status": "rejected", "skill": e.spec, "findings": [f.__dict__ for f in e.findings],
@@ -216,14 +223,86 @@ def cmd_status(args, project, catalog):
 
 def cmd_teardown(args, project, catalog):
     task = project.task(args.task_id)
-    saved = str(recipes.save(task, args.save_recipe, args.notes or "")) if args.save_recipe else None
+    warnings = []
+    saved = None
+    if args.save_recipe:
+        saved = str(recipes.save(task, args.save_recipe, args.notes or ""))
+        warnings = [f"recipe refers to {v['spec']}, which is not in the library yet; run `autoharness skill save "
+                    f"{parse_skill_spec(v['spec'])[1]}` or the recipe cannot install it"
+                    for v in task.skills_lock().values()
+                    if v["spec"].startswith("local:") and not library.exists(parse_skill_spec(v["spec"])[1])]
     policy, source = config.teardown_policy(project.root, args.policy)
     result = task.teardown(policy)
     kept = result["kept"]["mcp"] + result["kept"]["skills"]
-    out({"status": "ok", "policy": policy, "policy_source": source} | result | {"recipe_saved": saved,
-         "next": (f"Tell the user these stay installed in the project: {', '.join(kept)}. "
-                  "They can remove one with `autoharness remove mcp|skill <name>`, or all with `autoharness prune`."
-                  if kept else "Tell the user what was removed.")})
+    nxt = (f"Tell the user these stay installed in the project: {', '.join(kept)}. "
+           "They can remove one with `autoharness remove mcp|skill <name>`, or all with `autoharness prune`."
+           if kept else "Tell the user what was removed.")
+    if result.get("unsaved_generated"):
+        names = ", ".join(u["name"] for u in result["unsaved_generated"])
+        nxt += (f" Skills you wrote are not in the library: {names}. If they are worth reusing, "
+                "run `autoharness skill save <name>` and ask the user.")
+    out({"status": "ok", "policy": policy, "policy_source": source} | result
+        | {"recipe_saved": saved, "next": nxt} | ({"warnings": warnings} if warnings else {}))
+    return 0
+
+
+def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
+    """The lock entry for `name` from the active task, else from kept.json, and the task it belongs to."""
+    active = project.task() if project.active_id() else None
+    entry = active.skills_lock().get(name) if active else None
+    if entry:
+        return entry, active
+    entry = project.kept()["skills"].get(name)
+    if not entry:
+        raise HarnessError(f"skill {name!r} is not in the active task or kept in this project")
+    task = Task(project, entry["task"]) if entry.get("task") else None
+    return entry, task if task and task.dir.exists() else None
+
+
+def cmd_skill(args, project, catalog):
+    if args.action == "list":
+        entries, warnings = library.list_skills()
+        out({"skills": entries} | ({"warnings": warnings} if warnings else {}))
+        return 0
+    if not args.name:
+        raise HarnessError(f"usage: autoharness skill {args.action} <name>")
+    if args.action == "delete":
+        library.delete(args.name)
+        out({"status": "ok", "deleted": args.name, "note": "copies already installed in projects are untouched"})
+        return 0
+    if args.action == "new":
+        if not args.description:
+            raise HarnessError("skill new needs --description: when should an agent use this skill?")
+        path = project.task().new_skill(args.name, args.description)
+        out({"status": "ok", "created": str(path),
+             "next": "Fill in every section of SKILL.md with what you learned, generalised: no absolute paths, "
+                     "secrets or people's names. Then run `autoharness skill save " + args.name + "`."})
+        return 0
+
+    # save
+    entry, task = _find_local_skill(project, args.name)
+    if not entry["spec"].startswith("local:"):
+        raise HarnessError("only skills created with `skill new` or installed from the library (local:) can be saved")
+    agent = task.agent if task else project.agent
+    src = agent.skills_path(project.root) / args.name
+    res = library.check(src)
+    if res.status != "ok":
+        out({"status": res.status, "skill": args.name, "problems": res.problems, "warnings": res.warnings,
+             "next": "Fix the problems and run skill save again." if res.status == "invalid"
+                     else "Remove the flagged content; saving is blocked until it is gone."})
+        return 1
+    if not args.approve:
+        out({"status": "approval_required", "skill": args.name, "description": res.description,
+             "files": sorted(str(p.relative_to(src)) for p in src.rglob("*") if p.is_file()),
+             "warnings": res.warnings, "overwrites": library.exists(args.name),
+             "next": "Show the user the name, description and warnings. Re-run with --approve only if they agree."})
+        return EXIT_APPROVAL
+    dest = library.save(src, {"description": res.description,
+                              "capabilities": task.info().get("capabilities", []) if task else [],
+                              "task": task.id if task else entry.get("task"), "project": str(project.root)})
+    if task:
+        task.log(f"saved skill `{args.name}` to the library")
+    out({"status": "ok", "saved": str(dest), "use_elsewhere": f"autoharness add skill local:{args.name}"})
     return 0
 
 
@@ -321,6 +400,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("key", nargs="?", choices=list(config.SETTINGS))
     s.add_argument("value", nargs="?")
     s.add_argument("--global", dest="glob", action="store_true", help="change ~/.autoharness/config.json")
+    s = sub.add_parser("skill", help="write your own skills and keep them in the local library")
+    s.add_argument("action", choices=["new", "save", "list", "delete"])
+    s.add_argument("name", nargs="?")
+    s.add_argument("--description", help="for `new`: when an agent should use the skill")
+    s.add_argument("--approve", action="store_true", help="for `save`: the user explicitly agreed")
     s = sub.add_parser("recipe", help="saved harness recipes")
     s.add_argument("action", choices=["list", "match", "show"])
     s.add_argument("value", nargs="?", default="")
@@ -333,7 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
-            "teardown": cmd_teardown, "config": cmd_config,
+            "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents}
 
 
