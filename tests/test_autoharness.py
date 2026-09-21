@@ -661,3 +661,9 @@ def test_cli_teardown_warns_about_unsaved_local_skills_in_recipe(tmp_path, lib_h
     assert code == 0 and any("local:pptx-qa" in w for w in res["warnings"])
     assert res["unsaved_generated"] == [{"name": "pptx-qa", "backup": None}]
     assert "skill save" in res["next"]
+
+
+def test_bootstrap_skill_teaches_generated_skills():
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    assert "autoharness skill new" in text and "autoharness skill save" in text and "--approve" in text

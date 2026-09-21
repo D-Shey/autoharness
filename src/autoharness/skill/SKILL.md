@@ -47,7 +47,9 @@ autoharness search mcp "<query>"                     # official MCP registry
 autoharness search skill "<query>"                   # skills.sh
 ```
 
-Prefer, in order: curated entry → high-trust registry/skill result → nothing.
+`need` also lists skills you or earlier agents wrote and saved (`local`); install one with
+`autoharness add skill local:<name>`. Prefer, in order: local skill → curated entry →
+high-trust registry/skill result → nothing.
 A capability you can cover with tools you already have (shell, a CLI such as
 `gh`, `psql`, `npx playwright`) does not need an MCP server. Do not install
 something just because it exists.
@@ -90,14 +92,21 @@ resume from where you were.
 ### 6. Finish
 
 1. Verify the result with the capabilities you installed. Run the checks; don't assume them.
-2. End the task. If the setup was useful, save it as a recipe too:
+2. If you learned something reusable that no installed skill covers (how to build or
+   check this kind of project, a verification trick, an API quirk), write it down:
+   `autoharness skill new <name> --description "<when to use it>"`, fill in every
+   section, then `autoharness skill save <name>`. It answers exit code 3: show the user
+   the name, description and warnings, and re-run with `--approve` only after a clear
+   yes. Write it for any project: no absolute paths, secrets, or names of people or
+   clients. If save reports `blocked`, remove what it flags.
+3. End the task. If the setup was useful, save it as a recipe too:
    `autoharness teardown --save-recipe <short-name> --notes "<what it was good for>"`
    Otherwise `autoharness teardown`.
    What happens to the harness follows the `teardown` setting
    (`autoharness config get`): `keep` (the default) leaves it installed in the
    project for later tasks, `remove` uninstalls it. Pass `--keep` or `--remove`
    only when the user asked for that.
-3. Tell the user what you installed, what stayed in the project and what was
+4. Tell the user what you installed, what stayed in the project and what was
    removed, and anything left for them to do (such as unsetting env vars or
    restarting to unload MCP servers). Kept items come off with
    `autoharness remove mcp|skill <name>`, or all at once with `autoharness prune`.

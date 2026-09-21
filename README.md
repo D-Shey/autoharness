@@ -62,6 +62,7 @@ remote-серверы становятся `httpUrl`/`url`, для Codex сек�
 | `status` | текущий harness, что сохранено в проекте, журнал |
 | `teardown [--keep\|--remove] [--save-recipe NAME --notes ...]` | завершает задачу по политике `teardown` |
 | `config get\|set [teardown keep\|remove] [--global]` | настройки |
+| `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
 | `recipe list\|match\|show` | сохранённые наборы |
 | `agents` | поддерживаемые агенты и их пути |
 
@@ -87,6 +88,23 @@ autoharness config get                            # текущее значен�
 
 `.autoharness/.gitignore` пропускает `config.json` и `kept.json`, так что их можно
 закоммитить вместе с папкой skills; остальное состояние задач в git не попадает.
+
+## Свои skills
+
+В конце задачи агент может записать выученное (как собрать и проверить такой проект,
+особенности API) в skill и сохранить его в библиотеку `~/.autoharness/skills/`:
+
+```bash
+autoharness skill new pptx-qa --description "Check .pptx slides visually"   # заготовка в папке skills
+autoharness skill save pptx-qa              # проверки; код 3 — нужно согласие пользователя
+autoharness skill save pptx-qa --approve    # в библиотеку
+autoharness add skill local:pptx-qa         # в другом проекте
+```
+
+`skill save` блокирует секреты (токены, приватные ключи, `password=…`) и опасные паттерны,
+предупреждает об абсолютных путях и email и без `--approve` ничего не сохраняет. Recipe
+ссылается на такой skill как `local:<name>`; `need` показывает skills из библиотеки
+с подходящей capability.
 
 ## Безопасность
 
@@ -114,7 +132,6 @@ autoharness config get                            # текущее значен�
 - Классификация задачи — подсказка по ключевым словам: сравнение идёт по словам с учётом русских
   и английских окончаний (`text.py`), без стеммера и без LLM. Если подсказок нет, `init` отдаёт
   список всех capabilities, и выбирает агент.
-- Генерация собственных skills, когда подходящего нет, пока не реализована.
 
 ## Тесты
 
