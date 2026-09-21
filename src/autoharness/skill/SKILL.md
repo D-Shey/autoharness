@@ -28,8 +28,9 @@ analyse task → capabilities → reuse recipe? → discover → vet → install
 autoharness --agent {{AGENT}} init "<the user's task, verbatim>"
 ```
 
-The output has keyword `suggested` capabilities and matching `recipes`. Treat
-them as hints. Decide yourself which capabilities the task really needs and
+The output has keyword `suggested` capabilities, matching `recipes` and the full
+catalog in `all_capabilities`. Treat the suggestions as hints: they come from
+keywords and can miss or over-match. Decide yourself which capabilities the task really needs and
 write them down as a short list: *capability — why — how I will verify it works*.
 Pick the smallest set that lets you **verify** the result, not only produce it
 (a web task needs a browser to check the page, not just an editor).

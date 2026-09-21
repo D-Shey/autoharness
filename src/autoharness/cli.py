@@ -92,9 +92,9 @@ def cmd_init(args, project, catalog):
               "agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
               "suggested": suggested,
               "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
-                           "mcp": list(r["mcp"]), "skills": r["skills"]} for s, r in recipes.match(args.task)]}
+                           "mcp": list(r["mcp"]), "skills": r["skills"]} for s, r in recipes.match(args.task)],
+              "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
     if not suggested:
-        result["all_capabilities"] = {n: c.description for n, c in catalog.capabilities.items()}
         result["next"] = ("No keyword hints. Pick capabilities from all_capabilities yourself, or look further with "
                           "`autoharness search mcp|skill \"<your query>\"`.")
     out(result)

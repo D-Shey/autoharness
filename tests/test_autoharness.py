@@ -69,6 +69,14 @@ def test_init_lists_all_capabilities_when_nothing_matches(project, capsys):
     assert "testing" in res["all_capabilities"] and "search" in res["next"]
 
 
+def test_init_lists_all_capabilities_even_when_something_matches(project, capsys):
+    # a keyword hit must not hide the rest of the catalog: the agent picks, the hints only rank
+    code = cli.main(["--project", str(project.root), "init", "fetch a web page and open a github issue about it"])
+    res = json.loads(capsys.readouterr().out)
+    assert code == 0 and res["suggested"]
+    assert set(res["all_capabilities"]) == set(Catalog.load().capabilities)
+
+
 def test_mcp_add_and_teardown_preserves_user_servers(project):
     project.mcp_path.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}), "utf-8")
     task = project.init_task("test a website")
