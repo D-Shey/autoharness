@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from importlib import resources
 from pathlib import Path
@@ -158,15 +159,24 @@ def cmd_add(args, project, catalog):
             return need_approval(f"add MCP server {args.name}", report)
         local = args.as_name or local_mcp_name(args.name)
         warnings = task.add_mcp(local, report["config"], source=source, permissions=report["permissions"],
-                                trust={"score": report["score"], "level": report["level"]})
+                                trust={"score": report["score"], "level": report["level"]}, direct=args.direct)
         secrets = report["permissions"].get("secrets", [])
         agent = task.agent
-        out({"status": "ok", "added": local, "agent": agent.name, "file": agent.mcp_file,
-             "config": agent.translate(report["config"])[0], "warnings": warnings,
-             "secrets_to_set": secrets,
-             "next": f"MCP servers load at session start: ask the user to {agent.reload_hint}."
-                     + (f" The user must set env vars: {', '.join(secrets)}." if secrets else "")
-                     + (" Resolve the warnings before relying on this server." if warnings else "")})
+        env_note = (f" The user must set env vars: {', '.join(secrets)} (visible to the agent process)." if secrets else "")
+        if task.mcp_lock()[local].get("via") == "gateway":
+            out({"status": "ok", "added": local, "agent": agent.name, "via": "gateway", "file": ".autoharness/gateway.json",
+                 "secrets_to_set": secrets,
+                 "next": "Available now through the autoharness gateway, no restart: call harness_tools, then "
+                         "harness_call (or the native <server>__<tool> tools if your client shows them)." + env_note})
+        else:
+            tip = ("" if project.gateway_active() else
+                   " Tip: suggest the user run `autoharness gateway install` once; after one last restart, "
+                   "servers added later are available without restarting.")
+            out({"status": "ok", "added": local, "agent": agent.name, "file": agent.mcp_file,
+                 "config": agent.translate(report["config"])[0], "warnings": warnings,
+                 "secrets_to_set": secrets,
+                 "next": f"MCP servers load at session start: ask the user to {agent.reload_hint}." + env_note
+                         + (" Resolve the warnings before relying on this server." if warnings else "") + tip})
     else:
         report = resolve_skill(catalog, args.name)
         if report["requires_approval"] and not args.approve:
@@ -243,6 +253,31 @@ def cmd_teardown(args, project, catalog):
                 "run `autoharness skill save <name>` and ask the user.")
     out({"status": "ok", "policy": policy, "policy_source": source} | result
         | {"recipe_saved": saved, "next": nxt} | ({"warnings": warnings} if warnings else {}))
+    return 0
+
+
+def cmd_gateway(args, project, catalog):
+    if args.action == "serve":
+        from autoharness.gateway import serve
+        return serve(project.root)
+    agent = project.agent
+    if args.action == "install":
+        server = ({"command": "autoharness", "args": ["gateway", "serve"]} if shutil.which("autoharness")
+                  else {"command": sys.executable, "args": ["-m", "autoharness", "gateway", "serve"]})
+        project.install_gateway(server)
+        out({"status": "ok", "installed": agent.name, "file": agent.mcp_file, "config": server,
+             "next": f"One last restart: ask the user to {agent.reload_hint}. After that, servers added with "
+                     "`add mcp` are available at once through harness_tools / harness_call."})
+    elif args.action == "uninstall":
+        project.uninstall_gateway()
+        out({"status": "ok", "uninstalled": agent.name,
+             "next": f"Ask the user to {agent.reload_hint} to drop the gateway."})
+    else:
+        reg = project.gateway_registry()
+        state_file = project.state / "gateway.state.json"
+        state = json.loads(state_file.read_text("utf-8")) if state_file.exists() else None
+        out({"installed": project.gateway_active(), "agents": reg["installed"], "servers": sorted(reg["servers"]),
+             "running": state and state.get("servers"), "state_updated": state and state.get("updated")})
     return 0
 
 
@@ -382,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--approve", action="store_true", help="the user explicitly approved this")
     s.add_argument("--force", action="store_true", help="install a skill despite high-severity scan findings")
     s.add_argument("--as", dest="as_name", help="local name for the MCP server")
+    s.add_argument("--direct", action="store_true", help="for mcp: write to the agent's config even if the gateway is installed")
     s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")
@@ -405,6 +441,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--description", help="for `new`: when an agent should use the skill")
     s.add_argument("--approve", action="store_true", help="for `save`: the user explicitly agreed")
+    s = sub.add_parser("gateway", help="one MCP server that hot-adds the servers you add, no agent restarts")
+    s.add_argument("action", choices=["install", "uninstall", "status", "serve"])
     s = sub.add_parser("recipe", help="saved harness recipes")
     s.add_argument("action", choices=["list", "match", "show"])
     s.add_argument("value", nargs="?", default="")
@@ -417,7 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
-            "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill,
+            "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents}
 
 

@@ -283,3 +283,60 @@ class Gateway:
             self.log(f"{method} failed: {e!r}")
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": str(e)}}
         return {"jsonrpc": "2.0", "id": rid, "result": result}
+
+
+def serve(start: Path | None = None) -> int:
+    """Run the gateway on stdin/stdout until the agent closes stdin."""
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", newline="\n")
+    project = find_project((start or Path.cwd()).resolve())
+    log_file = open(project / ".autoharness" / "gateway.log", "a", encoding="utf-8") if project else None
+    out_lock = threading.Lock()
+
+    def write(msg: dict) -> None:
+        with out_lock:
+            sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+
+    def log(line: str) -> None:
+        stamped = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}"
+        print(stamped, file=sys.stderr, flush=True)
+        if log_file:
+            log_file.write(stamped + "\n")
+            log_file.flush()
+
+    gw = Gateway(project, write, log, stderr=log_file)
+    gw.sync()
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(1.0):
+            try:
+                gw.sync()
+            except Exception as e:
+                log(f"sync failed: {e!r}")
+
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                write({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
+                continue
+            if msg.get("method") == "tools/call":      # calls can be slow: do not block pings and lists
+                threading.Thread(target=lambda m=msg: write(gw.handle(m)), daemon=True).start()
+                continue
+            resp = gw.handle(msg)
+            if resp is not None:
+                write(resp)
+    finally:
+        stop.set()
+        gw.close_all()
+        if log_file:
+            log_file.close()
+    return 0

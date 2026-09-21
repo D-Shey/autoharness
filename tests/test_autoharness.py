@@ -935,3 +935,84 @@ def test_find_project(tmp_path):
     (tmp_path / ".autoharness" / "gateway.json").write_text("{}", "utf-8")
     (tmp_path / "a" / "b").mkdir(parents=True)
     assert gateway.find_project(tmp_path / "a" / "b") == tmp_path
+
+
+import queue
+
+
+def test_gateway_serve_end_to_end(project):
+    project.save_gateway_registry({"installed": ["claude"], "servers": {}})
+    proc = subprocess.Popen([sys.executable, "-m", "autoharness", "gateway", "serve"], cwd=project.root,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, encoding="utf-8")
+    inbox, notes = queue.Queue(), []
+    threading.Thread(target=lambda: [inbox.put(json.loads(l)) for l in proc.stdout], daemon=True).start()
+
+    def send(msg):
+        proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.flush()
+
+    def reply(rid, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                msg = inbox.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if msg.get("id") == rid:
+                return msg
+            notes.append(msg)
+        raise AssertionError(f"no reply to {rid}")
+
+    def tool_names(rid):
+        send({"jsonrpc": "2.0", "id": rid, "method": "tools/list"})
+        return [t["name"] for t in reply(rid)["result"]["tools"]]
+
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+        assert reply(1)["result"]["serverInfo"]["name"] == "autoharness"
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        assert tool_names(2) == ["harness_tools", "harness_call"]
+
+        project.save_gateway_registry({"installed": ["claude"], "servers": {"fake": FAKE_CFG}})
+        rid = 100
+        while "fake__echo" not in tool_names(rid):
+            rid += 1
+            assert rid < 200, "fake server never appeared"
+            time.sleep(0.2)
+        send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "fake__echo", "arguments": {"text": "hot"}}})
+        assert reply(3)["result"]["content"][0]["text"] == "hot"
+        assert {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"} in notes
+
+        project.save_gateway_registry({"installed": ["claude"], "servers": {}})
+        rid = 300
+        while "fake__echo" in tool_names(rid):
+            rid += 1
+            assert rid < 400, "fake server never went away"
+            time.sleep(0.2)
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=15)
+    assert proc.returncode == 0
+
+
+def test_cli_gateway_install_status_and_add(project, capsys):
+    root = str(project.root)
+    code, res = cli_json(capsys, "--project", root, "gateway", "install")
+    assert code == 0 and res["status"] == "ok" and "restart" in res["next"]
+    cli_json(capsys, "--project", root, "init", "t")
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "fetch")            # curated: no network
+    assert code == 0 and res["via"] == "gateway" and "harness_tools" in res["next"]
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "context7", "--direct")
+    assert code == 0 and "via" not in res
+    code, res = cli_json(capsys, "--project", root, "gateway", "status")
+    assert res["installed"] is True and res["servers"] == ["fetch"]
+    code, res = cli_json(capsys, "--project", root, "gateway", "uninstall")
+    assert code == 0 and not project.gateway_active()
+
+
+def test_cli_add_mcp_suggests_the_gateway(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "fetch")
+    assert code == 0 and "via" not in res and "gateway install" in res["next"]
