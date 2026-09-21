@@ -21,12 +21,154 @@ task → init → capabilities → recipe? → search → trust check → add �
 
 ## Установка
 
+Установка состоит из трёх шагов: поставить CLI (один раз на машину), положить skill агенту
+(в проект или глобально) и, по желанию, подключить gateway, чтобы новые MCP-серверы работали
+без перезапуска агента.
+
+### 1. CLI `autoharness`
+
+Ставится через [uv](https://docs.astral.sh/uv/) как отдельный инструмент: uv сам берёт
+подходящий Python (3.10+) и кладёт команду `autoharness` в свою папку для исполняемых файлов.
+Внешних зависимостей нет.
+
+Если uv ещё не стоит:
+
 ```bash
-pip install -e .                       # CLI `autoharness` (только stdlib, Python 3.10+)
-autoharness install-skill              # skill для текущего агента в папку проекта
-autoharness --agent codex install-skill --user   # глобально для конкретного агента
-autoharness install-skill --all        # для всех поддерживаемых агентов
+# Linux/macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
+
+Установка autoharness прямо из GitHub:
+
+```bash
+uv tool install git+https://github.com/D-Shey/autoharness
+autoharness agents        # проверка: печатает поддерживаемых агентов и обнаруженного
+```
+
+Репозиторий приватный: uv берёт доступ из настроек git, поэтому сначала войдите, например,
+через `gh auth login` (он настраивает git на ваш аккаунт).
+
+Команда `autoharness` должна находиться через `PATH`: её вызывают и агент, и gateway. uv кладёт
+её в `~/.local/bin` (на Windows — `%USERPROFILE%\.local\bin`; точный путь — `uv tool dir --bin`).
+Если `autoharness agents` отвечает «command not found», выполните `uv tool update-shell` и
+откройте новый терминал. Агента после этого тоже запускайте из нового терминала, иначе он не
+увидит обновлённый `PATH`.
+
+Обновление и удаление:
+
+```bash
+uv tool upgrade autoharness       # подтянуть последний коммит из GitHub
+uv tool uninstall autoharness
+```
+
+Если вы правите сам autoharness, ставьте из локальной копии в режиме редактирования — изменения
+в коде сразу видны команде `autoharness`:
+
+```bash
+git clone https://github.com/D-Shey/autoharness.git
+cd autoharness
+uv tool install -e .
+```
+
+Для большинства skills и MCP-серверов из каталога нужен ещё Node.js (`npx`); Python-серверы
+запускаются через `uvx`, который ставится вместе с uv.
+
+### 2. Skill для агента
+
+Skill — это `SKILL.md`, из которого агент узнаёт, как пользоваться autoharness. В каждый агент
+кладётся свой вариант: с правильным именем агента, путём к MCP-конфигу и подсказкой о перезапуске.
+Поэтому **агент надо указывать явно**: в обычном терминале autoharness не знает, для кого
+ставит, и по умолчанию берёт `claude`.
+
+`--agent` — глобальный флаг, он пишется **до** подкоманды:
+
+```bash
+cd /path/to/your/project                       # команды работают с текущей папкой (или --project)
+
+autoharness --agent claude   install-skill     # в проект: .claude/skills/autoharness/SKILL.md
+autoharness --agent codex    install-skill --user   # глобально: ~/.agents/skills/autoharness/SKILL.md
+autoharness install-skill --all                # в проект, сразу для всех пяти агентов
+```
+
+| Агент | `--agent` | Skill в проекте | Skill глобально (`--user`) |
+|---|---|---|---|
+| Claude Code | `claude` | `.claude/skills/autoharness/` | `~/.claude/skills/autoharness/` |
+| Codex CLI | `codex` | `.agents/skills/autoharness/` | `~/.agents/skills/autoharness/` |
+| Gemini CLI | `gemini` | `.gemini/skills/autoharness/` | `~/.gemini/skills/autoharness/` |
+| Qwen Code | `qwen` | `.qwen/skills/autoharness/` | `~/.qwen/skills/autoharness/` |
+| GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
+
+В проект или глобально:
+
+- **в проект** — skill работает только в этом проекте, его можно закоммитить, и он будет
+  у всей команды;
+- **глобально (`--user`)** — skill есть в любом проекте на этой машине.
+
+Агенты читают skills при старте сессии: после установки начните новую сессию.
+Повторный `install-skill` перезаписывает `SKILL.md` — так он обновляется после
+`git pull` в autoharness.
+
+### 3. Gateway (по желанию, но рекомендуется)
+
+Без gateway каждый новый MCP-сервер пишется прямо в конфиг агента, и агента нужно
+перезапускать. С gateway перезапуск нужен **один раз** — после установки самого gateway:
+
+```bash
+autoharness --agent claude gateway install     # пишет сервер `autoharness` в конфиг агента
+autoharness --agent claude gateway status      # установлен ли, какие серверы запущены
+```
+
+Gateway ставится в проект и **отдельно для каждого агента**: у `gateway install` нет `--all`,
+повторите команду с нужным `--agent`. `add mcp` идёт через gateway только для того агента,
+у которого gateway установлен.
+
+Что сделать после `gateway install` в каждом агенте:
+
+| Агент | Куда пишется gateway | Как агенту его подхватить |
+|---|---|---|
+| Claude Code | `.mcp.json` | перезапустить Claude Code (или `/mcp`) и **одобрить** проектный сервер `autoharness` |
+| Codex CLI | `.codex/config.toml` | перезапустить Codex; проектный конфиг читается, только если проект помечен **trusted** |
+| Gemini CLI | `.gemini/settings.json` | перезапустить или выполнить `/mcp refresh` |
+| Qwen Code | `.qwen/settings.json` | перезапустить или выполнить `/mcp refresh` |
+| GigaCode CLI | `.gigacode/settings.json` | перезапустить или выполнить `/mcp refresh` |
+
+Проверка: в агенте должны появиться инструменты `harness_tools` и `harness_call`. В Claude Code
+они могут прийти отложенными — их находит поиск инструментов.
+
+Если autoharness не найден в `PATH` в момент `gateway install`, в конфиг пишется
+`python -m autoharness gateway serve` с полным путём к Python, в котором он запущен. Это работает,
+пока этот Python на месте: после `uv tool uninstall` или переустановки выполните
+`gateway install` заново, уже с `autoharness` в `PATH`.
+
+### Проверка целиком
+
+Попросите агента в новой сессии: «запусти autoharness init для задачи „прочитай
+https://example.com“ и добавь fetch». Ожидаемо: агент вызывает `autoharness init`, затем
+`autoharness add mcp fetch`; с gateway ответ содержит `"via": "gateway"`, и страница читается
+через `harness_call` без перезапуска.
+
+### Несколько агентов в одном проекте
+
+```bash
+autoharness install-skill --all
+autoharness --agent claude gateway install
+autoharness --agent codex  gateway install
+```
+
+Задачи и gateway у агентов общие (`.autoharness/`), а конфиги у каждого свои. Внутри сессии
+агент определяется сам — по переменным окружения, которые он ставит своим командам
+(`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, …). Если определение не сработало, задайте
+`AUTOHARNESS_AGENT=<агент>` в окружении, из которого запускаете агента.
+
+### Удаление
+
+```bash
+autoharness --agent claude gateway uninstall   # убирает `autoharness` из конфига агента
+```
+
+Skill удаляется вместе с папкой `autoharness` в каталоге skills (таблица выше). CLI — `uv tool uninstall autoharness`.
 
 ## Агенты
 
@@ -164,5 +306,5 @@ Gateway — MCP-сервер `autoharness` в конфиге агента. Он 
 ## Тесты
 
 ```bash
-pip install -e .[dev] && pytest
+uv run --extra dev pytest      # uv сам создаёт .venv и ставит pytest
 ```
