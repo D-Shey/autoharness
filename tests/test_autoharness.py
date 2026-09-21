@@ -667,3 +667,68 @@ def test_bootstrap_skill_teaches_generated_skills():
     from importlib import resources
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
     assert "autoharness skill new" in text and "autoharness skill save" in text and "--approve" in text
+
+
+# --- gateway ------------------------------------------------------------------
+
+import subprocess
+import sys
+import threading
+import time
+
+from autoharness import mcp_client
+
+FAKE = Path(__file__).parent / "fake_mcp_server.py"
+FAKE_CFG = {"command": sys.executable, "args": [str(FAKE)]}
+
+
+def wait_for(cond, timeout=15.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return
+        time.sleep(0.05)
+    raise AssertionError("condition not met in time")
+
+
+def test_expand_secrets():
+    env = {"TOK": "abc"}
+    assert mcp_client.expand_secrets({"h": ["Bearer ${TOK}"], "n": 1}, env) == {"h": ["Bearer abc"], "n": 1}
+    with pytest.raises(mcp_client.McpError, match="set MISSING"):
+        mcp_client.expand_secrets("${MISSING}", env)
+
+
+def test_stdio_client_talks_to_a_server():
+    changed = []
+    c = mcp_client.StdioClient("fake", FAKE_CFG, on_tools_changed=changed.append)
+    c.start()
+    try:
+        assert {"echo", "slow", "add_tool"} <= {t["name"] for t in c.list_tools()}
+        assert c.call_tool("echo", {"text": "hi"})["content"][0]["text"] == "hi"
+        reply = json.loads(c.call_tool("client_reply", {})["content"][0]["text"])
+        assert reply["error"]["code"] == -32601          # requests from the server are refused
+        c.call_tool("add_tool", {})
+        wait_for(lambda: changed == ["fake"])
+    finally:
+        c.close()
+    assert not c.alive()
+
+
+def test_stdio_client_timeout_and_crash(monkeypatch):
+    c = mcp_client.StdioClient("fake", FAKE_CFG)
+    c.start()
+    monkeypatch.setenv("AUTOHARNESS_GATEWAY_TIMEOUT", "0.5")
+    with pytest.raises(mcp_client.McpError, match="timed out"):
+        c.call_tool("slow", {"seconds": 3})
+    with pytest.raises(mcp_client.McpError):
+        c.call_tool("crash", {})
+    wait_for(lambda: not c.alive())
+    c.close()
+
+
+def test_stdio_client_command_not_found():
+    with pytest.raises(mcp_client.McpError, match="command not found"):
+        mcp_client.StdioClient("x", {"command": "definitely-not-a-command-xyz"}).start()
+    assert isinstance(mcp_client.make_client("x", FAKE_CFG), mcp_client.StdioClient)
+    with pytest.raises(mcp_client.McpError):
+        mcp_client.make_client("x", {"type": "sse", "url": "https://x.io/sse"})
