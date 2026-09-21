@@ -1,6 +1,6 @@
 ---
 name: autoharness
-description: Use at the start of any non-trivial task, even when many tools are already available: especially work that must match something real (a film scene, a design, a product, a brand, an API) and so needs references, current docs or data you have not looked at yet, or a way to check the result against them. Also use whenever you are blocked because a tool, input or know-how is missing (not because you need to think harder). Works out what a good result is and what is missing, finds and vets MCP servers and skills against the user's constraints, installs them for the task, and at the end keeps them in the project or removes them (configurable).
+description: Use at the start of any non-trivial task, even when many tools are already available, especially work that must match something real (a film scene, a design, a product, a brand, an API) and so needs references, current docs or data you have not looked at yet, or a way to check the result against them. Also use whenever you are blocked because a tool, input or know-how is missing (not because you need to think harder). Works out what a good result is and what is missing, finds and vets MCP servers and skills against the user's constraints, installs them for the task, and at the end keeps them in the project or removes them (configurable).
 ---
 
 # AutoHarness

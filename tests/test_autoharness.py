@@ -1156,3 +1156,13 @@ def test_bootstrap_skill_description_does_not_require_a_bare_setup():
     description = text.split("description:", 1)[1].split("\n", 1)[0]
     assert "bare" not in description
     assert "reference" in description
+
+
+def test_bootstrap_skill_frontmatter_is_plain_yaml():
+    """An unquoted `: ` or ` #` in a value breaks YAML, and agents then drop the description."""
+    from importlib import resources
+    text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    front = text.split("---")[1].strip().splitlines()
+    for line in front:
+        key, value = line.split(": ", 1)
+        assert ": " not in value and " #" not in value, key
