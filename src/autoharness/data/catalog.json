@@ -1,57 +1,57 @@
 {
-  "_comment": "Curated capabilities. Entries here are trusted baselines; anything found only through registry search is scored and may need approval.",
+  "_comment": "Curated capabilities. Entries here are trusted baselines; anything found only through registry search is scored and may need approval. Keywords match by word (text.py): 5+ letters compare by their first 5, shorter ones are stems that take a common ending, under 3 letters match whole words only.",
   "capabilities": {
     "browser-automation": {
       "description": "Drive a real browser: navigate, click, fill forms, screenshots, E2E flows.",
-      "keywords": ["browser", "playwright", "e2e", "website", "web app", "ui test", "screenshot", "click", "form", "сайт", "браузер", "веб"],
+      "keywords": ["browser", "playwright", "e2e", "website", "web app", "ui test", "screenshot", "click", "form", "сайт", "браузер", "веб", "форм", "скриншот", "кнопк"],
       "mcp": ["playwright"],
       "skills": ["microsoft/playwright-cli@playwright-cli", "anthropics/skills@webapp-testing"]
     },
     "browser-devtools": {
       "description": "Inspect network, console, performance traces of a live page.",
-      "keywords": ["devtools", "network", "console", "performance", "lighthouse", "core web vitals", "500", "request", "запрос", "производительность"],
+      "keywords": ["devtools", "network", "console", "performance", "lighthouse", "core web vitals", "500", "request", "запрос", "производительность", "консоль"],
       "mcp": ["chrome-devtools"],
       "skills": []
     },
     "library-docs": {
       "description": "Current documentation for libraries, frameworks and SDKs.",
-      "keywords": ["docs", "documentation", "api reference", "library", "framework", "sdk", "upgrade", "migrate", "документация", "миграция"],
+      "keywords": ["docs", "documentation", "api reference", "library", "framework", "sdk", "upgrade", "migrate", "документация", "миграция", "библиотека", "фреймворк"],
       "mcp": ["context7"],
       "skills": []
     },
     "github": {
       "description": "Issues, pull requests, code search and repos on GitHub.",
-      "keywords": ["github", "pull request", "pr ", "issue", "repository", "репозиторий", "пулл"],
+      "keywords": ["github", "pull request", "pr", "issue", "repository", "репозиторий", "пулл"],
       "mcp": ["github"],
       "skills": []
     },
     "postgres": {
       "description": "Inspect and query a PostgreSQL database (read-only by default).",
-      "keywords": ["postgres", "postgresql", "sql", "database", "schema", "база данных", "бд"],
+      "keywords": ["postgres", "postgresql", "sql", "database", "schema", "баз данных", "бд", "схем"],
       "mcp": ["postgres"],
       "skills": []
     },
     "web-fetch": {
       "description": "Fetch and read arbitrary web pages as markdown.",
-      "keywords": ["fetch", "scrape", "research", "article", "url", "исследуй", "найди в интернете"],
+      "keywords": ["fetch", "scrape", "research", "article", "url", "исследуй", "интернет"],
       "mcp": ["fetch"],
       "skills": []
     },
     "debugging": {
       "description": "Disciplined root-cause debugging.",
-      "keywords": ["bug", "debug", "error", "crash", "fails", "broken", "flaky", "баг", "ошибк", "падает", "не работает"],
+      "keywords": ["bug", "debug", "error", "crash", "fail", "flaky", "баг", "ошибка", "пада", "не работает"],
       "mcp": [],
       "skills": ["obra/superpowers@systematic-debugging"]
     },
     "testing": {
       "description": "Test-first development and verification before claiming done.",
-      "keywords": ["test", "tdd", "coverage", "pytest", "jest", "unit test", "тест", "покрыти"],
+      "keywords": ["test", "tdd", "coverage", "pytest", "jest", "unit test", "ci", "тест", "тестирование", "покрытие"],
       "mcp": [],
       "skills": ["obra/superpowers@test-driven-development", "obra/superpowers@verification-before-completion"]
     },
     "documents": {
       "description": "Read and produce PDF, Word, Excel, PowerPoint files.",
-      "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "таблиц", "презентац"],
+      "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "таблица", "презентация"],
       "mcp": [],
       "skills": ["anthropics/skills@pdf", "anthropics/skills@docx", "anthropics/skills@xlsx", "anthropics/skills@pptx"]
     },

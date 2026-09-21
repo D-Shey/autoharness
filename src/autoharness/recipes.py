@@ -13,11 +13,7 @@ import time
 from pathlib import Path
 
 from autoharness.env import Task
-
-WORD = re.compile(r"[^\W_]{3,}", re.UNICODE)
-STEM = 5  # crude stemming by prefix: "сделай"/"сделать", "презентацию"/"презентация" meet
-STOP = {"the", "and", "for", "with", "from", "into", "this", "that",
-        "для", "как", "что", "это", "или", "при", "без", "все", "под"}
+from autoharness.text import stems as _tokens
 
 
 def home() -> Path:
@@ -28,10 +24,6 @@ def recipes_dir() -> Path:
     d = home() / "recipes"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def _tokens(text: str) -> set[str]:
-    return {w[:STEM] for w in (m.lower() for m in WORD.findall(text)) if w not in STOP}
 
 
 def save(task: Task, name: str, notes: str = "") -> Path:

@@ -81,11 +81,17 @@ def cmd_plan(args, project, catalog):
 def cmd_init(args, project, catalog):
     task = project.init_task(args.task)
     agent = task.agent
-    out({"status": "ok", "task_id": task.id, "dir": str(task.dir),
-         "agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
-         "suggested": suggestions(catalog, catalog.classify(args.task)),
-         "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
-                      "mcp": list(r["mcp"]), "skills": r["skills"]} for s, r in recipes.match(args.task)]})
+    suggested = suggestions(catalog, catalog.classify(args.task))
+    result = {"status": "ok", "task_id": task.id, "dir": str(task.dir),
+              "agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
+              "suggested": suggested,
+              "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
+                           "mcp": list(r["mcp"]), "skills": r["skills"]} for s, r in recipes.match(args.task)]}
+    if not suggested:
+        result["all_capabilities"] = {n: c.description for n, c in catalog.capabilities.items()}
+        result["next"] = ("No keyword hints. Pick capabilities from all_capabilities yourself, or look further with "
+                          "`autoharness search mcp|skill \"<your query>\"`.")
+    out(result)
     return 0
 
 

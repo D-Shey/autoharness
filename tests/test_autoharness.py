@@ -45,6 +45,30 @@ def test_classify_matches_russian_and_english():
     assert "postgres" in names
 
 
+@pytest.mark.parametrize("task, expected, absent", [
+    ("обнови пароль пользователя в форме настроек", {"browser-automation"}, set()),
+    ("update to the latest platform format", set(), {"browser-automation", "testing"}),
+    ("посмотри схему в базе данных", {"postgres"}, set()),
+    ("изучи документацию по next.js", {"library-docs"}, set()),
+    ("исследовать конкурентов", {"web-fetch"}, set()),
+    ("почему тесты падают на CI", {"testing", "debugging"}, set()),
+    ("сделать вебинар по information security", set(), {"browser-automation"}),
+    ("reset the password flow", set(), {"documents"}),
+    ("настроить message broker", set(), {"debugging"}),
+])
+def test_classify_matches_words_not_substrings(task, expected, absent):
+    names = {c.name for c, _ in Catalog.load().classify(task)}
+    assert expected <= names, names
+    assert not (absent & names), names
+
+
+def test_init_lists_all_capabilities_when_nothing_matches(project, capsys):
+    code = cli.main(["--project", str(project.root), "init", "обсудить планы на квартал"])
+    res = json.loads(capsys.readouterr().out)
+    assert code == 0 and res["suggested"] == []
+    assert "testing" in res["all_capabilities"] and "search" in res["next"]
+
+
 def test_mcp_add_and_teardown_preserves_user_servers(project):
     project.mcp_path.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}), "utf-8")
     task = project.init_task("test a website")

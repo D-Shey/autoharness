@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from importlib import resources
 
+from autoharness import text
+
 
 @dataclass
 class Capability:
@@ -40,10 +42,10 @@ class Catalog:
         This is only a hint for the agent; the agent does the real reasoning
         about which capabilities a task needs.
         """
-        text = f" {task.lower()} "
+        task_words = text.words(task)
         hits = []
         for cap in self.capabilities.values():
-            matched = [k for k in cap.keywords if k in text]
+            matched = [k for k in cap.keywords if text.matches(k, task_words)]
             if matched:
                 hits.append((cap, matched))
         hits.sort(key=lambda h: len(h[1]), reverse=True)
