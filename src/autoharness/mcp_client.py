@@ -24,15 +24,64 @@ def timeout_s() -> float:
     return float(os.environ.get("AUTOHARNESS_GATEWAY_TIMEOUT", "120"))
 
 
-# credential-shaped names (as in DeepSeek Harness's subprocess scrub): a server gets a secret only
-# through its own `env`, as `${VAR}`, never by inheriting everything the agent was started with
-SENSITIVE_ENV = re.compile(r"KEY|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL", re.IGNORECASE)
+# A server gets a secret only through its own `env`, as `${VAR}`, never by inheriting the agent's environment.
+# Secrets come in too many shapes to list (DB_PASS, BEARER, a connection string, a webhook URL), so a server
+# inherits only what locates the system, the user, the locale and the network, and nothing else.
+PASS_ENV = {
+    "PATH", "PATHEXT", "HOME", "USER", "USERNAME", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ",
+    "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "OS", "USERPROFILE", "APPDATA",
+    "LOCALAPPDATA", "PROGRAMDATA", "ALLUSERSPROFILE", "HOMEDRIVE", "HOMEPATH", "PUBLIC", "COMPUTERNAME",
+    "NUMBER_OF_PROCESSORS", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE", "PYTHONIOENCODING", "PYTHONUTF8", "JAVA_HOME",
+    # which config, profile or daemon to use: without them a server silently talks to another account
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "KUBECONFIG", "AWS_PROFILE", "AWS_REGION",
+    "AWS_DEFAULT_REGION", "AWS_CONFIG_FILE", "CLOUDSDK_CONFIG", "AZURE_CONFIG_DIR", "VIRTUAL_ENV",
+    "PYTHONPATH", "NODE_OPTIONS", "NODE_PATH", "GOPATH", "GOROOT", "CARGO_HOME", "RUSTUP_HOME",
+    "GH_HOST", "GITHUB_HOST", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT", "AZURE_SUBSCRIPTION_ID",
+    "OLLAMA_HOST", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "NODE_ENV", "PSMODULEPATH", "JAVA_OPTS",
+    "GH_CONFIG_DIR", "CLOUDSDK_ACTIVE_CONFIG_NAME", "AWS_CA_BUNDLE", "GIT_CONFIG_GLOBAL", "GNUPGHOME",
+    "GIT_SSH", "GIT_SSH_COMMAND", "JAVA_TOOL_OPTIONS", "GRADLE_USER_HOME", "DENO_DIR", "BUN_INSTALL", "USERDOMAIN",
+}
+# Selectors of a config (KUBECONFIG, DOCKER_CONFIG, GH_CONFIG_DIR, AWS_CONFIG_FILE, AWS_PROFILE) pass: they
+# point a server at the user's own default setup, which it can read anyway, running as the user; without them
+# it would silently use another one. Names containing CREDENTIAL, KEY or TOKEN are withheld whatever they hold,
+# as before, so a non-default AWS_SHARED_CREDENTIALS_FILE or GOOGLE_APPLICATION_CREDENTIALS must come through
+# the server's `env`. The SSH agent socket passes, as before: git over SSH needs it.
+PATH_POINTERS = {"SSH_AUTH_SOCK"}
+PROXY_ENV = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY"}
+PASS_ENV_PREFIXES = ("LC_", "XDG_", "PROCESSOR_", "PROGRAMFILES", "PROGRAMW6432", "COMMONPROGRAMFILES",
+                     "COMMONPROGRAMW6432", "UV_", "NPM_CONFIG_", "NVM_", "VOLTA_", "PNPM_", "PIP_", "CONDA_",
+                     "DOCKER_", "PLAYWRIGHT_", "PUPPETEER_", "PYENV_", "ASDF_", "MISE_")
+# even among those, no credential-shaped name (npm_config__authToken) ...
+SENSITIVE_ENV = re.compile(r"KEY|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL"             # anywhere in the name
+                           r"|(?:^|_)(?:AUTH|COOKIE|DSN|PAT|PRIVATE)(?:_|$)", re.IGNORECASE)  # as a whole word
+# ... and no URL with a password in it (UV_INDEX_URL=https://user:pw@host), except a proxy (PROXY_ENV): the
+# server's traffic has to go through it, login and all
+CREDENTIAL_URL = re.compile(r"://[^/\s@]*:[^/\s@]+@")
+
+
+def _passes(name: str, value: str) -> bool:
+    upper = name.upper()
+    if upper in PROXY_ENV:
+        return True
+    if upper in PATH_POINTERS:
+        return True
+    if SENSITIVE_ENV.search(upper):
+        return False
+    return (upper in PASS_ENV or upper.startswith(PASS_ENV_PREFIXES)) and not CREDENTIAL_URL.search(value)
 
 
 def child_env(extra: Mapping[str, str], parent: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The environment for a server process: the parent's minus credential-shaped names, plus `extra`."""
+    """The environment for a server process: the harmless part of the parent's (PASS_ENV), plus `extra`."""
     parent = os.environ if parent is None else parent
-    return {k: v for k, v in parent.items() if not SENSITIVE_ENV.search(k)} | dict(extra)
+    return {k: v for k, v in parent.items() if _passes(k, v)} | dict(extra)
+
+
+def withheld_env(extra: Mapping[str, str], parent: Mapping[str, str] | None = None) -> list[str]:
+    """Names (never values) of the parent's variables a server does not get: shown when it fails to start."""
+    parent = os.environ if parent is None else parent
+    return sorted(k for k, v in parent.items() if k not in extra and not _passes(k, v))
 
 
 def expand_secrets(value, env: Mapping[str, str] | None = None):

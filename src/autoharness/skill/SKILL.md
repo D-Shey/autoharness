@@ -158,6 +158,9 @@ autoharness add skill <owner/repo@skill>
   `harness_tools` to see it, then `harness_call(server, tool, arguments)`, or the
   native `<server>__<tool>` tools if your client shows them (Claude Code lists them as
   deferred tools: load them with tool search first). No restart.
+- If `harness_tools` shows a server as `not approved`, it came into `gateway.json` from
+  outside this machine (a pull). Run `autoharness gateway approve <name>`, show the user
+  the config it prints, and re-run with `--approve` only after a clear yes.
 - Otherwise new MCP servers load at session start. They are written to `{{MCP_FILE}}`.
   After adding one, tell the user to {{RELOAD}}, then continue the parts of
   the task that don't depend on it. If `add` suggests `autoharness gateway install`,
@@ -209,7 +212,8 @@ resume from where you were.
      a fresh subagent that did not make it (Claude Code: the Agent tool; elsewhere a
      new session). Save its answer unedited to a file and pass it with `--answer-file`:
      autoharness checks the prompt's ANSWER-ID and reads the list and the VERDICT itself,
-     so neither can be softened in the retelling. An id is valid for the latest prompt
+     so neither can be softened in the retelling. Writing that file yourself would defeat
+     the review: never do it. An id is valid for the latest prompt
      about the latest result only. `--diff`/`--worst` for a critic still work but are
      recorded as your retelling, with a warning.
    - **Changes after the review.** For code, record the round with `autoharness evidence

@@ -16,8 +16,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from autoharness import __version__, egress
-from autoharness.mcp_client import PROTOCOL_VERSIONS, McpError, make_client
+from autoharness import __version__, approvals, egress
+from autoharness.mcp_client import PROTOCOL_VERSIONS, McpError, make_client, withheld_env
 
 INSTRUCTIONS = ("Servers added with `autoharness add mcp` appear here without a restart. Call harness_tools to "
                 "see them and their tools, then harness_call(server, tool, arguments). If your client shows "
@@ -102,6 +102,7 @@ class Gateway:
     def sync(self) -> bool:
         """Bring running servers in line with gateway.json and allowed_hosts. Returns whether anything changed."""
         enforced = self._enforce_hosts()
+        enforced = self._retry_approved() or enforced
         path = self._registry_file()
         if path is None or not path.exists():
             if not self.configs:
@@ -136,6 +137,18 @@ class Gateway:
             self._changed()
         return changed or enforced
 
+    def _retry_approved(self) -> bool:
+        """Start the servers that waited for `autoharness gateway approve` once the user approved them."""
+        with self._lock:
+            ready = [(name, cfg) for name, cfg in self.configs.items()
+                     if self.status.get(name, {}).get("error", "").startswith("not approved")
+                     and approvals.approved(self.project, name, cfg)]
+            for name, _ in ready:
+                self.status[name] = {"status": "starting"}
+        for name, cfg in ready:
+            threading.Thread(target=self._boot, args=(name, cfg), daemon=True).start()
+        return bool(ready)
+
     def _allowed_hosts(self) -> list[str]:
         if self.project is None:
             return []
@@ -153,6 +166,16 @@ class Gateway:
             self.log(f"{name}: blocked: {reach['reason']}")
             self._changed()
             return
+        if not approvals.approved(self.project, name, cfg):
+            # gateway.json may come from a pull: run only what the user approved on this machine
+            error = (f"not approved on this machine: check its config in .autoharness/gateway.json, then run "
+                     f"`autoharness gateway approve {name}`")
+            with self._lock:
+                if self.configs.get(name) is cfg:
+                    self.status[name] = {"status": "error", "error": error}
+            self.log(f"{name}: {error}")
+            self._changed()
+            return
         try:
             client = self.client_factory(name, cfg, log=self.log, on_tools_changed=self._refresh, stderr=self.stderr)
             client.start()
@@ -160,10 +183,13 @@ class Gateway:
         except (McpError, OSError) as e:
             if client is not None:
                 client.close()
+            withheld = withheld_env(cfg.get("env", {})) if "command" in cfg else []
+            hint = (f" (not passed from the agent's environment: {', '.join(withheld)}; a server that needs one "
+                    f"takes it through its `env` as ${{VAR}})" if withheld else "")
             with self._lock:
                 if self.configs.get(name) is cfg:
-                    self.status[name] = {"status": "error", "error": str(e)}
-            self.log(f"{name}: {e}")
+                    self.status[name] = {"status": "error", "error": str(e) + hint}
+            self.log(f"{name}: {e}{hint}")
             self._changed()
             return
         with self._lock:

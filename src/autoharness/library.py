@@ -22,7 +22,7 @@ from autoharness.recipes import home
 from autoharness.trust import TrustReport, scan_skill
 
 FILL_MARKER = "<!-- autoharness: fill in -->"
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
+NAME_RE = re.compile(r"^(?!(?:con|prn|aux|nul|com\d|lpt\d)$)[a-z0-9][a-z0-9-]{1,63}$")  # no Windows device names
 TEXT_SUFFIXES = {".md", ".txt", ".py", ".js", ".ts", ".mjs", ".cjs", ".sh", ".ps1", ".json", ".yaml", ".yml", ".toml", ""}
 
 SECRETS = [

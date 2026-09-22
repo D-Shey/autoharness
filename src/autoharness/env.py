@@ -24,6 +24,8 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -32,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from autoharness import agents
+from autoharness import agents, approvals
 from autoharness.agents import Agent, AgentError
 from autoharness.trust import ScanFinding, is_blocking, scan_skill
 
@@ -103,13 +105,58 @@ def _uninstall_mcp(root: Path, agent: Agent, name: str, created: dict | None) ->
         raise HarnessError(str(e)) from e
 
 
-def _uninstall_skill(dest: Path, sha256: str, backup: Path) -> bool:
+# a skill name becomes a directory name: letters, digits, `.`, `_`, `-`; not ending in `.` (Windows drops it,
+# so `demo.` would name `demo`) and not a Windows device name
+SKILL_NAME = re.compile(r"^(?!(?:con|prn|aux|nul|com\d|lpt\d)(?:\.|$))[A-Za-z0-9_][A-Za-z0-9._-]{0,127}(?<!\.)$",
+                        re.IGNORECASE | re.ASCII)
+
+
+def skill_dir(base: Path, name: str) -> Path:
+    """`base / name` for a skill name, refused unless it is a plain directory name."""
+    if not SKILL_NAME.match(name):
+        raise HarnessError(f"{name!r} is not a plain directory name: not touching it; fix the lockfile or "
+                           "kept.json by hand")
+    return base / name
+
+
+def existing_skill_dir(base: Path, name: str) -> Path | None:
+    """The folder `name` in `base`, or None. Names come from lockfiles and kept.json, which a pull can bring
+    (a commit can add ignored files too), so the name must be spelled exactly as the directory listing spells
+    it: the file system's own name folding (case, trailing dots, device names) never lets it stand for
+    another folder."""
+    path = skill_dir(base, name)
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return None
+    if name not in entries:
+        return None
+    if path.is_symlink() or os.path.realpath(path) != os.path.join(os.path.realpath(base), name):
+        raise HarnessError(f"{path} is a link (symlink or junction), not a folder autoharness installed: "
+                           "not touching it")
+    return path if path.is_dir() else None
+
+
+def folding_twin(base: Path, name: str) -> str | None:
+    """Another entry of `base` that a case-insensitive file system would open for `name` (`Mine` for `mine`)."""
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return None
+    if name in entries:
+        return None
+    return next((e for e in entries if e.casefold() == name.casefold()), None)
+
+
+def _uninstall_skill(skills: Path, name: str, sha256: str, backups: Path) -> bool:
     """Delete an installed skill; back it up first if it was edited. Returns whether it was."""
-    modified = dest.exists() and _hash_dir(dest) != sha256
+    dest, backup = existing_skill_dir(skills, name), skill_dir(backups, name)
+    if dest is None:
+        return False
+    modified = _hash_dir(dest) != sha256
     if modified:
         shutil.copytree(dest, backup, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*RUNTIME_JUNK))
-    if dest.exists():
-        shutil.rmtree(dest)
+    shutil.rmtree(dest)
     return modified
 
 
@@ -122,6 +169,8 @@ def parse_skill_spec(spec: str) -> tuple[str, str]:
     if "@" not in spec or spec.count("/") < 1:
         raise HarnessError(f"skill spec must look like owner/repo@skill or local:<name>, got {spec!r}")
     repo, skill = spec.rsplit("@", 1)
+    if not SKILL_NAME.match(skill):   # it becomes a directory name in the agent's skills dir
+        raise HarnessError(f"skill name must be letters, digits, `.`, `_` or `-` and not start with `.`, got {skill!r}")
     return repo, skill
 
 
@@ -170,11 +219,24 @@ class Project:
         ensure_state_dir(self.state)
         _write_json(self.state / "kept.json", kept)
 
-    def remove_kept(self, kind: str, name: str) -> dict:
-        """Uninstall one thing a finished task kept. `kind` is "mcp" or "skills"."""
+    def _check_kept(self, kind: str, name: str) -> None:
+        """Refuse, before anything changes, a kept skill whose name or folder autoharness must not touch."""
+        if kind == "skills":
+            entry = self.kept()["skills"][name]
+            existing_skill_dir(_agent(entry.get("agent", "claude")).skills_path(self.root), name)
+
+    def remove_kept(self, kind: str, name: str, approved: bool = False) -> dict:
+        """Uninstall one thing a finished task kept. `kind` is "mcp" or "skills".
+
+        kept.json may come from a pull, so what no task on this machine kept (a pull, an older autoharness,
+        another clone) is uninstalled only with the user's yes (`approved`); without it nothing changes and
+        the answer carries `approval_required`."""
         kept = self.kept()
         if name not in kept[kind]:
             raise HarnessError(f"{name!r} is not managed by autoharness in this project")
+        self._check_kept(kind, name)
+        if not approved and not approvals.kept_here(self.root, kind, name, kept[kind][name]):
+            return {"approval_required": name, "entry": kept[kind][name]}
         entry = kept[kind].pop(name)
         agent = _agent(entry.get("agent", "claude"))
         result = {"removed": name}
@@ -184,19 +246,26 @@ class Project:
             else:
                 _uninstall_mcp(self.root, agent, name, entry.get("created_mcp_config"))
         else:
-            backup = self.state / "modified-skills" / name
-            if _uninstall_skill(agent.skills_path(self.root) / name, entry["sha256"], backup):
-                result["backup"] = str(backup)
+            if _uninstall_skill(agent.skills_path(self.root), name, entry["sha256"], self.state / "modified-skills"):
+                result["backup"] = str(self.state / "modified-skills" / name)
         self._write_kept(kept)
+        approvals.forget_kept(self.root, kind, name)   # after kept.json: a stale record only means asking later
         return result
 
-    def prune(self) -> dict:
+    def prune(self, approved: bool = False) -> dict:
         kept = self.kept()
-        removed = {"mcp": list(kept["mcp"]), "skills": list(kept["skills"])}
-        for kind, names in removed.items():
-            for name in names:
-                self.remove_kept(kind, name)
-        return removed
+        names = {"mcp": list(kept["mcp"]), "skills": list(kept["skills"])}
+        for kind, listed in names.items():   # all refusals first: nothing half done
+            for name in listed:
+                self._check_kept(kind, name)
+        removed, waiting = {"mcp": [], "skills": []}, []
+        for kind, listed in names.items():
+            for name in listed:
+                if "approval_required" in self.remove_kept(kind, name, approved):
+                    waiting.append(name)
+                else:
+                    removed[kind].append(name)
+        return removed | ({"approval_required": waiting} if waiting else {})
 
     def gateway_registry(self) -> dict:
         data = _read_json(self.state / "gateway.json", {})
@@ -241,6 +310,7 @@ class Project:
         reg = self.gateway_registry()
         if reg["servers"].pop(name, None) is not None:
             self.save_gateway_registry(reg)
+        approvals.forget(self.root, name)
 
     def active_id(self) -> str | None:
         p = self.state / "active"
@@ -261,6 +331,7 @@ class Project:
         if (active := self.active_id()) and Task(self, active).info().get("status") == "active":
             raise HarnessError(f"task {active} is still active; run `autoharness teardown` first")
         task_id = time.strftime("%Y%m%d-%H%M%S") + "-" + hashlib.sha1(text.encode()).hexdigest()[:6]
+        approvals.note_task(self.root, task_id)   # first: if the record cannot be written, nothing starts
         t = Task(self, task_id)
         _write_json(t.dir / "task.json", {"id": task_id, "task": text, "agent": self.agent.name, "status": "active",
                                           "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "capabilities": []})
@@ -380,6 +451,7 @@ class Task:
         if name not in lock and (store.has(name) or name in registry["servers"]):
             raise HarnessError(f"MCP server {name!r} already exists and is not managed by autoharness")
         if not direct and proxyable(config) and self.project.gateway_active():
+            approvals.approve(self.project.root, name, config)  # the user approved it for `add`
             registry["servers"][name] = config
             self.project.save_gateway_registry(registry)
             lock[name] = {"config": config, "source": source, "trust": trust, "agent": agent.name, "via": "gateway",
@@ -406,7 +478,17 @@ class Task:
             self.log(f"warning for `{name}`: {w}")
         return warnings
 
+    def _require_here(self) -> None:
+        """Uninstall what the lockfiles name only for a task started on this machine: a commit can add them."""
+        if not approvals.task_here(self.project.root, self.id):
+            raise HarnessError(f"task {self.id} was not started on this machine (.autoharness/tasks can arrive in "
+                               "a commit, or an older autoharness started it): not uninstalling what its lockfiles "
+                               "name. End it with `autoharness teardown --keep`; then, after the user's yes, "
+                               "`autoharness remove mcp|skill <name> --approve` removes its items one at a time "
+                               "(or `autoharness prune --approve` everything kept)")
+
     def remove_mcp(self, name: str) -> None:
+        self._require_here()
         lock = self.mcp_lock()
         if name not in lock:
             raise HarnessError(f"MCP server {name!r} was not added by this task")
@@ -421,22 +503,35 @@ class Task:
     # --- skills --------------------------------------------------------------
 
     def add_skill(self, spec: str, *, trust: dict, force: bool = False,
-                  stage: Stager = npx_stage_skill) -> list[ScanFinding]:
+                  stage: Stager = npx_stage_skill, vetted_sha256: str | None = None) -> list[ScanFinding]:
+        """Install a skill. With `vetted_sha256`, only the very files that were vetted: `vet` and `add`
+        each download the skill, and it may have changed upstream in between."""
         repo, skill = parse_skill_spec(spec)
-        dest = self.skills_dir / skill
+        dest = skill_dir(self.skills_dir, skill)
         lock = self.skills_lock()
         if skill in self.project.kept()["skills"]:
             raise HarnessError(f"skill {skill!r} is already installed: kept in the project by an earlier task")
-        if dest.exists() and skill not in lock:
+        if (twin := folding_twin(self.skills_dir, skill)) is not None:
+            raise HarnessError(f"{self.agent.skills_dir}/{twin} answers to the name {skill!r} on a case-insensitive "
+                               "file system: not touching it")
+        existing = existing_skill_dir(self.skills_dir, skill)
+        if existing is not None and skill not in lock:
             raise HarnessError(f"skill {skill!r} already exists in {self.agent.skills_dir} and is not managed by autoharness")
+        if existing is not None and _hash_dir(existing) != lock[skill].get("sha256"):
+            # the lockfile may come from a pull: replace only the very files this task installed
+            raise HarnessError(f"{self.agent.skills_dir}/{skill} is not what this task installed (edited since, or "
+                               "the lockfile says otherwise): not replacing it; remove or rename it yourself")
         with tempfile.TemporaryDirectory(prefix="autoharness-stage-") as tmp:
             staged = stage(repo, skill, Path(tmp))
+            if vetted_sha256 and _hash_dir(staged) != vetted_sha256:
+                self.log(f"NOT added skill `{spec}`: its files changed since they were vetted")
+                raise ContentChanged(spec)
             findings = scan_skill(staged)
             if is_blocking(findings) and not force:
                 self.log(f"REJECTED skill `{spec}`: " + "; ".join(f"{f.message} ({f.file}:{f.line})" for f in findings if f.severity == "high"))
                 raise SkillRejected(spec, findings)
-            if dest.exists():
-                shutil.rmtree(dest)
+            if existing is not None:
+                shutil.rmtree(existing)
             shutil.copytree(staged, dest)
         lock[skill] = {"spec": spec, "sha256": _hash_dir(dest), "trust": trust,
                        "findings": [f.__dict__ for f in findings], "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
@@ -446,10 +541,11 @@ class Task:
         return findings
 
     def remove_skill(self, skill: str) -> None:
+        self._require_here()
         lock = self.skills_lock()
         if skill not in lock:
             raise HarnessError(f"skill {skill!r} was not added by this task")
-        if _uninstall_skill(self.skills_dir / skill, lock[skill]["sha256"], self.dir / "modified-skills" / skill):
+        if _uninstall_skill(self.skills_dir, skill, lock[skill]["sha256"], self.dir / "modified-skills"):
             self.log(f"skill `{skill}` was modified after install; kept a backup")
         del lock[skill]
         _write_json(self.dir / "skills.lock.json", lock)
@@ -489,10 +585,18 @@ class Task:
         kept = self.project.kept()
         mcp, skills = self.mcp_lock(), self.skills_lock()
         stamp = {"task": self.id, "agent": self.agent.name}
-        for name, entry in mcp.items():
-            kept["mcp"][name] = entry | stamp | {"created_mcp_config": self._created_mcp_config()}
-        for skill, entry in skills.items():
-            kept["skills"][skill] = entry | stamp
+        here = approvals.task_here(self.project.root, self.id)   # else a later prune asks the user first
+        entries = {"mcp": {n: e | stamp | {"created_mcp_config": self._created_mcp_config()} for n, e in mcp.items()},
+                   "skills": {n: e | stamp for n, e in skills.items()}}
+        for kind, named in entries.items():
+            for name, entry in named.items():
+                if not here and name in kept[kind]:
+                    # a task from a pull must not replace what is kept: the original would drop out of tracking
+                    self.log(f"not keeping `{name}`: kept.json already lists it and this task was not started here")
+                    continue
+                kept[kind][name] = entry
+                if here:
+                    approvals.note_kept(self.project.root, kind, name, entry)
         self.project._write_kept(kept)
         _write_json(self.dir / "mcp.lock.json", {})
         _write_json(self.dir / "skills.lock.json", {})
@@ -505,14 +609,17 @@ class Task:
         from autoharness import library  # lazy: library imports env
         nothing = {"mcp": [], "skills": []}
         unsaved = [s for s, e in self.skills_lock().items() if e.get("source") == "generated"
-                   and not library.exists(s) and (self.skills_dir / s).exists()]
+                   and not library.exists(s) and existing_skill_dir(self.skills_dir, s)]
         backups = {}
         if policy == "keep":
             result = {"removed": nothing, "kept": self._keep_all()}
         elif policy == "remove":
+            self._require_here()
+            for skill in self.skills_lock():   # all refusals first: nothing half torn down
+                existing_skill_dir(self.skills_dir, skill)
             for skill in unsaved:
-                backups[skill] = self.dir / "generated-skills" / skill
-                shutil.copytree(self.skills_dir / skill, backups[skill], dirs_exist_ok=True,
+                backups[skill] = skill_dir(self.dir / "generated-skills", skill)
+                shutil.copytree(existing_skill_dir(self.skills_dir, skill), backups[skill], dirs_exist_ok=True,
                                 ignore=shutil.ignore_patterns(*RUNTIME_JUNK))
                 self.log(f"skill `{skill}` was never saved to the library; copied to {backups[skill]}")
             removed = {"mcp": list(self.mcp_lock()), "skills": list(self.skills_lock())}
@@ -529,10 +636,17 @@ class Task:
         self._update_info(status="kept" if policy == "keep" else "torn-down",
                           finished=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.log(f"teardown complete (policy: {policy})")
+        approvals.forget_task(self.project.root, self.id)   # nothing left to uninstall through its lockfiles
         active = self.project.state / "active"
         if active.exists() and active.read_text("utf-8").strip() == self.id:
             active.unlink()
         return result
+
+
+class ContentChanged(HarnessError):
+    def __init__(self, spec: str):
+        self.spec = spec
+        super().__init__(f"skill {spec} changed since it was vetted")
 
 
 class SkillRejected(HarnessError):

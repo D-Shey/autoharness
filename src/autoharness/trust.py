@@ -51,8 +51,8 @@ def _config_from_package(pkg: dict) -> tuple[dict | None, list[str]]:
     kind, ident, version = pkg.get("registryType"), pkg.get("identifier"), pkg.get("version")
     if pkg.get("transport", {}).get("type", "stdio") != "stdio":
         return None, []
-    secrets = [v["name"] for v in pkg.get("environmentVariables", []) if v.get("isSecret")]
-    env = {v["name"]: f"${{{v['name']}}}" for v in pkg.get("environmentVariables", []) if v.get("isRequired") or v.get("isSecret")}
+    passed = [v["name"] for v in pkg.get("environmentVariables", []) if v.get("isRequired") or v.get("isSecret")]
+    env = {name: f"${{{name}}}" for name in passed}
     if kind == "npm":
         cfg = {"command": "npx", "args": ["-y", f"{ident}@{version}" if version else ident]}
     elif kind == "pypi":
@@ -60,10 +60,10 @@ def _config_from_package(pkg: dict) -> tuple[dict | None, list[str]]:
     elif kind == "oci":
         cfg = {"command": "docker", "args": ["run", "-i", "--rm", ident]}
     else:
-        return None, secrets
+        return None, passed
     if env:
         cfg["env"] = env
-    return cfg, secrets
+    return cfg, passed
 
 
 def _config_from_remote(remote: dict) -> tuple[dict, list[str]]:
@@ -80,7 +80,14 @@ def _config_from_remote(remote: dict) -> tuple[dict, list[str]]:
     return cfg, secrets
 
 
-def score_registry_entry(entry: dict, trusted_publishers: set[str] = frozenset()) -> TrustReport:
+def _dns_publisher(ns: str, trusted_namespaces: dict[str, str]) -> str | None:
+    """The trusted publisher a DNS namespace belongs to, if it is listed. Exactly as listed: subdomains are
+    not the publisher's (anyone gets `<bucket>.s3.amazonaws.com`)."""
+    return trusted_namespaces.get(ns)
+
+
+def score_registry_entry(entry: dict, trusted_publishers: set[str] = frozenset(),
+                         trusted_namespaces: dict[str, str] | None = None) -> TrustReport:
     """Score a registry entry. A verified namespace only proves who published it;
     reaching "high" also requires a publisher on the trusted list."""
     server = entry.get("server", {})
@@ -98,22 +105,31 @@ def score_registry_entry(entry: dict, trusted_publishers: set[str] = frozenset()
     if repo_owner:
         score += 5
         reasons.append(f"source repo on GitHub ({repo_owner})")
-        ns = name.split("/")[0].lower()
-        if ns == f"io.github.{repo_owner}":
-            score += 15
-            reasons.append("namespace verified against GitHub owner")
-        if repo_owner in trusted_publishers:
-            score += 25
-            reasons.append(f"publisher {repo_owner} is on the trusted list")
     else:
         reasons.append("no public source repository")
         score -= 10
+    # who published it is what the registry verified: the GitHub owner of an io.github.<owner> namespace, or
+    # the owner of a DNS namespace on the curated list. The repository URL is whatever the publisher wrote.
+    ns = name.split("/")[0].lower()
+    if repo_owner and ns == f"io.github.{repo_owner}":
+        publisher = repo_owner
+        score += 15
+        reasons.append("namespace verified against GitHub owner")
+    elif publisher := _dns_publisher(ns, trusted_namespaces or {}):
+        score += 15
+        reasons.append(f"namespace {ns} is a domain of {publisher}, verified by the registry")
+    if publisher in trusted_publishers:
+        score += 25
+        reasons.append(f"publisher {publisher} is on the trusted list")
+    elif repo_owner in trusted_publishers:
+        reasons.append(f"claims a repository of {repo_owner}, but namespace {ns} is not verified against it")
 
-    config, secrets = None, []
+    config, secrets, env_names = None, [], []
     packages = server.get("packages", [])
     remotes = server.get("remotes", [])
     for pkg in packages:
-        config, secrets = _config_from_package(pkg)
+        config, env_names = _config_from_package(pkg)
+        secrets = [v["name"] for v in pkg.get("environmentVariables", []) if v.get("isSecret") and v["name"] in env_names]
         if config:
             if pkg.get("registryType") == "oci":
                 reasons.append("runs a container image")
@@ -124,6 +140,7 @@ def score_registry_entry(entry: dict, trusted_publishers: set[str] = frozenset()
             break
     if config is None and remotes:
         config, secrets = _config_from_remote(remotes[0])
+        env_names = secrets
         reasons.append(f"remote server at {remotes[0]['url']} (your data leaves the machine)")
     if config is None:
         reasons.append("no installable package or remote found")
@@ -131,11 +148,15 @@ def score_registry_entry(entry: dict, trusted_publishers: set[str] = frozenset()
 
     if secrets:
         reasons.append(f"needs secrets: {', '.join(secrets)}")
+    # a value is read from the user's environment whatever the publisher calls it: a key marked merely
+    # "required" leaks just the same, so every variable passed on is shown and needs approval
+    if others := [n for n in env_names if n not in secrets]:
+        reasons.append(f"reads from your environment (not marked secret, but may be): {', '.join(others)}")
 
     score = max(0, min(100, score))
     level = _level(score)
-    perms = {"network": "any", "filesystem": "unknown", "shell": "unknown", "secrets": secrets}
-    requires_approval = bool(secrets) or level != "high" or bool(remotes and config and "url" in config)
+    perms = {"network": "any", "filesystem": "unknown", "shell": "unknown", "secrets": secrets, "env": env_names}
+    requires_approval = bool(env_names) or level != "high" or bool(remotes and config and "url" in config)
     return TrustReport(name, score, level, reasons, requires_approval, config, perms)
 
 
@@ -156,7 +177,32 @@ SKILL_PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("low", "disables safety checks", re.compile(r"--no-verify|--dangerously|bypassPermissions", re.I)),
 ]
 
-TEXT_SUFFIXES = {".md", ".txt", ".py", ".js", ".ts", ".mjs", ".cjs", ".sh", ".ps1", ".json", ".yaml", ".yml", ".toml", ""}
+TEXT_SUFFIXES = {".md", ".txt", ".py", ".js", ".ts", ".mjs", ".cjs", ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1",
+                 ".psd1", ".bat", ".cmd", ".rb", ".pl", ".php", ".lua", ".go", ".rs", ".json", ".yaml", ".yml",
+                 ".toml", ""}
+
+
+CONTINUATION = {".ps1": "`", ".psm1": "`", ".psd1": "`", ".bat": "^", ".cmd": "^"}  # everything else: `\`
+
+
+def _logical_lines(lines: list[str], suffix: str) -> list[tuple[int, str]]:
+    """(first line number, text) with continued lines joined, so a pipe on the next line is still seen
+    with the download before it."""
+    mark = CONTINUATION.get(suffix, "\\")
+    joined: list[tuple[int, str]] = []
+    start, parts = 0, []
+    for i, line in enumerate(lines, 1):
+        stripped = line.rstrip()
+        if not parts:
+            start = i
+        if stripped.endswith(mark):
+            parts.append(stripped[:-1])
+            continue
+        joined.append((start, " ".join([*parts, line])))
+        parts = []
+    if parts:
+        joined.append((start, " ".join(parts)))
+    return joined
 
 
 @dataclass
@@ -177,7 +223,7 @@ def scan_skill(root: Path) -> list[ScanFinding]:
             lines = path.read_text("utf-8").splitlines()
         except UnicodeDecodeError:
             continue
-        for i, line in enumerate(lines, 1):
+        for i, line in _logical_lines(lines, path.suffix.lower()):
             for severity, message, pattern in SKILL_PATTERNS:
                 if pattern.search(line):
                     findings.append(ScanFinding(severity, message, str(path.relative_to(root)), i, line.strip()[:160]))

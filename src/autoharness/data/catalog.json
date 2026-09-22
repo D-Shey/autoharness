@@ -123,5 +123,6 @@
     }
   },
   "trusted_mcp_publishers": ["microsoft", "github", "modelcontextprotocol", "anthropics", "upstash", "cloudflare", "stripe", "supabase", "vercel", "googleapis", "aws", "awslabs", "chromedevtools", "getsentry", "neondatabase", "grafana"],
+  "trusted_mcp_namespaces": {"com.microsoft": "microsoft", "com.github": "github", "io.modelcontextprotocol": "modelcontextprotocol", "com.anthropic": "anthropics", "com.upstash": "upstash", "com.cloudflare": "cloudflare", "com.stripe": "stripe", "com.supabase": "supabase", "com.vercel": "vercel", "com.google": "googleapis", "com.amazonaws": "aws", "com.amazon.aws": "aws", "io.sentry": "getsentry", "tech.neon": "neondatabase", "com.grafana": "grafana"},
   "trusted_skill_owners": ["anthropics", "microsoft", "obra", "vercel-labs", "github", "openai", "google", "cloudflare"]
 }

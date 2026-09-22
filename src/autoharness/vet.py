@@ -8,12 +8,12 @@ a constraint while the brief has any.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import tempfile
 from pathlib import Path
 
+from autoharness import approvals
 from autoharness.env import HarnessError, Stager, Task, _hash_dir
 
 MAX_FILE = 6_000      # characters of one file shown to the reviewer
@@ -61,7 +61,7 @@ def skill_content(spec: str, stage: Stager, repo: str, skill: str) -> tuple[str,
 
 def mcp_digest(config: dict) -> str:
     """What an MCP verdict is tied to: the exact config `add` would write."""
-    return hashlib.sha256(json.dumps(config, sort_keys=True).encode("utf-8")).hexdigest()
+    return approvals.digest(config)
 
 
 def mcp_content(name: str, report: dict, source: str) -> str:

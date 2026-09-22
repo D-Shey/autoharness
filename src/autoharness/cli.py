@@ -17,9 +17,10 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, answers, config, egress, evidence, library, recipes, registry, text, vet
+from autoharness import agents, answers, approvals, config, egress, evidence, library, recipes, registry, text, vet
 from autoharness.catalog import Catalog
-from autoharness.env import HarnessError, Project, SkillRejected, Task, npx_stage_skill, parse_skill_spec
+from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, npx_stage_skill,
+                             parse_skill_spec)
 from autoharness.trust import curated_report, score_registry_entry, score_skill
 
 EXIT_APPROVAL = 3
@@ -44,7 +45,7 @@ def resolve_mcp(catalog: Catalog, name: str) -> tuple[dict, str]:
     entry = registry.get_mcp(name)
     if not entry:
         raise HarnessError(f"{name!r} is neither a curated server ({', '.join(catalog.mcp_servers)}) nor in the MCP registry")
-    return score_registry_entry(entry, catalog.trusted_mcp_publishers).to_dict(), "registry.modelcontextprotocol.io"
+    return score_registry_entry(entry, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict(), "registry.modelcontextprotocol.io"
 
 
 def local_mcp_name(name: str) -> str:
@@ -108,7 +109,7 @@ def _search(catalog: Catalog, kind: str, query: str) -> dict:
             found.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
             results = [{"name": r["name"], "score": r["score"], "level": r["level"], "installs": r["installs"]} for r in found]
         else:
-            results = [score_registry_entry(e, catalog.trusted_mcp_publishers).to_dict()
+            results = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict()
                        | {"description": e["server"].get("description", "")[:140]}
                        for e in registry.search_mcp(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
             results = [{"name": r["name"], "score": r["score"], "level": r["level"], "description": r["description"]}
@@ -196,11 +197,27 @@ def cmd_init(args, project, catalog):
         "the brief is recorded.")
     if not suggested:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
-    if stale := stale_skills(project):
-        result["warnings"] = stale
-        result["next"] = "First tell the user: " + "; ".join(stale) + ". Then: " + result["next"]
+    warnings = stale_skills(project) + unapproved_warning(project)
+    if warnings:
+        result["warnings"] = warnings
+        result["next"] = "First tell the user: " + "; ".join(warnings) + ". Then: " + result["next"]
     out(result)
     return 0
+
+
+def unapproved_servers(project) -> list[str]:
+    """Servers in gateway.json the gateway will not run: not approved on this machine (a pull, an older
+    autoharness, or the project moved)."""
+    servers = project.gateway_registry()["servers"]
+    return sorted(n for n, c in servers.items() if not approvals.approved(project.root, n, c))
+
+
+def unapproved_warning(project) -> list[str]:
+    """Only while this agent has the gateway: without it nothing would run them anyway."""
+    names = unapproved_servers(project) if project.gateway_active() else []
+    return [f"the gateway does not run {', '.join(names)}: not approved on this machine (a pull, an older "
+            "autoharness, or a moved project); show the user `autoharness gateway approve --all` and its "
+            "configs"] if names else []
 
 
 def cmd_need(args, project, catalog):
@@ -221,7 +238,7 @@ def cmd_need(args, project, catalog):
 
 def cmd_search(args, project, catalog):
     if args.kind == "mcp":
-        results = [score_registry_entry(e, catalog.trusted_mcp_publishers).to_dict() | {"description": e["server"].get("description", "")}
+        results = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict() | {"description": e["server"].get("description", "")}
                    for e in registry.search_mcp(args.query, limit=args.limit)]
         curated = [curated_report(n, e).to_dict() for n, e in catalog.mcp_servers.items() if args.query.lower() in n]
         results = curated + sorted(results, key=lambda r: r["score"], reverse=True)
@@ -508,7 +525,7 @@ def cmd_add(args, project, catalog):
         local = args.as_name or local_mcp_name(args.name)
         warnings = retold + task.add_mcp(local, report["config"], source=source, permissions=report["permissions"],
                                 trust={"score": report["score"], "level": report["level"]}, direct=args.direct)
-        secrets = report["permissions"].get("secrets", [])
+        secrets = report["permissions"].get("env") or report["permissions"].get("secrets", [])
         agent = task.agent
         env_note = (f" The user must set env vars: {', '.join(secrets)} (visible to the agent process)." if secrets else "")
         if task.mcp_lock()[local].get("via") == "gateway":
@@ -531,18 +548,19 @@ def cmd_add(args, project, catalog):
             return need_approval(f"add skill {args.name}", report)
         try:
             stage = library.stage_from_library if args.name.startswith("local:") else npx_stage_skill
-            findings = task.add_skill(args.name, force=args.force, stage=stage,
+            findings = task.add_skill(args.name, force=args.force, stage=stage, vetted_sha256=vetted.get("sha256"),
                                       trust={"score": report["score"], "level": report["level"]})
+        except ContentChanged:
+            out({"status": "vet_required", "what": f"skill {args.name}",
+                 "next": f"Its files changed since they were vetted (upstream, between the two downloads): run "
+                         f"`autoharness vet skill {args.name}` again and give the new prompt to a fresh reviewer."})
+            return 1
         except SkillRejected as e:
             out({"status": "rejected", "skill": e.spec, "findings": [f.__dict__ for f in e.findings],
                  "next": "Do not install. Pick another skill, or show the findings to the user; --force only on their explicit say-so."})
             return 1
         skill = parse_skill_spec(args.name)[1]
-        vetted = vet.verdict(task, "skill", args.name) or {}
-        drift = retold + ([f"the installed files differ from the ones vetted; run `autoharness vet skill {args.name}` "
-                           "again"] if vetted.get("sha256") and vetted["sha256"] != task.skills_lock()[skill]["sha256"]
-                          else [])
-        out({"status": "ok", "added": skill, **({"warnings": drift} if drift else {}),
+        out({"status": "ok", "added": skill, **({"warnings": retold} if retold else {}),
              "scan_findings": [f.__dict__ for f in findings],
              "next": f"Skill is in {task.agent.skills_dir}; invoke it by name (restart the session if it does not show up)."})
     return 0
@@ -616,14 +634,31 @@ def cmd_remove(args, project, catalog):
     elif task and args.kind == "skill" and args.name in task.skills_lock():
         task.remove_skill(args.name)
     else:
-        out({"status": "ok"} | project.remove_kept("mcp" if args.kind == "mcp" else "skills", args.name))
+        result = project.remove_kept("mcp" if args.kind == "mcp" else "skills", args.name, approved=args.approve)
+        if "approval_required" in result:
+            return kept_elsewhere([args.name], {"entry": result["entry"]})
+        out({"status": "ok"} | result)
         return 0
     out({"status": "ok", "removed": args.name})
     return 0
 
 
+def kept_elsewhere(names: list[str], extra: dict) -> int:
+    out({"status": "approval_required", "what": f"uninstall {', '.join(names)}"} | extra
+        | {"next": "kept.json lists these, but no task on this machine kept them as listed: a pull, an older "
+                   "autoharness, another clone, or an entry changed since. They may be the user's own. Show the "
+                   "user the names (and entries). Re-run with --approve only if they agree to all of them; for "
+                   "some, `autoharness remove mcp|skill <name> --approve` one at a time. The rest stay installed "
+                   "and listed."})
+    return EXIT_APPROVAL
+
+
 def cmd_prune(args, project, catalog):
-    out({"status": "ok", "removed": project.prune()})
+    removed = project.prune(approved=args.approve)
+    waiting = removed.pop("approval_required", [])
+    if waiting:
+        return kept_elsewhere(waiting, {"removed": removed, "waiting": waiting})
+    out({"status": "ok", "removed": removed})
     return 0
 
 
@@ -634,13 +669,15 @@ def kept_summary(project) -> dict:
 
 
 def cmd_status(args, project, catalog):
+    unapproved = ({"gateway_unapproved": names}
+                  if project.gateway_active() and (names := unapproved_servers(project)) else {})
     if not args.task_id and not project.active_id():
-        out({"task": None, "kept": kept_summary(project)})
+        out({"task": None, "kept": kept_summary(project)} | unapproved)
         return 0
     task = project.task(args.task_id)
     out({"task": task.info(), "mcp": task.mcp_lock(),
          "skills": {k: {"spec": v["spec"], "trust": v["trust"]} for k, v in task.skills_lock().items()},
-         "kept": kept_summary(project), "log": (task.dir / "harness.md").read_text("utf-8")})
+         "kept": kept_summary(project)} | unapproved | {"log": (task.dir / "harness.md").read_text("utf-8")})
     return 0
 
 
@@ -716,12 +753,48 @@ def cmd_gateway(args, project, catalog):
         project.uninstall_gateway()
         out({"status": "ok", "uninstalled": agent.name,
              "next": f"Ask the user to {agent.reload_hint} to drop the gateway."})
+    elif args.action == "approve":
+        return gateway_approve(args, project)
     else:
         reg = project.gateway_registry()
         state_file = project.state / "gateway.state.json"
         state = json.loads(state_file.read_text("utf-8")) if state_file.exists() else None
+        unapproved = unapproved_servers(project)
         out({"installed": project.gateway_active(), "agents": reg["installed"], "servers": sorted(reg["servers"]),
-             "running": state and state.get("servers"), "state_updated": state and state.get("updated")})
+             "unapproved": unapproved, "running": state and state.get("servers"),
+             "state_updated": state and state.get("updated")}
+            | ({"next": "The gateway does not run unapproved servers (gateway.json may come from a pull). "
+                        "Show the user each one's config: `autoharness gateway approve <name>`."} if unapproved else {}))
+    return 0
+
+
+def gateway_approve(args, project) -> int:
+    """Let the gateway run servers in gateway.json that were not added on this machine, after the user's yes:
+    one by name, or with --all every one waiting (after upgrading, servers added by an older autoharness)."""
+    servers = project.gateway_registry()["servers"]
+    if args.all:
+        chosen = {n: c for n, c in servers.items() if not approvals.approved(project.root, n, c)}
+        if not chosen:
+            out({"status": "ok", "approved": [], "next": "Nothing is waiting for approval."})
+            return 0
+    elif not args.name:
+        raise HarnessError("name the server (`autoharness gateway approve <name>`) or pass --all")
+    elif args.name not in servers:
+        raise HarnessError(f"{args.name!r} is not in .autoharness/gateway.json")
+    else:
+        chosen = {args.name: servers[args.name]}
+    allow = config.allowed_hosts(project.root)
+    if not args.approve:
+        out({"status": "approval_required", "what": f"let the gateway run {', '.join(chosen)}",
+             "servers": {n: {"config": c, "egress": egress.check(c, allow)} for n, c in chosen.items()},
+             "next": "These servers were not approved on this machine: gateway.json may have come from a pull, or "
+                     "they were added before autoharness asked for approval. Show the user each config (the command "
+                     "it runs, the env vars it reads, where it connects). Re-run with --approve only if they agree."})
+        return EXIT_APPROVAL
+    for name, server in chosen.items():
+        approvals.approve(project.root, name, server)
+    out({"status": "ok", "approved": sorted(chosen),
+         "next": "The gateway starts them within a second; check with harness_tools."})
     return 0
 
 
@@ -900,10 +973,108 @@ def hook_context(catalog: Catalog, prompt: str, session_id: str = "") -> str | N
             "data), what the user's constraints are, and how the result will be verified." + gate)
 
 
+SMART_QUOTES = "‘’‚‛“”„"   # PowerShell reads these as quotes
+SHELL_SPECIAL = set(";|&<>#(){}`\r\n")
+# stderr into the output the agent reads, and read-only filters of that output: harmless in both shells
+# an argument of such a filter: single-quoted, double-quoted with nothing either shell expands, or plain
+# spaces and tabs only between the parts: a newline is a new command, never an argument
+FILTER_ARG = r"""(?:'[^'\n]*'|"[^"\n$`\\]*"|[\w./\[\]-]+)"""
+FILTER_OPTION = r"(?:-[a-zA-Z]+|--[a-z][a-z-]*(?:=" + FILTER_ARG + r")?)"
+READ_ONLY_FILTER = (r"(?:(?:head|tail)(?:[ \t]+-[nc][ \t]*\+?\d+|[ \t]+-\d+)?"
+                    r"|wc(?:[ \t]+-[lwcm]+)?"
+                    r"|Select-Object[ \t]+-(?:First|Last)[ \t]+\d+"
+                    r"|Select-Object[ \t]+-ExpandProperty[ \t]+" + FILTER_ARG +
+                    r"|Select-String(?:[ \t]+-[a-zA-Z]+)*[ \t]+" + FILTER_ARG +
+                    r"|jq(?:[ \t]+" + FILTER_OPTION + r")*(?:[ \t]+" + FILTER_ARG + r")*"
+                    r"|grep(?:[ \t]+" + FILTER_OPTION + r")*(?:[ \t]+" + FILTER_ARG + r")+"
+                    r"|Out-String|ConvertFrom-Json)")
+TRAILING_OUTPUT = re.compile(r"(?:[ \t]+2>(?:&1|/dev/null|\$null)|[ \t]*\|[ \t]*" + READ_ONLY_FILTER + r")*\Z",
+                             re.IGNORECASE)
+ENV_PREFIX = re.compile(r"^AUTOHARNESS_[A-Z_]+=")   # `AUTOHARNESS_AGENT=codex autoharness ...` in Bash
+PLAIN_ESCAPED = re.compile(r"[\w/\\.:-]")   # after an unquoted `\`: a path, not an escape of anything special
+
+
+def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
+    """The `&&`- or `;`-separated commands of `command` as lists of words, or None if it holds anything that
+    Bash or PowerShell could read as more than plain words. Deliberately stricter than both shells (a `#`, `|`
+    or redirection outside quotes, `$'`, `@"`, and `$(` or a backtick anywhere but in single quotes, are
+    refused outright), so that where the two disagree about quoting nothing slips through either. Only Bash
+    gets `\\` line continuations and `\\"` inside double quotes; PowerShell reads a backslash literally."""
+    if any(q in command for q in SMART_QUOTES):
+        return None
+    commands, words, word, quote = [], [], None, None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                word += ch
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\" and bash and i + 1 < n:
+                word += command[i + 1]   # Bash escapes the next character, `\"` and `\$(` included
+                i += 1
+            elif ch == "\\" and command[i + 1:i + 2] in ('"', "\\"):
+                return None   # PowerShell does not escape the quote, so Bash reading would differ
+            elif ch == "`" or command.startswith("$(", i):
+                return None   # runs a command in Bash; a backtick escapes in PowerShell
+            else:
+                word += ch
+        elif ch in "'\"":
+            if command[i - 1:i] in ("$", "@"):
+                return None   # $'...' and @"..." quote by other rules
+            quote, word = ch, word or ""
+        elif ch in " \t":
+            if word is not None:
+                words.append(word)
+            word = None
+        elif ch == "\\" and command[i + 1:i + 2] == "\n":
+            if not bash:
+                return None
+            i += 1
+            if word is not None:
+                words.append(word)
+            word = None
+        elif ch == "\\" and not PLAIN_ESCAPED.match(command[i + 1:i + 2]):
+            return None       # Bash would escape a quote or an operator here
+        elif command.startswith("&&", i) or ch == ";":   # `;`: Windows PowerShell 5.1 has no `&&`
+            if word is not None:
+                words.append(word)
+            commands.append(words)
+            words, word = [], None
+            i += 1 if ch == "&" else 0
+        elif ch in SHELL_SPECIAL:
+            return None
+        else:
+            word = (word or "") + ch
+        i += 1
+    if quote:
+        return None
+    if word is not None:
+        words.append(word)
+    return [*commands, words] if words or not commands else commands   # a trailing `;` ends nothing new
+
+
 def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
+    """The skill, or one plain `autoharness ...` command (after any `cd <dir> &&`). Nothing may run after it
+    in the same call, so the gate is not passed by chaining another command on. The gate keeps the agent to
+    the procedure; it is not a sandbox (the agent may also `waive` it)."""
     if tool == "Skill":
         return str(tool_input.get("skill", "")).split(":")[-1] == "autoharness"
-    return tool in ("Bash", "PowerShell") and str(tool_input.get("command", "")).lstrip().startswith("autoharness")
+    if tool not in ("Bash", "PowerShell"):
+        return False
+    command = TRAILING_OUTPUT.sub("", str(tool_input.get("command", "")).strip())
+    commands = _plain_commands(command, bash=tool == "Bash")
+    if not commands:
+        return False
+    *prefix, last = commands
+    while tool == "Bash" and last and ENV_PREFIX.match(last[0]):
+        last = last[1:]
+    return (all(len(c) == 2 and c[0] == "cd" for c in prefix)
+            and last[:1] == ["autoharness"])
 
 
 def cmd_hook(args, project, catalog):
@@ -942,6 +1113,11 @@ def cmd_hook(args, project, catalog):
                     "permissionDecisionReason": (
                         "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
                         "MCP servers it discovers, and record `autoharness brief ...` before using " + tool + ". "
+                        "An autoharness command passes only on its own: `cd <dir> &&` (or `;`) before it is fine, "
+                        "and at the end `2>&1` and read-only filters (`| head`, `| tail`, `| jq`, `| grep`, "
+                        "`| Select-Object -First N`, `| Out-String`, `| ConvertFrom-Json`); outside quotes no other "
+                        "`;`, `|`, `&&`, `#`, redirection or brackets; `$(...)` and backticks only inside single "
+                        "quotes; `\\\"` only in Bash. "
                         "Reading files is still allowed. If the user explicitly said not to use it, run "
                         f"`autoharness waive {sid} --reason \"<their words>\"` and tell the user.")}})
         return 0
@@ -1050,7 +1226,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")
-    sub.add_parser("prune", help="remove everything earlier tasks kept in the project")
+    s.add_argument("--approve", action="store_true", help="the user agreed to uninstall a kept item no task here kept")
+    s = sub.add_parser("prune", help="remove everything earlier tasks kept in the project")
+    s.add_argument("--approve", action="store_true", help="the user agreed to uninstall kept items no task here kept")
     s = sub.add_parser("status", help="show the active task harness and what the project keeps")
     s.add_argument("task_id", nargs="?")
     s = sub.add_parser("teardown", help="end the task: keep its harness in the project, or remove it (setting `teardown`)")
@@ -1078,7 +1256,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--description", help="for `new`: when an agent should use the skill")
     s.add_argument("--approve", action="store_true", help="for `save`: the user explicitly agreed")
     s = sub.add_parser("gateway", help="one MCP server that hot-adds the servers you add, no agent restarts")
-    s.add_argument("action", choices=["install", "uninstall", "status", "serve"])
+    s.add_argument("action", choices=["install", "uninstall", "status", "serve", "approve"])
+    s.add_argument("name", nargs="?", help="for `approve`: the server in .autoharness/gateway.json")
+    s.add_argument("--approve", action="store_true", help="for `approve`: the user read the config and agreed")
+    s.add_argument("--all", action="store_true", help="for `approve`: every server waiting for approval")
     s = sub.add_parser("recipe", help="saved harness recipes")
     s.add_argument("action", choices=["list", "match", "show"])
     s.add_argument("value", nargs="?", default="")

@@ -27,6 +27,7 @@ class Catalog:
     mcp_servers: dict[str, dict]
     trusted_skill_owners: set[str]
     trusted_mcp_publishers: set[str]
+    trusted_mcp_namespaces: dict[str, str] = field(default_factory=dict)  # DNS namespace -> trusted publisher
 
     @classmethod
     def load(cls) -> "Catalog":
@@ -37,7 +38,7 @@ class Catalog:
             for name, c in raw["capabilities"].items()
         }
         return cls(caps, raw["mcp_servers"], set(raw["trusted_skill_owners"]),
-                   set(raw.get("trusted_mcp_publishers", [])))
+                   set(raw.get("trusted_mcp_publishers", [])), raw.get("trusted_mcp_namespaces", {}))
 
     def classify(self, task: str) -> list[tuple[Capability, list[str]]]:
         """Return capabilities whose keywords appear in the task, strongest first.
