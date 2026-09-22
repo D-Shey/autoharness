@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from autoharness import __version__
+from autoharness import __version__, egress
 from autoharness.mcp_client import PROTOCOL_VERSIONS, McpError, make_client
 
 INSTRUCTIONS = ("Servers added with `autoharness add mcp` appear here without a restart. Call harness_tools to "
@@ -63,6 +63,7 @@ class Gateway:
         self.registry_error: str | None = None
         self.initialized = False
         self._mtime: int | None = None
+        self._allow: list[str] = []
         self._lock = threading.RLock()
 
     # --- registry and children -------------------------------------------------
@@ -70,17 +71,46 @@ class Gateway:
     def _registry_file(self) -> Path | None:
         return self.project / ".autoharness" / "gateway.json" if self.project else None
 
+    def _enforce_hosts(self) -> bool:
+        """Follow allowed_hosts: cut off running remote servers it no longer lets through, and boot again
+        the ones it blocked once it lets them through."""
+        allow = self._allowed_hosts()
+        if allow == self._allow:
+            return False
+        self._allow, cut, back = allow, [], []
+        with self._lock:
+            for name, cfg in self.configs.items():
+                reach = egress.check(cfg, allow)
+                blocked = reach["enforced"] and not reach["ok"]
+                if blocked and name in self.clients:
+                    client = self.clients.pop(name)
+                    self.tools[name] = []
+                    self.status[name] = {"status": "error", "error": f"blocked: {reach['reason']}"}
+                    threading.Thread(target=client.close, daemon=True).start()
+                    cut.append(name)
+                elif not blocked and self.status.get(name, {}).get("error", "").startswith("blocked:"):
+                    self.status[name] = {"status": "starting"}
+                    back.append(name)
+        for name in back:
+            threading.Thread(target=self._boot, args=(name, self.configs[name]), daemon=True).start()
+        for name in cut:
+            self.log(f"{name}: blocked: allowed_hosts changed")
+        if cut:
+            self._changed()
+        return bool(cut or back)
+
     def sync(self) -> bool:
-        """Bring running servers in line with gateway.json. Returns whether anything changed."""
+        """Bring running servers in line with gateway.json and allowed_hosts. Returns whether anything changed."""
+        enforced = self._enforce_hosts()
         path = self._registry_file()
         if path is None or not path.exists():
             if not self.configs:
-                return False
+                return enforced
             self._mtime, wanted = None, {}
         else:
             mtime = path.stat().st_mtime_ns
             if mtime == self._mtime:
-                return False
+                return enforced
             self._mtime = mtime
             try:
                 wanted = json.loads(path.read_text("utf-8")).get("servers", {})
@@ -88,7 +118,7 @@ class Gateway:
             except ValueError as e:
                 self.registry_error = f"gateway.json is not valid JSON ({e}); keeping the previous servers"
                 self.log(self.registry_error)
-                return False
+                return enforced
         changed = False
         with self._lock:
             for name in list(self.configs):
@@ -104,10 +134,25 @@ class Gateway:
                     changed = True
         if changed:
             self._changed()
-        return changed
+        return changed or enforced
+
+    def _allowed_hosts(self) -> list[str]:
+        if self.project is None:
+            return []
+        from autoharness import config  # lazy: config pulls in the task environment
+        return config.allowed_hosts(self.project)
 
     def _boot(self, name: str, cfg: dict) -> None:
         client = None
+        reach = egress.check(cfg, self._allowed_hosts())
+        if reach["enforced"] and not reach["ok"]:
+            # the user approved the server when it was added, but allowed_hosts changed since
+            with self._lock:
+                if self.configs.get(name) is cfg:
+                    self.status[name] = {"status": "error", "error": f"blocked: {reach['reason']}"}
+            self.log(f"{name}: blocked: {reach['reason']}")
+            self._changed()
+            return
         try:
             client = self.client_factory(name, cfg, log=self.log, on_tools_changed=self._refresh, stderr=self.stderr)
             client.start()

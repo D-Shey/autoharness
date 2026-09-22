@@ -10,6 +10,10 @@ each adapter translates it into the agent's native config on write.
     gemini    .gemini/settings.json      .gemini/skills
     qwen      .qwen/settings.json        .qwen/skills
     gigacode  .gigacode/settings.json    .gigacode/skills
+    strands   .agent/mcp.json            .agent/skills
+
+Strands harness has no fixed MCP config file: it takes `create_harness(mcp_servers=<path>)`,
+so autoharness writes an mcpServers JSON at `.agent/mcp.json` for the user to pass in.
 
 Adapters only ever touch the server entries they are asked to write or remove;
 everything else in the file is preserved.
@@ -241,6 +245,8 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
           _GEMINI_HINT.format(title="Qwen Code")),
     Agent("gigacode", "GigaCode CLI", ".gigacode/settings.json", ".gigacode/skills", ".gigacode/skills", to_gemini,
           _GEMINI_HINT.format(title="GigaCode CLI")),
+    Agent("strands", "Strands harness", ".agent/mcp.json", ".agent/skills", ".agent/skills", to_claude,
+          "restart the agent; pass mcp_servers=\".agent/mcp.json\" to create_harness() so it loads the server"),
 ]}
 
 DEFAULT_AGENT = "claude"

@@ -99,6 +99,7 @@ autoharness install-skill --all                # в проект, сразу д�
 | Gemini CLI | `gemini` | `.gemini/skills/autoharness/` | `~/.gemini/skills/autoharness/` |
 | Qwen Code | `qwen` | `.qwen/skills/autoharness/` | `~/.qwen/skills/autoharness/` |
 | GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
+| Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (сам strands его не читает: передайте путь в `create_harness(skills=...)`) |
 
 В проект или глобально:
 
@@ -133,6 +134,7 @@ Gateway ставится в проект и **отдельно для каждо
 | Gemini CLI | `.gemini/settings.json` | перезапустить или выполнить `/mcp refresh` |
 | Qwen Code | `.qwen/settings.json` | перезапустить или выполнить `/mcp refresh` |
 | GigaCode CLI | `.gigacode/settings.json` | перезапустить или выполнить `/mcp refresh` |
+| Strands harness | `.agent/mcp.json` | передать `create_harness(mcp_servers=".agent/mcp.json")` и пересоздать агента |
 
 Проверка: в агенте должны появиться инструменты `harness_tools` и `harness_call`. В Claude Code
 они могут прийти отложенными — их находит поиск инструментов.
@@ -179,6 +181,7 @@ Skill удаляется вместе с папкой `autoharness` в ката�
 | `gemini` (Gemini CLI) | `.gemini/settings.json` | `.gemini/skills` |
 | `qwen` (Qwen Code) | `.qwen/settings.json` | `.qwen/skills` |
 | `gigacode` (GigaCode CLI) | `.gigacode/settings.json` | `.gigacode/skills` |
+| `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
 
 Агент выбирается при `init` и запоминается в задаче. Порядок: `--agent`, затем
 `$AUTOHARNESS_AGENT`, затем автоопределение по окружению (`CLAUDECODE`, `GEMINI_CLI`, …),
@@ -202,17 +205,18 @@ remote-серверы становятся `httpUrl`/`url`, для Codex сек�
 | `plan "<задача>"` | то же без побочных эффектов |
 | `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов |
 | `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
-| `inspect mcp\|skill <name>` | подробный trust-отчёт |
+| `inspect mcp\|skill <name>` | подробный trust-отчёт; для MCP ещё `egress` — куда сервер может ходить |
+| `vet mcp\|skill <name> [--verdict fits\|breaks --text ...]` | промпт для независимой проверки кандидата против `--constraints` из brief; запись вердикта |
 | `add mcp <name>` / `add skill owner/repo@skill` | ставит в MCP-конфиг и папку skills агента и пишет в lockfile |
 | `remove mcp\|skill <name>` | снимает то, что поставила эта задача или сохранила в проекте прошлая |
 | `prune` | снимает всё, что прошлые задачи сохранили в проекте |
 | `status` | текущий harness, что сохранено в проекте, журнал |
-| `teardown [--keep\|--remove] [--save-recipe NAME --notes ...]` | завершает задачу по политике `teardown` |
-| `config get\|set [teardown keep\|remove] [--global]` | настройки |
+| `teardown [--keep\|--remove] [--save-recipe NAME --notes ... --query kind:q]` | завершает задачу по политике `teardown`; recipe хранит и запросы к реестрам (`skill:<q>`/`mcp:<q>`), которые нашли поставленное |
+| `config get\|set [teardown keep\|remove \| allowed_hosts "<хосты>"] [--global]` | настройки |
 | `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
 | `gateway install\|uninstall\|status\|serve` | один MCP-сервер autoharness, через который новые серверы работают без перезапуска |
 | `add mcp <name> --direct` | мимо gateway, сразу в конфиг агента |
-| `recipe list\|match\|show` | сохранённые наборы |
+| `recipe list\|match\|show` | сохранённые наборы; `show` перезапускает запросы recipe и отдаёт в `fresh` новых кандидатов, `init` делает то же для recipe со score ≥ 0.3 |
 | `agents` | поддерживаемые агенты и их пути |
 
 Всё печатается как JSON. Код выхода `3` = нужно согласие пользователя.
@@ -234,6 +238,31 @@ autoharness config set teardown remove            # для этого проек
 autoharness config set teardown remove --global   # для всех проектов
 autoharness config get                            # текущее значение и откуда оно
 ```
+
+## Куда могут ходить MCP-серверы
+
+Настройка `allowed_hosts` — список шаблонов хостов через запятую (`api.github.com,*.example.com`);
+пусто (по умолчанию) — без ограничений. Честно о том, что она может:
+
+- **удалённый** сервер (HTTP/SSE) живёт на одном известном хосте: хост не из списка — `add` просит
+  согласия пользователя (код `3`), а gateway не подключается к нему и отключает уже работающий, если список сузили позже (в течение секунды);
+- **локальный процесс** (`npx`, `uvx`, `docker`) ходит куда хочет, autoharness это не ограничивает.
+  Поэтому при заданном списке такой сервер тоже ставится только с согласия пользователя.
+
+```bash
+autoharness config set allowed_hosts "api.githubcopilot.com,*.context7.com"
+autoharness inspect mcp github      # поле egress: host, enforced, ok, reason
+```
+
+## Проверка кандидатов против ограничений
+
+Если в brief записаны `--constraints` пользователя, `add` не ставит skill или сервер без вердикта
+независимой проверки (статус `vet_required`). `autoharness vet skill <spec>` ставит skill во
+временную папку и собирает промпт из ограничений дословно и содержимого файлов (для MCP — конфиг,
+права и `egress`). Промпт отдаётся свежему subagent'у, его ответ записывается через
+`--verdict fits|breaks --text "..."`. На `breaks` `add` отвечает кодом `3`: ставить только если
+пользователь согласен. Если файлы skill при установке отличаются от проверенных, `add` предупреждает.
+Свои skills из библиотеки (`local:`) проверку не требуют.
 
 `.autoharness/.gitignore` пропускает `config.json` и `kept.json`, так что их можно
 закоммитить вместе с папкой skills; остальное состояние задач в git не попадает.

@@ -2,6 +2,9 @@
 
 Stored globally in ~/.autoharness/recipes/<name>.json (override with
 AUTOHARNESS_HOME) so they carry across projects.
+
+A recipe pins what was installed and also keeps the registry queries that found it
+(`queries`), so a later task re-runs them and sees candidates that appeared since.
 """
 
 from __future__ import annotations
@@ -26,14 +29,38 @@ def recipes_dir() -> Path:
     return d
 
 
-def save(task: Task, name: str, notes: str = "") -> Path:
+def parse_query(value: str) -> dict:
+    """`skill:<query>` or `mcp:<query>` -> {"kind", "query"}."""
+    kind, sep, query = value.partition(":")
+    if not sep or kind not in ("skill", "mcp") or not query.strip():
+        raise ValueError(f"query {value!r} must look like skill:<query> or mcp:<query>")
+    return {"kind": kind, "query": query.strip()}
+
+
+def productive_queries(task: Task) -> list[dict]:
+    """The searches of this task whose results include something it installed."""
     info = task.info()
+    mcp = set(task.mcp_lock())
+    skills = {v["spec"] for v in task.skills_lock().values()}
+    found = []
+    for d in info.get("discovery", []) + info.get("searches", []):
+        names = [r if isinstance(r, str) else r["name"] for r in d.get("results", [])]
+        installed = skills if d.get("kind") == "skill" else mcp
+        if any(n in installed or n.rsplit("/", 1)[-1] in installed for n in names):
+            found.append({"kind": d["kind"], "query": d["query"]})
+    return found
+
+
+def save(task: Task, name: str, notes: str = "", queries: list[dict] | None = None) -> Path:
+    info = task.info()
+    queries = list({(q["kind"], q["query"]): q for q in productive_queries(task) + (queries or [])}.values())
     recipe = {
         "name": name,
         "task_example": info.get("task", ""),
         "capabilities": info.get("capabilities", []),
         "mcp": {k: {"config": v["config"], "source": v["source"]} for k, v in task.mcp_lock().items()},
         "skills": [v["spec"] for v in task.skills_lock().values()],
+        "queries": queries,
         "notes": notes,
         "uses": 0,
         "saved": time.strftime("%Y-%m-%dT%H:%M:%S"),

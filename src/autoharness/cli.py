@@ -17,7 +17,7 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, config, evidence, library, recipes, registry, text
+from autoharness import agents, config, egress, evidence, library, recipes, registry, text, vet
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected, Task, npx_stage_skill, parse_skill_spec
 from autoharness.trust import curated_report, score_registry_entry, score_skill
@@ -82,6 +82,8 @@ def suggestions(catalog: Catalog, caps) -> list[dict]:
 DISCOVERY_QUERIES = 4
 DISCOVERY_RESULTS = 5
 DISCOVERY_BUDGET = 15.0  # seconds for all searches together
+RECIPE_REUSE = 0.3  # recipe match score from which init re-runs the recipe's saved queries
+RECIPE_QUERIES = 4
 
 
 def discovery_queries(catalog: Catalog, task_text: str) -> list[str]:
@@ -116,15 +118,8 @@ def _search(catalog: Catalog, kind: str, query: str) -> dict:
         return {"kind": kind, "query": query, "error": str(e)}
 
 
-def discover(catalog: Catalog, task_text: str) -> list[dict]:
-    """Search skills.sh and the MCP registry for the task, in parallel. Never raises."""
-    if os.environ.get("AUTOHARNESS_OFFLINE"):
-        return [{"skipped": "AUTOHARNESS_OFFLINE is set"}]
-    queries = discovery_queries(catalog, task_text)
-    # the MCP registry matches one substring of a server name and slows down under parallel load,
-    # so it gets at most two single-word queries
-    mcp_queries = list(dict.fromkeys(q.split()[0] for q in queries))[:2]
-    jobs = [("skill", q) for q in queries] + [("mcp", q) for q in mcp_queries]
+def run_searches(catalog: Catalog, jobs: list[tuple[str, str]]) -> list[dict]:
+    """Run (kind, query) searches in parallel within DISCOVERY_BUDGET. Never raises."""
     results: list[dict | None] = [None] * len(jobs)
 
     def run(i: int, kind: str, query: str) -> None:
@@ -141,6 +136,33 @@ def discover(catalog: Catalog, task_text: str) -> list[dict]:
             for r, (k, q) in zip(results, jobs)]
 
 
+def discover(catalog: Catalog, task_text: str, recipe_queries: list[tuple[str, dict]] = ()) -> list[dict]:
+    """Search skills.sh and the MCP registry for the task, in parallel. Never raises.
+
+    `recipe_queries` are (recipe name, {"kind", "query"}) pairs from matching recipes, re-run so that
+    candidates published since the recipe was saved show up next to its pinned entries."""
+    if os.environ.get("AUTOHARNESS_OFFLINE"):
+        return [{"skipped": "AUTOHARNESS_OFFLINE is set"}]
+    queries = discovery_queries(catalog, task_text)
+    # the MCP registry matches one substring of a server name and slows down under parallel load,
+    # so it gets at most two single-word queries
+    mcp_queries = list(dict.fromkeys(q.split()[0] for q in queries))[:2]
+    jobs = [("skill", q) for q in queries] + [("mcp", q) for q in mcp_queries]
+    origin = {}
+    for name, q in recipe_queries:
+        job = (q["kind"], q["query"])
+        if job not in jobs and len(origin) < RECIPE_QUERIES:
+            jobs.append(job)
+            origin[job] = name
+    found = run_searches(catalog, jobs)
+    return [d | ({"recipe": origin[j]} if j in origin else {}) for d, j in zip(found, jobs)]
+
+
+def recipe_queries(matches: list[tuple[float, dict]]) -> list[tuple[str, dict]]:
+    """The saved queries of recipes that match the task well enough to reuse."""
+    return [(r["name"], q) for s, r in matches if s >= RECIPE_REUSE for q in r.get("queries", [])]
+
+
 # --- commands ---------------------------------------------------------------
 
 def cmd_plan(args, project, catalog):
@@ -154,13 +176,15 @@ def cmd_init(args, project, catalog):
     task = project.init_task(args.task)
     agent = task.agent
     suggested = suggestions(catalog, catalog.classify(args.task))
+    matches = recipes.match(args.task)
     result = {"status": "ok", "task_id": task.id, "dir": str(task.dir),
               "agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
               "suggested": suggested,
               "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
-                           "mcp": list(r["mcp"]), "skills": r["skills"]} for s, r in recipes.match(args.task)],
+                           "mcp": list(r["mcp"]), "skills": r["skills"], "queries": r.get("queries", [])}
+                          for s, r in matches],
               "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
-    result["discovered"] = discovered = discover(catalog, args.task)
+    result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
     task.record_discovery(discovered)
     result["next"] = (
         "Read `discovered`: these skills and MCP servers were found for this task. Search more with "
@@ -373,7 +397,9 @@ def cmd_brief(args, project, catalog):
 def cmd_inspect(args, project, catalog):
     if args.kind == "mcp":
         report, source = resolve_mcp(catalog, args.name)
-        out(report | {"source": source})
+        reach = (egress.check(report["config"], config.allowed_hosts(project.root)) if report["config"]
+                 else {"host": None, "enforced": False, "ok": False, "reason": "no installable configuration"})
+        out(report | {"source": source, "egress": reach})
     else:
         out(resolve_skill(catalog, args.name))
     return 0
@@ -391,12 +417,22 @@ def cmd_add(args, project, catalog):
         return already_kept(project, "mcp", args.as_name or local_mcp_name(args.name))
     if args.kind == "skill" and parse_skill_spec(args.name)[1] in project.kept()["skills"]:
         return already_kept(project, "skills", parse_skill_spec(args.name)[1])
+    if (gate := vet_gate(task, args)) is not None:
+        return gate
     if args.kind == "mcp":
         report, source = resolve_mcp(catalog, args.name)
         if not report["config"]:
             raise HarnessError(f"{args.name} has no installable configuration")
+        vetted = vet.verdict(task, "mcp", args.name)
+        if vetted and vetted["sha256"] != vet.mcp_digest(report["config"]):
+            out({"status": "vet_required", "what": f"mcp {args.name}",
+                 "next": f"Its configuration changed since it was vetted: run `autoharness vet mcp {args.name}` again."})
+            return 1
+        reach = egress.check(report["config"], config.allowed_hosts(project.root))
+        if not reach["ok"]:
+            report = report | {"requires_approval": True, "reasons": report["reasons"] + [reach["reason"]]}
         if report["requires_approval"] and not args.approve:
-            return need_approval(f"add MCP server {args.name}", report)
+            return need_approval(f"add MCP server {args.name}", report | {"egress": reach})
         local = args.as_name or local_mcp_name(args.name)
         warnings = task.add_mcp(local, report["config"], source=source, permissions=report["permissions"],
                                 trust={"score": report["score"], "level": report["level"]}, direct=args.direct)
@@ -429,9 +465,62 @@ def cmd_add(args, project, catalog):
             out({"status": "rejected", "skill": e.spec, "findings": [f.__dict__ for f in e.findings],
                  "next": "Do not install. Pick another skill, or show the findings to the user; --force only on their explicit say-so."})
             return 1
-        out({"status": "ok", "added": parse_skill_spec(args.name)[1],
+        skill = parse_skill_spec(args.name)[1]
+        vetted = vet.verdict(task, "skill", args.name) or {}
+        drift = ([f"the installed files differ from the ones vetted; run `autoharness vet skill {args.name}` again"]
+                 if vetted.get("sha256") and vetted["sha256"] != task.skills_lock()[skill]["sha256"] else [])
+        out({"status": "ok", "added": skill, **({"warnings": drift} if drift else {}),
              "scan_findings": [f.__dict__ for f in findings],
              "next": f"Skill is in {task.agent.skills_dir}; invoke it by name (restart the session if it does not show up)."})
+    return 0
+
+
+def vet_gate(task: Task, args) -> int | None:
+    """While the brief has constraints, a candidate needs a vet verdict, and a `breaks` one the user's yes."""
+    if not vet.constraints(task) or args.name.startswith("local:"):
+        return None
+    v = vet.verdict(task, args.kind, args.name)
+    if v is None:
+        out({"status": "vet_required", "what": f"{args.kind} {args.name}",
+             "next": f"The brief has constraints. Run `autoharness vet {args.kind} {args.name}`, give its prompt to a "
+                     "fresh subagent, record its answer, then add again."})
+        return 1
+    if v["verdict"] == "breaks" and not args.approve:
+        out({"status": "approval_required", "what": f"add {args.kind} {args.name}", "vet": v,
+             "next": "The vetting reviewer found that it breaks the user's constraints. Pick another candidate, "
+                     "or show the user the verdict; re-run with --approve only if they agree."})
+        return EXIT_APPROVAL
+    return None
+
+
+def cmd_vet(args, project, catalog):
+    task = project.task()
+    if not vet.constraints(task):
+        raise HarnessError("the brief records no constraints to vet against; record `autoharness brief "
+                           "--constraints \"<the user's words>\"` first (or there is nothing to vet)")
+    if args.verdict:
+        v = vet.record(task, args.kind, args.name, args.verdict, args.text or "")
+        out({"status": "ok", "vetted": args.name} | v | {
+            "next": f"`autoharness add {args.kind} {args.name}`." if v["verdict"] == "fits" else
+                    "Pick another candidate; install this one only if the user agrees after seeing the verdict."})
+        return 0
+    if args.kind == "mcp":
+        report, source = resolve_mcp(catalog, args.name)
+        if not report["config"]:
+            raise HarnessError(f"{args.name} has no installable configuration")
+        report = report | {"egress": egress.check(report["config"], config.allowed_hosts(project.root))}
+        content = vet.mcp_content(args.name, report, source)
+        vet.note_pending(task, "mcp", args.name, vet.mcp_digest(report["config"]))
+    else:
+        repo, skill = parse_skill_spec(args.name)
+        stage = library.stage_from_library if args.name.startswith("local:") else npx_stage_skill
+        content, digest = vet.skill_content(args.name, stage, repo, skill)
+        vet.note_pending(task, "skill", args.name, digest)
+    text = vet.prompt(task, args.kind, args.name, content)
+    out({"status": "ok", "prompt": text, "prompt_file": evidence.save_prompt(task, "vet", text),
+         "next": "Give `prompt` to a fresh subagent that did not pick this candidate (Claude Code: the Agent tool), "
+                 "unchanged. Record its answer: `autoharness vet " + f"{args.kind} {args.name} --verdict fits|breaks "
+                 "--text \"<its REASON>\"`."})
     return 0
 
 
@@ -476,7 +565,11 @@ def cmd_teardown(args, project, catalog):
     warnings = []
     saved = None
     if args.save_recipe:
-        saved = str(recipes.save(task, args.save_recipe, args.notes or ""))
+        try:
+            queries = [recipes.parse_query(q) for q in args.query or []]
+        except ValueError as e:
+            raise HarnessError(str(e)) from e
+        saved = str(recipes.save(task, args.save_recipe, args.notes or "", queries))
         warnings = [f"recipe refers to {v['spec']}, which is not in the library yet; run `autoharness skill save "
                     f"{parse_skill_spec(v['spec'])[1]}` or the recipe cannot install it"
                     for v in task.skills_lock().values()
@@ -601,7 +694,7 @@ def cmd_skill(args, project, catalog):
 
 def cmd_config(args, project, catalog):
     if args.action == "set":
-        if not args.value:
+        if args.value is None or (not args.value and config.SETTINGS.get(args.key) is not None):
             raise HarnessError("usage: autoharness config set <key> <value> [--global]")
         config.set_value(config.global_path() if args.glob else config.project_path(project.root), args.key, args.value)
     keys = [args.key] if args.key else list(config.SETTINGS)
@@ -620,7 +713,16 @@ def cmd_recipe(args, project, catalog):
             raise HarnessError(f"no recipe named {args.value!r}")
         recipes.mark_used(args.value)
         r = match[0]
-        out(r | {"next": "Add each entry with `autoharness add mcp <name>` / `autoharness add skill <spec>`; trust checks still apply."})
+        nxt = "Add each entry with `autoharness add mcp <name>` / `autoharness add skill <spec>`; trust checks still apply."
+        if r.get("queries"):
+            pinned = set(r["mcp"]) | set(r["skills"])
+            fresh = [d | {"results": [x for x in d["results"] if x["name"] not in pinned
+                                      and local_mcp_name(x["name"]) not in pinned]} if "results" in d else d
+                     for d in ([{"skipped": "AUTOHARNESS_OFFLINE is set"}] if os.environ.get("AUTOHARNESS_OFFLINE")
+                               else run_searches(catalog, [(q["kind"], q["query"]) for q in r["queries"]]))]
+            r = r | {"fresh": fresh}
+            nxt += " `fresh` holds what the recipe's queries find now besides its entries: prefer one that beats a pinned entry."
+        out(r | {"next": nxt})
     return 0
 
 
@@ -821,6 +923,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="install a skill despite high-severity scan findings")
     s.add_argument("--as", dest="as_name", help="local name for the MCP server")
     s.add_argument("--direct", action="store_true", help="for mcp: write to the agent's config even if the gateway is installed")
+    s = sub.add_parser("vet", help="check a candidate against the brief's constraints by an independent reviewer")
+    s.add_argument("kind", choices=["mcp", "skill"])
+    s.add_argument("name")
+    s.add_argument("--verdict", choices=list(vet.VERDICTS), help="record the reviewer's VERDICT")
+    s.add_argument("--text", help="with --verdict: the reviewer's REASON")
     s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")
@@ -831,6 +938,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task_id", nargs="?")
     s.add_argument("--save-recipe", metavar="NAME")
     s.add_argument("--notes")
+    s.add_argument("--query", action="append", metavar="KIND:QUERY",
+                   help="with --save-recipe: a registry query to re-run later (skill:<q> or mcp:<q>); repeatable. "
+                        "Searches that found what the task installed are saved without it")
     s.add_argument("--force", action="store_true",
                    help="tear down although a planned skill, evidence or a review is missing")
     s.add_argument("--accepted", metavar="USER_WORDS",
@@ -911,7 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect,
+COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,

@@ -3,8 +3,10 @@
     <project>/.autoharness/config.json    per project (can be committed)
     ~/.autoharness/config.json            for every project (AUTOHARNESS_HOME overrides)
 
-The only setting so far is `teardown`: `keep` leaves what a task installed in
-the project when the task ends, `remove` takes it all down.
+`teardown`: `keep` leaves what a task installed in the project when the task
+ends, `remove` takes it all down.
+`allowed_hosts`: comma-separated host patterns MCP servers may reach (see egress.py);
+empty, the default, means no restriction.
 """
 
 from __future__ import annotations
@@ -16,7 +18,8 @@ from pathlib import Path
 from autoharness.env import HarnessError, ensure_state_dir
 from autoharness.recipes import home
 
-SETTINGS = {"teardown": ("keep", "remove")}   # first value is the default
+# first value is the default; None takes free text and defaults to ""
+SETTINGS: dict[str, tuple[str, ...] | None] = {"teardown": ("keep", "remove"), "allowed_hosts": None}
 
 
 def global_path() -> Path:
@@ -34,7 +37,7 @@ def _load(path: Path) -> dict:
 def _check(key: str, value: str, where: str) -> str:
     if key not in SETTINGS:
         raise HarnessError(f"unknown setting {key!r}; known: {', '.join(SETTINGS)}")
-    if value not in SETTINGS[key]:
+    if SETTINGS[key] is not None and value not in SETTINGS[key]:
         raise HarnessError(f"{where}: {key} must be one of {', '.join(SETTINGS[key])}, not {value!r}")
     return value
 
@@ -59,8 +62,18 @@ def resolve(root: Path, key: str, flag: str | None = None) -> tuple[str, str]:
     for source, path in (("project", project_path(root)), ("global", global_path())):
         if key in (data := _load(path)):
             return _check(key, data[key], str(path)), source
-    return SETTINGS[key][0], "default"
+    return (SETTINGS[key] or ("",))[0], "default"
 
 
 def teardown_policy(root: Path, flag: str | None = None) -> tuple[str, str]:
     return resolve(root, "teardown", flag)
+
+
+def allowed_hosts(root: Path) -> list[str]:
+    """The allowlist; a config it cannot read allows nothing rather than everything."""
+    from autoharness.egress import patterns
+    try:
+        value = resolve(root, "allowed_hosts")[0]
+    except (ValueError, OSError):
+        return ["<unreadable allowed_hosts: nothing allowed>"]
+    return patterns(value) if isinstance(value, str) else ["<allowed_hosts is not a string: nothing allowed>"]

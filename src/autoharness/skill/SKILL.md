@@ -60,7 +60,10 @@ compare your output with them. They often need no install at all: a web search
 tool, a browser or a headless render you already have. Say how you will cover them.
 
 If a recipe scores above ~0.3 and fits, `autoharness recipe show <name>` and
-reuse its entries rather than searching again.
+reuse its entries rather than searching again. `init` has already re-run the recipe's
+saved queries (entries in `discovered` marked `recipe`), and `recipe show` lists under
+`fresh` what they find now besides the pinned entries: take a fresh one when it beats
+a pinned entry.
 
 ### 2. Discover (never skip)
 
@@ -129,6 +132,15 @@ autoharness add skill <owner/repo@skill>
   generator scripts when the user said "no generators") is not a candidate, even
   if its name fits. If you find this out only after installing, `autoharness remove`
   it and say so.
+- You do not judge the fit yourself. While the brief has constraints, `add` answers
+  `vet_required` until a fresh reviewer has checked the candidate: run
+  `autoharness vet mcp|skill <name>`, give its prompt unchanged to a fresh subagent,
+  and record its answer with `autoharness vet mcp|skill <name> --verdict fits|breaks
+  --text "<its REASON>"`. On `breaks`, pick another candidate; `add` asks for the
+  user's yes (exit `3`) before installing it anyway.
+- If the project sets `allowed_hosts`, `inspect` shows under `egress` where a server
+  can reach. A remote server off the list, or any local process (its network cannot
+  be fenced), needs the user's approval: show them the `egress` reason.
 - A low-trust skill that brings little is worse than no skill. When the know-how is
   thin (an SVG primer, a generic checklist), skip it and write down what you know.
 - If `add` exits `3` (`approval_required`), show the user the name, trust
@@ -225,6 +237,8 @@ resume from where you were.
    yes. If save reports `blocked`, remove what it flags.
 3. End the task. If the setup was useful, save it as a recipe too:
    `autoharness teardown --save-recipe <short-name> --notes "<what it was good for>"`
+   The searches that found what you installed are saved with it; add a query that
+   should be re-run next time with `--query "skill:<query>"` or `--query "mcp:<query>"`.
    Otherwise `autoharness teardown`. If teardown warns that discovery or the brief
    was skipped, tell the user.
    What happens to the harness follows the `teardown` setting

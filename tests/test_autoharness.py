@@ -1832,3 +1832,293 @@ def test_bootstrap_skill_teaches_severity_disputes_and_acceptance():
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
     for phrase in ("--worst", "--dispute", "--fidelity", "close-up", "--accepted"):
         assert phrase in text, phrase
+
+
+# --- recipes keep the queries that found their entries ------------------------
+
+def test_recipe_saves_the_queries_that_found_what_was_installed(project, capsys):
+    task = project.init_task("set up the report pipeline")
+    task.record_discovery([{"kind": "skill", "query": "svg illustration",
+                            "results": [{"name": "someone/skills@svg-scene"}]},
+                           {"kind": "skill", "query": "noise", "results": [{"name": "x/y@z"}]}])
+    task.note_search("mcp", "playwright", ["io.github.microsoft/playwright"])
+    lock = task.dir / "skills.lock.json"
+    lock.write_text(json.dumps({"svg-scene": {"spec": "someone/skills@svg-scene"}}), "utf-8")
+    task.add_mcp("playwright", {"command": "npx"}, source="registry", trust={}, permissions={})
+    code, res = cli_json(capsys, "--project", str(project.root), "teardown", "--save-recipe", "svg",
+                         "--query", "skill:svg review", "--query", "skill:svg illustration")
+    assert code == 0, res
+    saved = json.loads(Path(res["recipe_saved"]).read_text("utf-8"))
+    assert saved["queries"] == [{"kind": "skill", "query": "svg illustration"},
+                                {"kind": "mcp", "query": "playwright"},
+                                {"kind": "skill", "query": "svg review"}]
+
+
+def test_recipe_rejects_a_malformed_query(project, capsys):
+    cli_json(capsys, "--project", str(project.root), "init", "t")
+    code = cli.main(["--project", str(project.root), "teardown", "--save-recipe", "x", "--query", "svg review"])
+    assert code != 0 and "skill:<query>" in capsys.readouterr().out
+
+
+def save_svg_recipe(project):
+    task = project.init_task("draw an svg illustration of a film scene")
+    task.note_capability("visual-review")
+    path = recipes.save(task, "svg-scene", "svg illustration of a scene",
+                        [{"kind": "skill", "query": "svg scene review"}])
+    task.teardown()
+    return path
+
+
+def test_init_reruns_the_queries_of_a_matching_recipe(project, capsys, monkeypatch):
+    save_svg_recipe(project)
+    calls = fake_registry(monkeypatch)
+    code, res = cli_json(capsys, "--project", str(project.root), "init", "draw an svg illustration of a scene")
+    assert code == 0 and ("skill", "svg scene review") in calls
+    assert res["recipes"][0]["queries"] == [{"kind": "skill", "query": "svg scene review"}]
+    [rerun] = [d for d in res["discovered"] if d["query"] == "svg scene review"]
+    assert rerun["recipe"] == "svg-scene" and rerun["results"]
+
+
+def test_init_skips_the_queries_of_a_weak_recipe_match(project, capsys, monkeypatch):
+    save_svg_recipe(project)
+    calls = fake_registry(monkeypatch)
+    cli_json(capsys, "--project", str(project.root), "init", "fix the flaky payment test suite scene")
+    assert ("skill", "svg scene review") not in calls
+
+
+def test_recipe_show_lists_fresh_candidates_besides_pinned_ones(project, capsys, monkeypatch):
+    path = save_svg_recipe(project)
+    r = json.loads(path.read_text("utf-8"))
+    path.write_text(json.dumps(r | {"skills": ["old/skills@svg"]}), "utf-8")
+    fake_registry(monkeypatch)
+    code, res = cli_json(capsys, "--project", str(project.root), "recipe", "show", "svg-scene")
+    assert code == 0
+    assert [x["name"] for x in res["fresh"][0]["results"]] == ["someone/skills@svg-scene"]
+    path.write_text(json.dumps(r | {"skills": ["someone/skills@svg-scene"]}), "utf-8")
+    code, res = cli_json(capsys, "--project", str(project.root), "recipe", "show", "svg-scene")
+    assert res["fresh"][0]["results"] == []
+
+
+def test_old_recipes_without_queries_still_work(project, capsys):
+    path = save_svg_recipe(project)
+    r = json.loads(path.read_text("utf-8"))
+    del r["queries"]
+    path.write_text(json.dumps(r), "utf-8")
+    code, res = cli_json(capsys, "--project", str(project.root), "init", "draw an svg illustration of a scene")
+    assert code == 0 and res["recipes"][0]["queries"] == []
+    code, res = cli_json(capsys, "--project", str(project.root), "recipe", "show", "svg-scene")
+    assert code == 0 and "fresh" not in res
+
+
+# --- allowed_hosts: where MCP servers may reach -------------------------------
+
+from autoharness import egress
+
+
+def test_egress_check_knows_what_it_can_enforce():
+    remote = {"type": "http", "url": "https://api.githubcopilot.com/mcp/"}
+    assert egress.check(remote, [])["ok"] and not egress.check(remote, [])["enforced"]
+    assert egress.check(remote, egress.patterns("*.githubcopilot.com, x.io"))["ok"]
+    blocked = egress.check(remote, ["x.io"])
+    assert blocked["enforced"] and not blocked["ok"] and "not on" in blocked["reason"]
+    local = egress.check({"command": "npx"}, ["x.io"])
+    assert not local["enforced"] and not local["ok"] and "cannot restrict" in local["reason"]
+    assert egress.check({"command": "npx"}, [])["ok"]
+
+
+def test_add_asks_approval_for_a_host_off_the_allowlist(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    code, _ = cli_json(capsys, "--project", root, "config", "set", "allowed_hosts", "only.example.com")
+    assert code == 0
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "fetch")        # curated local process
+    assert code == cli.EXIT_APPROVAL and "cannot restrict" in res["trust"]["egress"]["reason"]
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "fetch", "--approve")
+    assert code == 0 and res["status"] == "ok"
+    code, res = cli_json(capsys, "--project", root, "inspect", "mcp", "github")    # curated remote
+    assert res["egress"]["enforced"] and not res["egress"]["ok"]
+    code, _ = cli_json(capsys, "--project", root, "config", "set", "allowed_hosts", "")
+    assert code == 0 and config_value(project, "allowed_hosts") == ""
+
+
+def config_value(project, key):
+    from autoharness import config
+    return config.resolve(project.root, key)[0]
+
+
+def test_config_rejects_empty_choice_settings(project, capsys):
+    code = cli.main(["--project", str(project.root), "config", "set", "teardown", ""])
+    assert code != 0
+
+
+def test_gateway_refuses_a_remote_host_off_the_allowlist(project):
+    from autoharness import config
+    config.set_value(config.project_path(project.root), "allowed_hosts", "only.example.com")
+    project.save_gateway_registry({"installed": [], "servers": {
+        "far": {"type": "http", "url": "https://evil.example.org/mcp"}}})
+    gw, _ = make_gateway(project.root)
+    gw.sync()
+    wait_for(lambda: gw.status.get("far", {}).get("status") == "error")
+    assert "blocked" in gw.status["far"]["error"]
+    gw.close_all()
+
+
+# --- vet: an independent check against the user's constraints ----------------
+
+def briefed(capsys, project, constraints="no generators"):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "prepare the quarterly report")
+    args = [constraints if a == "no generators" else a for a in BRIEF]
+    return cli_json(capsys, "--project", root, "brief", *args)
+
+
+def test_add_needs_a_vet_verdict_while_the_brief_has_constraints(project, capsys, monkeypatch):
+    root = str(project.root)
+    briefed(capsys, project)
+    code, res = cli_json(capsys, "--project", root, "add", "skill", "acme/skills@demo")
+    assert code == 1 and res["status"] == "vet_required"
+    monkeypatch.setattr(cli, "npx_stage_skill", fake_stager(SAFE_SKILL))
+    code, res = cli_json(capsys, "--project", root, "vet", "skill", "acme/skills@demo")
+    assert code == 0 and "no generators" in res["prompt"] and "Run the tests." in res["prompt"]
+    assert Path(res["prompt_file"]).read_text("utf-8") == res["prompt"]
+    code, res = cli_json(capsys, "--project", root, "vet", "skill", "acme/skills@demo",
+                         "--verdict", "breaks", "--text", "ships an svg generator")
+    assert code == 0
+    code, res = cli_json(capsys, "--project", root, "add", "skill", "acme/skills@demo")
+    assert code == cli.EXIT_APPROVAL and res["vet"]["verdict"] == "breaks"
+    code = cli.main(["--project", root, "vet", "skill", "acme/skills@demo", "--verdict", "fits", "--text", "ok"])
+    assert code != 0 and "no vetting prompt" in capsys.readouterr().out   # a verdict is not rewritten in place
+    cli_json(capsys, "--project", root, "vet", "skill", "acme/skills@demo")
+    cli_json(capsys, "--project", root, "vet", "skill", "acme/skills@demo", "--verdict", "fits", "--text", "ok")
+    monkeypatch.setattr(cli, "resolve_skill", lambda c, s: {"requires_approval": False, "score": 50, "level": "medium"})
+    code, res = cli_json(capsys, "--project", root, "add", "skill", "acme/skills@demo")
+    assert code == 0 and res["status"] == "ok" and "warnings" not in res
+    assert "vetted skill `acme/skills@demo`: fits" in (project.task().dir / "harness.md").read_text("utf-8")
+
+
+def test_add_warns_when_the_installed_skill_differs_from_the_vetted_one(project, capsys, monkeypatch):
+    root = str(project.root)
+    briefed(capsys, project)
+    monkeypatch.setattr(cli, "npx_stage_skill", fake_stager(SAFE_SKILL))
+    cli_json(capsys, "--project", root, "vet", "skill", "acme/skills@demo")
+    cli_json(capsys, "--project", root, "vet", "skill", "acme/skills@demo", "--verdict", "fits", "--text", "ok")
+    monkeypatch.setattr(cli, "npx_stage_skill", fake_stager({"SKILL.md": SAFE_SKILL["SKILL.md"] + "changed\n"}))
+    monkeypatch.setattr(cli, "resolve_skill", lambda c, s: {"requires_approval": False, "score": 50, "level": "medium"})
+    code, res = cli_json(capsys, "--project", root, "add", "skill", "acme/skills@demo")
+    assert code == 0 and "differ from the ones vetted" in res["warnings"][0]
+
+
+def test_vet_prompt_for_an_mcp_server_shows_its_config_and_reach(project, capsys):
+    root = str(project.root)
+    briefed(capsys, project, "must run offline")
+    code, res = cli_json(capsys, "--project", root, "vet", "mcp", "github")
+    assert code == 0 and "must run offline" in res["prompt"] and "api.githubcopilot.com" in res["prompt"]
+    assert '"egress"' in res["prompt"]
+
+
+def test_no_constraints_means_no_vetting(project, capsys):
+    root = str(project.root)
+    briefed(capsys, project, "none: the user set no limits")
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "fetch")
+    assert code == 0 and res["status"] == "ok"
+    code = cli.main(["--project", root, "vet", "mcp", "fetch"])
+    assert code != 0
+
+
+# --- strands harness adapter ---------------------------------------------------
+
+def test_strands_agent_writes_mcp_json_and_agent_skills(tmp_path):
+    project = Project(tmp_path, "strands")
+    task = project.init_task("t")
+    task.add_mcp("github", GITHUB, source="catalog", trust={}, permissions={})
+    assert json.loads((tmp_path / ".agent" / "mcp.json").read_text())["mcpServers"]["github"] == GITHUB
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+    assert (tmp_path / ".agent" / "skills" / "demo" / "SKILL.md").exists()
+    task.teardown("remove")
+    assert not (tmp_path / ".agent" / "skills" / "demo").exists()
+
+
+def test_vet_verdict_needs_a_prompt_first(project, capsys):
+    briefed(capsys, project)
+    code = cli.main(["--project", str(project.root), "vet", "mcp", "fetch", "--verdict", "fits", "--text", "mine"])
+    assert code != 0 and "no vetting prompt" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("words", ["нет ограничений", "без ограничений.", "No constraints", "none: user set none"])
+def test_no_constraints_in_other_words(project, capsys, words):
+    briefed(capsys, project, words)
+    code, res = cli_json(capsys, "--project", str(project.root), "add", "mcp", "fetch")
+    assert code == 0 and res["status"] == "ok"
+
+
+def test_mcp_breaks_verdict_needs_approval_and_a_changed_config_a_new_vet(project, capsys, monkeypatch):
+    root = str(project.root)
+    briefed(capsys, project, "must run offline")
+    cli_json(capsys, "--project", root, "vet", "mcp", "github")
+    cli_json(capsys, "--project", root, "vet", "mcp", "github", "--verdict", "breaks", "--text", "hosted API")
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "github")
+    assert code == cli.EXIT_APPROVAL and res["vet"]["verdict"] == "breaks"
+    real = cli.resolve_mcp
+    monkeypatch.setattr(cli, "resolve_mcp", lambda c, n: (lambda r: (r[0] | {"config": {**r[0]["config"],
+                                                            "url": "https://other.example.com/mcp"}}, r[1]))(real(c, n)))
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "github", "--approve")
+    assert code == 1 and "changed since it was vetted" in res["next"]
+    monkeypatch.setattr(cli, "resolve_mcp", real)
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "github", "--approve")
+    assert code == 0 and res["status"] == "ok"
+
+
+def test_add_asks_approval_for_a_remote_host_off_the_allowlist(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    cli_json(capsys, "--project", root, "config", "set", "allowed_hosts", "only.example.com")
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "github")
+    assert code == cli.EXIT_APPROVAL and res["trust"]["egress"]["enforced"] and not res["trust"]["egress"]["ok"]
+    cli_json(capsys, "--project", root, "config", "set", "allowed_hosts", "*.githubcopilot.com")
+    code, res = cli_json(capsys, "--project", root, "inspect", "mcp", "github")
+    assert res["egress"]["enforced"] and res["egress"]["ok"]
+    assert not any("allowed_hosts" in r for r in res["reasons"])
+
+
+def test_gateway_cuts_off_a_running_remote_server_when_the_allowlist_tightens(project):
+    from autoharness import config
+    gw, _ = make_gateway(project.root)
+
+    class Remote:
+        closed = False
+
+        def close(self):
+            Remote.closed = True
+    far = {"type": "http", "url": "https://far.example.org/mcp"}
+    project.save_gateway_registry({"installed": [], "servers": {"far": far}})
+    gw.configs["far"] = far
+    gw.clients["far"], gw.status["far"], gw.tools["far"] = Remote(), {"status": "running"}, [{"name": "x"}]
+    assert not gw.sync()
+    config.set_value(config.project_path(project.root), "allowed_hosts", "only.example.com")
+    assert gw.sync()
+    assert gw.status["far"]["status"] == "error" and "blocked" in gw.status["far"]["error"]
+    assert "far" not in gw.clients
+    wait_for(lambda: Remote.closed)
+    booted = []
+    gw._boot = lambda name, cfg: booted.append(name)
+    config.set_value(config.project_path(project.root), "allowed_hosts", "*.example.org")
+    assert gw.sync()
+    wait_for(lambda: booted == ["far"])
+
+
+def test_an_unreadable_allowlist_allows_nothing(project):
+    from autoharness import config
+    config.project_path(project.root).parent.mkdir(parents=True, exist_ok=True)
+    config.project_path(project.root).write_text("{broken", "utf-8")
+    remote = {"type": "http", "url": "https://a.io/mcp"}
+    assert not egress.check(remote, config.allowed_hosts(project.root))["ok"]
+    config.project_path(project.root).write_text(json.dumps({"allowed_hosts": ["a.io"]}), "utf-8")
+    assert not egress.check(remote, config.allowed_hosts(project.root))["ok"]
+
+
+@pytest.mark.parametrize("words", [": offline only", "no constraints: but must run offline", "нет: только офлайн",
+                                   "нет, но только офлайн"])
+def test_constraints_after_a_no_word_still_count(project, capsys, words):
+    briefed(capsys, project, words)
+    code, res = cli_json(capsys, "--project", str(project.root), "add", "mcp", "fetch")
+    assert code == 1 and res["status"] == "vet_required"
