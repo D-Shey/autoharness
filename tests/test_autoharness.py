@@ -2122,3 +2122,85 @@ def test_constraints_after_a_no_word_still_count(project, capsys, words):
     briefed(capsys, project, words)
     code, res = cli_json(capsys, "--project", str(project.root), "add", "mcp", "fetch")
     assert code == 1 and res["status"] == "vet_required"
+
+
+# --- gateway children do not inherit credentials --------------------------------
+
+def test_child_env_drops_credential_shaped_names_but_keeps_explicit_ones():
+    from autoharness.mcp_client import child_env
+    parent = {"PATH": "/bin", "HOME": "/h", "GITHUB_TOKEN": "t", "anthropic_api_key": "k", "DB_PASSWORD": "p",
+              "AWS_SECRET_ACCESS_KEY": "s", "GOOGLE_APPLICATION_CREDENTIALS": "c", "HTTPS_PROXY": "x"}
+    env = child_env({"GITHUB_TOKEN": "explicit"}, parent)
+    assert env == {"PATH": "/bin", "HOME": "/h", "HTTPS_PROXY": "x", "GITHUB_TOKEN": "explicit"}
+
+
+def test_gateway_server_does_not_see_the_agents_secrets(project, monkeypatch):
+    monkeypatch.setenv("AH_TEST_API_KEY", "leak")
+    monkeypatch.setenv("AH_TEST_PLAIN", "fine")
+    captured = {}
+    real = mcp_client.subprocess.Popen
+
+    def popen(cmd, **kw):
+        captured.update(kw["env"])
+        return real(cmd, **kw)
+    monkeypatch.setattr(mcp_client.subprocess, "Popen", popen)
+    client = mcp_client.make_client("fake", {**FAKE_CFG, "env": {"MINE": "${AH_TEST_PLAIN}"}})
+    client.start()
+    client.close()
+    assert "AH_TEST_API_KEY" not in captured and captured["AH_TEST_PLAIN"] == "fine" and captured["MINE"] == "fine"
+
+
+# --- evidence diff: the whole change, new files included -------------------------
+
+def git_repo(root):
+    import subprocess
+    run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)  # noqa: E731
+    run("init", "-q")
+    run("config", "user.email", "t@example.com")
+    run("config", "user.name", "t")
+    (root / "a.py").write_text("x = 1\n", "utf-8")
+    run("add", "a.py")
+    run("commit", "-qm", "init")
+    return run
+
+
+def test_evidence_diff_includes_untracked_files(project, capsys):
+    git_repo(project.root)
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    (project.root / "new_module.py").write_text("def f():\n    return 1\n", "utf-8")
+    code, res = cli_json(capsys, "--project", root, "evidence", "diff")
+    assert code == 0 and res["evidence"]["kind"] == "result" and res["evidence"]["untracked"] == ["new_module.py"]
+    patch = Path(res["evidence"]["file"]).read_text("utf-8")
+    assert "+x = 2" in patch and "new_module.py" in patch and "+def f():" in patch
+    assert ".autoharness" not in patch
+    assert [p.name for p in (project.task().dir / "evidence").iterdir()] == [Path(res["evidence"]["file"]).name]
+
+
+def test_evidence_diff_refuses_an_empty_change(project, capsys):
+    git_repo(project.root)
+    cli_json(capsys, "--project", str(project.root), "init", "t")
+    code = cli.main(["--project", str(project.root), "evidence", "diff"])
+    assert code != 0 and "no changes" in capsys.readouterr().out
+
+
+def test_evidence_diff_is_an_appliable_patch_and_skips_nested_repos(project, capsys):
+    import subprocess
+    run = git_repo(project.root)
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    (project.root / "a.py").write_bytes(b"x = 2\r\ny = 3\n")
+    (project.root / "new.txt").write_bytes(b"crlf\r\n")
+    nested = project.root / "sub"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=nested, check=True)
+    code, res = cli_json(capsys, "--project", root, "evidence", "diff")
+    assert code == 0 and res["evidence"]["skipped_nested"] == ["sub/"]
+    stored = project.task().info()["evidence"][-1]
+    assert stored["untracked"] == ["new.txt"]
+    run("apply", "--check", "-R", res["evidence"]["file"])
+    code = cli.main(["--project", root, "evidence", "diff", "--base=--output=x"])
+    assert code != 0 and "must be a revision" in capsys.readouterr().out
+    code = cli.main(["--project", root, "evidence", "diff", "--base", "no-such-rev"])
+    assert code != 0

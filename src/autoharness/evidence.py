@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def media_of(path: str) -> str | None:
     return next((m for m, suffixes in MEDIA.items() if suffix in suffixes), None)
 
 
-def add(task: Task, path: Path, kind: str, note: str = "") -> dict:
+def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = None) -> dict:
     if kind not in KINDS:
         raise HarnessError(f"kind must be one of {', '.join(KINDS)}")
     if not path.is_file():
@@ -57,9 +58,53 @@ def add(task: Task, path: Path, kind: str, note: str = "") -> dict:
     shutil.copy2(path, dest)
     item = {"n": len(items) + 1, "kind": kind, "file": str(dest), "source": str(path), "note": note,
             "media": media_of(path.name), "sha256": hashlib.sha256(dest.read_bytes()).hexdigest(),
-            "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            "added": time.strftime("%Y-%m-%dT%H:%M:%S")} | (extra or {})
     task._update_info(evidence=items + [item])
     task.log(f"evidence #{item['n']}: {kind} `{path.name}`" + (f" ({note})" if note else ""))
+    return item
+
+
+def _git(root: Path, *args: str, ok=(0,)) -> bytes:
+    """git's output as bytes: a patch must keep its line endings to stay appliable."""
+    proc = subprocess.run(["git", *args], cwd=root, capture_output=True, stdin=subprocess.DEVNULL)
+    if proc.returncode not in ok:
+        err = proc.stderr.decode("utf-8", "replace").strip()[-400:]
+        raise HarnessError(f"git {' '.join(args)} failed: {err}")
+    return proc.stdout
+
+
+def git_diff(root: Path, base: str = "HEAD") -> tuple[bytes, list[str], list[str]]:
+    """Everything that changed since `base`: tracked edits (staged or not) and new untracked files,
+    without touching the index. autoharness's own state is left out.
+    Returns (patch, untracked files, skipped nested repositories)."""
+    if base.startswith("-"):
+        raise HarnessError(f"--base must be a revision, not {base!r}")
+    _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    own = ":(exclude).autoharness"
+    patch = _git(root, "diff", "--binary", base, "--", ".", own)
+    listed = [p for p in _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", own)
+              .decode("utf-8", "replace").split("\0") if p]
+    # a nested repository or worktree is listed as `dir/`: it has its own history, not a file to diff
+    nested = [p for p in listed if p.endswith("/")]
+    untracked = [p for p in listed if not p.endswith("/")]
+    for rel in untracked:
+        # --no-index exits 1 when the files differ, which they always do against /dev/null
+        patch += _git(root, "diff", "--binary", "--no-index", "--", "/dev/null", rel, ok=(0, 1))
+    return patch, untracked, nested
+
+
+def add_diff(task: Task, root: Path, base: str = "HEAD", note: str = "") -> dict:
+    """Record the working tree's changes as this round's result, new files included."""
+    patch, untracked, nested = git_diff(root, base)
+    if not patch.strip():
+        raise HarnessError(f"no changes since {base}: nothing to review")
+    dest_dir = task.dir / "evidence"
+    dest_dir.mkdir(exist_ok=True)
+    src = dest_dir / f"diff-{time.strftime('%H%M%S')}.patch"
+    src.write_bytes(patch)
+    note = note or f"git diff {base} + {len(untracked)} untracked file(s)"
+    item = add(task, src, "result", note, {"untracked": untracked} | ({"skipped_nested": nested} if nested else {}))
+    src.unlink()
     return item
 
 

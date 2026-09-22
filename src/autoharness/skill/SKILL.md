@@ -186,6 +186,7 @@ resume from where you were.
    ```bash
    autoharness evidence add <file> --kind reference   # what the result must match; the thing itself
    autoharness evidence add <file> --kind result      # this round: the whole result, then close-ups
+   autoharness evidence diff                          # code: the whole working-tree diff, new files included
    autoharness review --by self --diff "1 <most important>; 2 ..." --worst blocker|major|minor|none
    autoharness critic                                 # prompt for an independent reviewer
    autoharness review --by critic --diff "<its list>" --worst <its VERDICT>

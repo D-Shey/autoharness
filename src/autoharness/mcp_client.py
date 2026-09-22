@@ -24,6 +24,17 @@ def timeout_s() -> float:
     return float(os.environ.get("AUTOHARNESS_GATEWAY_TIMEOUT", "120"))
 
 
+# credential-shaped names (as in DeepSeek Harness's subprocess scrub): a server gets a secret only
+# through its own `env`, as `${VAR}`, never by inheriting everything the agent was started with
+SENSITIVE_ENV = re.compile(r"KEY|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL", re.IGNORECASE)
+
+
+def child_env(extra: Mapping[str, str], parent: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment for a server process: the parent's minus credential-shaped names, plus `extra`."""
+    parent = os.environ if parent is None else parent
+    return {k: v for k, v in parent.items() if not SENSITIVE_ENV.search(k)} | dict(extra)
+
+
 def expand_secrets(value, env: Mapping[str, str] | None = None):
     """Replace ${VAR} with its value from `env` (default: os.environ), recursively."""
     env = os.environ if env is None else env
@@ -100,7 +111,7 @@ class StdioClient(_Client):
         self._eof = False
         self.proc = subprocess.Popen([exe, *cfg.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.stderr if self.stderr is not None else subprocess.DEVNULL,
-                                     env={**os.environ, **cfg.get("env", {})})
+                                     env=child_env(cfg.get("env", {})))
         threading.Thread(target=self._read, daemon=True).start()
         self._handshake()
 

@@ -242,6 +242,12 @@ def cmd_evidence(args, project, catalog):
     if args.action == "list":
         out({"evidence": task.info().get("evidence", []), "reviews": task.info().get("reviews", [])})
         return 0
+    if args.action == "diff":
+        item = evidence.add_diff(task, project.root, args.base, args.note or "")
+        out({"status": "ok", "evidence": item,
+             "next": "Review this diff: record your own pass with `autoharness review --by self ...`, then get an "
+                     "independent one with `autoharness critic`."})
+        return 0
     if not args.file or not args.kind:
         raise HarnessError("usage: autoharness evidence add <file> --kind reference|result [--note ...]")
     item = evidence.add(task, Path(args.file), args.kind, args.note or "")
@@ -968,9 +974,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="install for every supported agent")
     sub.add_parser("hook", help="Claude Code UserPromptSubmit hook: reads the hook JSON on stdin")
     s = sub.add_parser("evidence", help="record a file you checked: a reference, or what a round produced")
-    s.add_argument("action", choices=["add", "list"])
+    s.add_argument("action", choices=["add", "list", "diff"])
     s.add_argument("file", nargs="?")
     s.add_argument("--kind", choices=list(evidence.KINDS))
+    s.add_argument("--base", default="HEAD", help="for `diff`: the revision to compare the working tree with")
     s.add_argument("--note", help="what it shows")
     s = sub.add_parser("review", help="record one review round of the latest result")
     s.add_argument("--diff", required=True, help="the differences found, most important first")
