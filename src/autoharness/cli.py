@@ -231,13 +231,46 @@ def cmd_evidence(args, project, catalog):
 
 def cmd_review(args, project, catalog):
     worst = args.worst or ("major" if args.fixable == "yes" else "none")
-    item = evidence.review(project.task(), args.diff, worst, args.by)
-    if item.get("repeats", 0) >= evidence.LOOP_ROUNDS:
-        nxt = (f"The same top problem came back {item['repeats']} critic rounds in a row: \"{item['top']}\". "
-               "What you are doing is not fixing it. Change the approach for that part (rebuild it from the "
-               "reference point by point, simplify it, or try another technique), or ask the user whether it "
-               "matters. Do not repeat the same kind of edit.")
-    elif item["fixable"]:
+    task = project.task()
+    item = evidence.review(task, args.diff, worst, args.by, args.settled)
+    if item.get("auto_limited"):
+        out({"status": "limited", "review": item,
+             "next": f"\"{item['auto_limited']}\" is ruled out of reach: the final arbiter's fix failed as well, on "
+                     "that arbiter's own terms. It no longer blocks; critics count it as minor at most. Tell the user "
+                     "about it when you finish. "
+                     + ("Nothing else blocks: confirm with `autoharness critic` or finish."
+                        if not item["fixable"] else
+                        "Fix the other blocker and major differences, add the result, then `autoharness critic`.")})
+        return 0
+    if item.get("needs_arbiter"):
+        final = (" This is the final arbitration for that part: if its fix fails too, the part is ruled out of "
+                 "reach automatically." if item.get("final_arbiter") else "")
+        out({"status": "arbitrate", "review": item,
+             "next": f"\"{item['needs_arbiter']}\" is still listed after {item['repeats']} critic rounds and "
+                     f"{item['tried']} different approaches. Do not decide yourself whether it can be fixed: run "
+                     "`autoharness arbiter`, give its prompt unchanged to a fresh subagent that neither made nor "
+                     "reviewed the work, and record its answer with `autoharness arbitrate --verdict fix|limit "
+                     "--text \"<its answer>\" --check \"<its CHECK line>\"`. The next critic will not run before that."
+                     + final})
+        return 0
+    if item.get("needs_approach"):
+        part = item["needs_approach"]
+        tried = evidence.tried_approaches(task, part)
+        done = "; ".join(f"{a['now']}" for a in tried) or "none recorded yet"
+        out({"status": "change_approach", "review": item,
+             "next": f"The same problem is still listed after {item['repeats']} critic rounds in a row: "
+                     f"\"{part}\". What you are doing is not fixing it, so the next critic will not run until you "
+                     "change the approach for that part. Approaches tried so far: "
+                     f"{done} ({len(tried)} of {evidence.MAX_APPROACHES} before an arbiter decides). "
+                     "1) Name the method you used and a different one: rebuild that part from the reference piece "
+                     "by piece (measure or quote the reference instead of working from memory), reduce it to what "
+                     "carries it, or change the technique. 2) If you lack the know-how for that part, that is a "
+                     "capability gap: `autoharness need <capability> --reason \"<part>\"`, `autoharness search "
+                     "skill \"<part>\"`, or write down what you learn in a skill. 3) Record it: `autoharness "
+                     "approach --part \"<part>\" --was \"<old method>\" --now \"<new method>\"`. 4) Rebuild the part, "
+                     "add the result and a close-up of the part, then `autoharness critic`."})
+        return 0
+    if item["fixable"]:
         nxt = ("Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
                "close-ups of the parts in question), and review again. If you believe a critic point is wrong, "
                "do not drop it yourself: add a close-up and run `autoharness critic --dispute \"<the point>\"`.")
@@ -248,11 +281,66 @@ def cmd_review(args, project, catalog):
     return 0
 
 
+def cmd_approach(args, project, catalog):
+    task = project.task()
+    part = args.part or evidence.pending_approach(task)
+    if not part:
+        out({"status": "error", "error": "no part given and no loop pending: pass --part \"<part>\""})
+        return 1
+    item = evidence.approach(task, part, args.was, args.now)
+    out({"status": "ok", "approach": item,
+         "next": f"Rebuild \"{part}\" the new way. Add the whole result and a close-up of that part with "
+                 "`autoharness evidence add <file> --kind result`, then run `autoharness critic`: the critic "
+                 "will judge that part first against the approaches tried."})
+    return 0
+
+
+def cmd_arbiter(args, project, catalog):
+    task = project.task()
+    res = evidence.arbiter_prompt(catalog, task, args.part or "")
+    res["prompt_file"] = evidence.save_prompt(task, "arbiter", res["prompt"])
+    out({"status": "ok"} | res | {
+        "next": "Give the prompt unchanged to a fresh subagent that neither made nor reviewed this work (or tell it "
+                "to read `prompt_file` and follow it). Record its answer: `autoharness arbitrate --verdict <its "
+                "VERDICT> --text \"<its answer>\"`."})
+    return 0
+
+
+def cmd_arbitrate(args, project, catalog):
+    task = project.task()
+    part = args.part or evidence.pending_arbiter(task)
+    if not part:
+        out({"status": "error", "error": "no part given and no arbiter pending: pass --part \"<part>\""})
+        return 1
+    item = evidence.arbitrate(task, part, args.verdict, args.text, args.check or "")
+    nxt = (f"Follow the arbiter's technique for \"{part}\" (it is now the next approach): rebuild that part and add "
+           f"the result and a close-up of it. Then run the arbiter's check on it (\"{item.get('check')}\") and record "
+           "what it measured with `autoharness check --result \"<measured>\" --pass yes|no`: if it fails, the fix "
+           "did not take effect, so keep working on it first. Only then run `autoharness critic`."
+           if args.verdict == "fix" else
+           f"\"{part}\" no longer blocks: critics will count it as minor at most. Fix the other blocker and major "
+           "differences, add the result, then run `autoharness critic`.")
+    out({"status": "ok", "arbitration": item, "next": nxt})
+    return 0
+
+
+def cmd_check(args, project, catalog):
+    item = evidence.record_check(project.task(), args.result, args.passed == "yes")
+    nxt = ("The fix took effect by its own measure: run `autoharness critic`." if args.passed == "yes" else
+           "The check failed: the fix has not taken effect. Keep working on it and record the check again when it "
+           "passes; if it cannot pass, `autoharness critic` still runs, and the critic sees the failed measurement.")
+    out({"status": "ok", "arbitration": item, "next": nxt})
+    return 0
+
+
 def cmd_critic(args, project, catalog):
-    res = evidence.critic_prompt(catalog, project.task(), args.dispute or "")
+    task = project.task()
+    res = evidence.critic_prompt(catalog, task, args.dispute or "")
+    res["prompt_file"] = evidence.save_prompt(task, "critic", res["prompt"])
     out({"status": "ok"} | res | {
         "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
-                "elsewhere a new session). Do not add your own opinion to it. Record its answer verbatim in "
+                "elsewhere a new session), unchanged: paste it, or tell the subagent to read `prompt_file` and "
+                "follow it. Do not add your own opinion to it. Record its answer verbatim in "
                 "substance: `autoharness review --by critic --diff \"<its list>\" --worst <its VERDICT>`."})
     return 0
 
@@ -781,8 +869,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="worst severity among the fixable differences (the critic's VERDICT)")
     g.add_argument("--fixable", choices=["yes", "no"], help="short form: yes = major, no = none")
     s.add_argument("--by", choices=["self", "critic"], default="self")
+    s.add_argument("--settled", action="append", default=[], metavar="POINT",
+                   help="a disputed point this critic settled from measurements in the files, and how; "
+                        "later critics see it (repeatable)")
     s = sub.add_parser("critic", help="a prompt for an independent reviewer of the latest result")
     s.add_argument("--dispute", help="a point of the last critic review you believe is wrong; a fresh critic decides")
+    s = sub.add_parser("approach", help="record a change of approach for a part that keeps failing review")
+    s.add_argument("--part", help="the part that loops (default: the one the last review named)")
+    s.add_argument("--was", required=True, help="the method used so far")
+    s.add_argument("--now", required=True, help="the different method you will use now")
+    s = sub.add_parser("arbiter", help="a prompt for an independent arbiter on a part that outlasted its approaches")
+    s.add_argument("--part", help="the part to arbitrate (default: the one the last review sent to an arbiter)")
+    s = sub.add_parser("arbitrate", help="record an arbiter's verdict: fix (next approach) or limit (stops blocking)")
+    s.add_argument("--part", help="the part (default: the one waiting for an arbiter)")
+    s.add_argument("--verdict", required=True, choices=["fix", "limit"])
+    s.add_argument("--text", required=True, help="the arbiter's answer: the technique, or why it is out of reach")
+    s.add_argument("--check", help="for a fix: the arbiter's measurable CHECK line")
+    s = sub.add_parser("check", help="record what the arbiter's check measured on the new result")
+    s.add_argument("--result", required=True, help="what the check measured")
+    s.add_argument("--pass", dest="passed", required=True, choices=["yes", "no"])
     s = sub.add_parser("brief", help="record what a good result is, what is missing, and the verdict on candidates")
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
@@ -811,7 +916,8 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
             "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief,
-            "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic}
+            "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
+            "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check}
 
 
 def main(argv: list[str] | None = None) -> int:

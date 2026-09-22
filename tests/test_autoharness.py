@@ -1560,14 +1560,253 @@ def test_a_disputed_point_goes_to_a_fresh_critic_not_the_author(project, capsys,
     assert "trust the close-up" in p
 
 
-def test_same_top_problem_three_critic_rounds_asks_for_a_new_approach(project, capsys, tmp_path):
+def approach(capsys, root, was, now, part=None):
+    args = ["--project", root, "approach", "--was", was, "--now", now] + (["--part", part] if part else [])
+    return cli_json(capsys, *args)
+
+
+def test_a_loop_makes_the_agent_change_approach_before_the_next_critic(project, capsys, tmp_path):
     root = ready_visual(capsys, project, tmp_path)
-    critic_round(capsys, root, "1 Joi face flat cartoon profile; 2 hand", "major")
+    code, res = critic_round(capsys, root, "1 Joi face flat cartoon profile; 2 hand", "major")
+    assert code == 0 and res["review"]["repeats"] == 1
     critic_round(capsys, root, "1 face flat and cartoon, profile weak; 2 hair", "major")
     code, res = critic_round(capsys, root, "1 the face is still flat, cartoon profile; 2 K", "major")
-    assert res["review"]["repeats"] == 3 and "Change the approach" in res["next"]
-    code, res = critic_round(capsys, root, "1 K head too round; 2 face", "major")
-    assert res["review"]["repeats"] == 1
+    assert code == 0 and res["status"] == "change_approach"
+    assert res["review"]["repeats"] == 3 and "face" in res["review"]["needs_approach"]
+    assert "autoharness approach" in res["next"] and "search skill" in res["next"]
+    # no critic until a different approach is on record
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert code == 1 and "different approach" in res["error"]
+    code, res = approach(capsys, root, "line-art profile edits", "rebuild from a gridded close-up of the still")
+    assert code == 0 and "face" in res["approach"]["part"]
+    ev(capsys, root, png(tmp_path / "r3.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert code == 0 and "rebuild from a gridded close-up" in res["prompt"] and "Judge these parts first" in res["prompt"]
+
+
+def test_a_settled_dispute_reaches_every_later_critic(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 hair too dark (major)", "major")
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "self", "--diff", "x", "--worst", "minor",
+                         "--settled", "hair value")
+    assert code == 1 and "only a critic" in res["error"]
+    ev(capsys, root, png(tmp_path / "r3.png"), "result")
+    cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", "1 hand stiff (major)", "--worst",
+             "major", "--settled", "hair value matches the reference (measured 16 points): not too dark")
+    for n in range(2):
+        ev(capsys, root, png(tmp_path / f"s{n}.png"), "result")
+        code, res = cli_json(capsys, "--project", root, "critic")
+        assert "hair value matches the reference" in res["prompt"] and "Do not raise" in res["prompt"]
+        critic_round(capsys, root, "1 hand stiff (major)", "major")
+
+
+def test_critic_and_arbiter_prompts_are_kept_as_files(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert Path(res["prompt_file"]).read_text("utf-8") == res["prompt"] and "prompt_file" in res["next"]
+    exhaust_approaches(capsys, root, tmp_path)
+    code, res = cli_json(capsys, "--project", root, "arbiter")
+    assert Path(res["prompt_file"]).read_text("utf-8") == res["prompt"] and "arbiter-" in res["prompt_file"]
+
+
+def test_each_critic_accounts_for_the_previous_review(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert "Previous review" not in res["prompt"]  # nothing to account for yet
+    critic_round(capsys, root, "1 hair too pastel (major); 2 forearm vertical (major)", "major")
+    ev(capsys, root, png(tmp_path / "r3.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    p = res["prompt"]
+    assert "hair too pastel" in p and "Previous review" in p and "fixed, still wrong, or wrong" in p
+    assert "opposite way" in p
+    assert p.index("Previous review") > p.index("Tag each one")  # own list first
+    code, res = cli_json(capsys, "--project", root, "critic", "--dispute", "forearm vertical")
+    assert res["prompt"].count("hair too pastel") == 1  # the dispute already shows the previous list
+
+
+def test_an_approach_the_author_changes_unasked_also_reaches_the_critic(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 crouched body unreadable (major)", "major")
+    code, res = approach(capsys, root, "blurred blobs", "trace contours from a gridded close-up",
+                         part="crouched body")
+    assert code == 0
+    ev(capsys, root, png(tmp_path / "r3.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert "crouched body" in res["prompt"] and "trace contours from a gridded close-up" in res["prompt"]
+    assert "Judge these parts first" in res["prompt"]
+
+
+def test_the_same_approach_reworded_is_refused(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    for _ in range(3):
+        critic_round(capsys, root, "1 face flat mask; 2 hand", "major")
+    approach(capsys, root, "line edits", "rebuild the face from a gridded close-up")
+    code, res = approach(capsys, root, "grid", "rebuild the face from gridded close-up", part="face flat mask")
+    assert code == 1 and "already tried" in res["error"]
+
+
+def exhaust_approaches(capsys, root, tmp_path, part="face flat mask"):
+    for _ in range(3):
+        code, res = critic_round(capsys, root, f"1 {part}; 2 hand", "major")
+    for n, method in enumerate(["rebuild from a gridded close-up", "simplify to three light planes",
+                                "painterly soft shading layers"]):
+        assert res["status"] == "change_approach"
+        approach(capsys, root, "previous method", method, part=part)
+        ev(capsys, root, png(tmp_path / f"a{n}.png"), "result")
+        code, res = critic_round(capsys, root, f"1 {part}; 2 hand", "major")
+    return code, res
+
+
+def arbitrate(capsys, root, verdict, answer, check="knee dome at least 15 L* darker than the body"):
+    extra = ["--check", check] if verdict == "fix" else []
+    return cli_json(capsys, "--project", root, "arbitrate", "--verdict", verdict, "--text", answer, *extra)
+
+
+def run_check(capsys, root, passed="yes"):
+    return cli_json(capsys, "--project", root, "check", "--result", "measured 18 L* darker", "--pass", passed)
+
+
+def test_after_the_approaches_an_arbiter_decides_not_the_author(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    code, res = exhaust_approaches(capsys, root, tmp_path)
+    assert code == 0 and res["status"] == "arbitrate" and res["review"]["tried"] == 3
+    assert "autoharness arbiter" in res["next"]
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert code == 1 and "arbiter" in res["error"]  # no critic until the arbiter has ruled
+    code, res = cli_json(capsys, "--project", root, "arbiter")
+    p = res["prompt"]
+    assert code == 0 and "face flat mask" in p and "painterly soft shading layers" in p
+    assert "VERDICT: fix | limit" in p and "round " in p and "every aspect the critics named" in p
+    assert "make sure it passes your own check" in p and "reference's value" in p
+    # the whole reviewed round (result and close-up), not only its last file
+    last = [e for e in json.loads((project.task().dir / "task.json").read_text("utf-8"))["evidence"]
+            if e["kind"] == "result"][-1]
+    ev(capsys, root, png(tmp_path / "closeup.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "arbiter")
+    assert "closeup.png" in res["prompt"]  # a fresh round not yet reviewed is shown as it is
+    assert last["file"] not in res["prompt"]
+
+
+def test_an_arbiter_fix_needs_a_measurable_check_before_the_critic(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    exhaust_approaches(capsys, root, tmp_path)
+    code, res = cli_json(capsys, "--project", root, "arbitrate", "--verdict", "fix", "--text", "light a height map")
+    assert code == 1 and "--check" in res["error"]
+    code, res = arbitrate(capsys, root, "fix", "light a height map")
+    assert code == 0 and "autoharness check" in res["next"]
+    ev(capsys, root, png(tmp_path / "f0.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert code == 1 and "check" in res["error"]  # the fix must be measured before a critic sees it
+    code, res = run_check(capsys, root, "no")
+    assert code == 0 and "has not taken effect" in res["next"]
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert code == 0 and "knee dome at least 15 L* darker" in res["prompt"] and "(failed)" in res["prompt"]
+
+
+def test_failed_arbiter_fixes_end_in_a_final_arbiter_then_a_limit_not_the_user(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    code, res = exhaust_approaches(capsys, root, tmp_path)
+    for n in range(3):
+        assert res["status"] == "arbitrate"
+        assert res["review"]["final_arbiter"] == (n == 2)
+        if n == 2:
+            code, prompt = cli_json(capsys, "--project", root, "arbiter")
+            assert prompt["final"] and "final arbitration" in prompt["prompt"] and "technique 1" in prompt["prompt"]
+        code, res = arbitrate(capsys, root, "fix", f"technique {n}: model the face as three planes of light")
+        assert code == 0 and "next approach" in res["next"]
+        ev(capsys, root, png(tmp_path / f"f{n}.png"), "result")
+        run_check(capsys, root)
+        code, res = cli_json(capsys, "--project", root, "critic")
+        assert code == 0 and f"technique {n}" in res["prompt"]
+        code, res = critic_round(capsys, root, "1 face flat mask; 2 hand", "major")
+    assert code == 0 and res["status"] == "limited" and "face flat mask" in res["review"]["auto_limited"]
+    # the ruled-out part no longer blocks, the other problem still does
+    assert res["review"]["worst"] == "major"
+    ev(capsys, root, png(tmp_path / "last.png"), "result")
+    code, res = critic_round(capsys, root, "1 face flat mask (major)", "major")
+    assert res["review"]["worst"] == "minor"
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0
+
+
+def test_a_part_ruled_out_of_reach_stops_blocking(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    exhaust_approaches(capsys, root, tmp_path, part="crouched body unreadable")
+    code, res = arbitrate(capsys, root, "limit", "a readable crouch needs anatomy beyond this fidelity")
+    assert code == 0 and "no longer blocks" in res["next"]
+    ev(capsys, root, png(tmp_path / "r9.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert "ruled these parts out of reach" in res["prompt"] and "crouched body unreadable" in res["prompt"]
+    code, res = critic_round(capsys, root, "1 crouched body still unreadable, knee a ball (major)", "major")
+    assert res["review"]["worst"] == "minor" and res["review"]["worst_given"] == "major"
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0  # nothing else blocks
+
+
+def test_a_ruled_out_part_does_not_hide_other_blocking_problems(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    exhaust_approaches(capsys, root, tmp_path, part="crouched body unreadable")
+    arbitrate(capsys, root, "limit", "out of reach at this fidelity")
+    ev(capsys, root, png(tmp_path / "r9.png"), "result")
+    code, res = critic_round(capsys, root, "1 crouched body unreadable (major); 2 hair helmet (major)", "major")
+    assert res["review"]["worst"] == "major"
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1
+
+
+def test_a_problem_that_moves_down_the_list_still_counts_as_a_loop(project, capsys, tmp_path):
+    # a real run: the critic put K first once, and the face, still major, second
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 Joi face flat mask, hard left edge (major); 2 hand mitten (major)", "major")
+    critic_round(capsys, root, "1 K head not tilted up (major); 2 Joi face flat polygon mask, sharp jaw (major)",
+                 "major")
+    code, res = critic_round(capsys, root, "1 Joi face flat mask, wedge chin (major); 2 body shapeless (major)",
+                             "major")
+    assert res["status"] == "change_approach" and res["review"]["repeats"] == 3
+    assert "face" in res["review"]["recurring"]
+
+
+def test_a_problem_described_in_new_details_each_round_is_still_the_same_problem(project, capsys, tmp_path):
+    # a real run: the headline stayed while every critic wrote different details after it
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 Joi crouched body still unreadable: flat magenta, no value turning forms, knee "
+                               "too low, wants lit knee and shoulder, rim lines, elbow at bottom right (major)", "major")
+    critic_round(capsys, root, "1 Joi crouched body still unreadable: flat panels, stray pale line, no lit "
+                               "shoulder or knee, forearm too shallow (major)", "major")
+    code, res = critic_round(capsys, root, "1 Joi crouched body unreadable: pale V-wedge reads as V-neck, knee a "
+                                           "dark ball, no back contour, near arm missing (major)", "major")
+    assert res["review"]["repeats"] == 3 and res["status"] == "change_approach"
+
+
+def test_a_loop_the_user_was_asked_about_before_is_counted_again(project, capsys, tmp_path):
+    # tasks recorded when a loop still asked the user keep that reset point
+    root = ready_visual(capsys, project, tmp_path)
+    for _ in range(2):
+        critic_round(capsys, root, "1 face flat mask; 2 hand", "major")
+    path = project.task().dir / "task.json"
+    info = json.loads(path.read_text("utf-8"))
+    info["reviews"][-1]["loop_asked"] = True
+    path.write_text(json.dumps(info), "utf-8")
+    code, res = critic_round(capsys, root, "1 face flat mask; 2 hand", "major")
+    assert code == 0 and res["review"]["repeats"] == 1 and res["status"] == "ok"
+
+
+def test_minor_items_and_minor_verdicts_are_not_loops(project, capsys, tmp_path):
+    root = ready_visual(capsys, project, tmp_path)
+    critic_round(capsys, root, "1 K legs posts (major); 2 props simple (minor)", "major")
+    critic_round(capsys, root, "1 hair helmet (major); 2 props simple (minor)", "major")
+    code, res = critic_round(capsys, root, "1 face mask (major); 2 props simple (minor)", "major")
+    assert code == 0 and res["review"]["repeats"] == 1  # only the minor item repeats
+    for _ in range(3):
+        code, res = critic_round(capsys, root, "1 props simple", "minor")
+    assert code == 0  # nothing blocking left: no loop, the task may stop
+
+
+def test_issues_split_a_critic_list():
+    from autoharness import evidence
+    assert evidence.issues("1 face flat (major); 2 props (minor)\n3. hand stiff") == ["face flat (major)",
+                                                                                       "hand stiff"]
+    assert evidence.issues("1. K turned 24 degrees 2. hair") == ["K turned 24 degrees", "hair"]
 
 
 def test_disagreeing_is_not_dropping(project, capsys, tmp_path):

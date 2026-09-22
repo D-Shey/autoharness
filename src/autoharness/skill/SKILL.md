@@ -194,9 +194,25 @@ resume from where you were.
      new session), and record its answer as it is.
    - **Disagreeing is not dropping.** If you think a critic point is wrong, do not skip
      it: add a close-up of that part and run `autoharness critic --dispute "<the point>"`;
-     a fresh critic decides.
-   - **Loops.** If the same top problem comes back three critic rounds in a row, the way
-     you are fixing it does not work: change the approach for that part, or ask the user.
+     a fresh critic decides. When it settles the point, record that with the review
+     (`--settled "<point and ruling>"`): every later critic sees it and does not raise it again.
+   - **Loops.** If a critic lists the same blocking problem three rounds in a row (anywhere
+     in its list, not only first), `review` answers `change_approach`: the way you are
+     fixing that part does not work. `critic` refuses until you record a different method
+     with `autoharness approach --part "<part>" --was "<old>" --now "<new>"`: rebuild the part
+     from the reference point by point, simplify it, or change technique, and treat missing
+     know-how for it as a capability gap (step 6). The next critic judges that part first.
+     When several different approaches failed, `review` answers `arbitrate`: do not decide
+     yourself whether the part can be fixed. Run `autoharness arbiter`, give its prompt to a
+     fresh subagent, and record the verdict with `autoharness arbitrate --verdict fix|limit
+     --text "<its answer>" --check "<its CHECK line>"`. A limit stops the part blocking
+     (critics count it as minor). A fix becomes your next approach and comes with a measurable
+     check: run it on the new result and record it with `autoharness check --result
+     "<measured>" --pass yes|no` before the critic runs, so a fix that did not take effect is
+     caught by you, not by the next critic. When arbiters' fixes keep failing, a final arbiter
+     decides; if its fix fails too, `review` answers `limited`: the part is ruled out of reach
+     and no longer blocks. Tell the user about such parts when you finish. Never cut
+     `review`'s output short (`| head`, `> /dev/null`): its `next` is the instruction.
    - **The user decides when good is good enough.** Visual capabilities require image
      references, at least two results and a final critic; teardown refuses until then.
      If the user accepts the result as it is, run
