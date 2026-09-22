@@ -206,7 +206,8 @@ remote-серверы становятся `httpUrl`/`url`, для Codex сек�
 | `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов |
 | `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
 | `inspect mcp\|skill <name>` | подробный trust-отчёт; для MCP ещё `egress` — куда сервер может ходить |
-| `vet mcp\|skill <name> [--verdict fits\|breaks --text ...]` | промпт для независимой проверки кандидата против `--constraints` из brief; запись вердикта |
+| `vet mcp\|skill <name> [--answer-file F]` | промпт для независимой проверки кандидата против `--constraints` из brief; запись ответа проверяющего |
+| `review --by critic --answer-file F` / `arbitrate --answer-file F` | записать ответ критика или арбитра как он есть: autoharness сам читает список, `VERDICT` и `CHECK` |
 | `add mcp <name>` / `add skill owner/repo@skill` | ставит в MCP-конфиг и папку skills агента и пишет в lockfile |
 | `remove mcp\|skill <name>` | снимает то, что поставила эта задача или сохранила в проекте прошлая |
 | `prune` | снимает всё, что прошлые задачи сохранили в проекте |
@@ -259,13 +260,26 @@ autoharness inspect mcp github      # поле egress: host, enforced, ok, reaso
 Если в brief записаны `--constraints` пользователя, `add` не ставит skill или сервер без вердикта
 независимой проверки (статус `vet_required`). `autoharness vet skill <spec>` ставит skill во
 временную папку и собирает промпт из ограничений дословно и содержимого файлов (для MCP — конфиг,
-права и `egress`). Промпт отдаётся свежему subagent'у, его ответ записывается через
-`--verdict fits|breaks --text "..."`. На `breaks` `add` отвечает кодом `3`: ставить только если
+права и `egress`). Промпт отдаётся свежему subagent'у, его ответ сохраняется в файл без правок и
+записывается через `--answer-file <файл>`. На `breaks` `add` отвечает кодом `3`: ставить только если
 пользователь согласен. Если файлы skill при установке отличаются от проверенных, `add` предупреждает.
 Свои skills из библиотеки (`local:`) проверку не требуют.
 
 `.autoharness/.gitignore` пропускает `config.json` и `kept.json`, так что их можно
 закоммитить вместе с папкой skills; остальное состояние задач в git не попадает.
+
+## Ответы проверяющих записываются как есть
+
+Промпты `critic`, `arbiter` и `vet` получают одноразовый `ANSWER-ID`. Агент сохраняет ответ
+субагента в файл без правок и передаёт его через `--answer-file`: autoharness проверяет, что id выдан
+этой задачей для такого промпта и ещё не использован, и сам берёт из ответа список, `VERDICT`,
+`CHECK` и `REASON`. Указать `--worst` мягче, чем `VERDICT` критика, нельзя. Копия ответа остаётся в
+`.autoharness/tasks/<id>/answers/`. Старая запись (`--diff`/`--worst`, `--verdict`/`--text`) работает,
+но помечается предупреждением: это пересказ автора.
+
+`teardown` предупреждает, если рабочее дерево изменилось после последнего review записанного
+`evidence diff`: эти изменения никто не проверял. `init` предупреждает, если установленный
+`SKILL.md` autoharness отличается от версии в пакете (`autoharness install-skill [--user]`).
 
 ## Свои skills
 

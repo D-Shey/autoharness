@@ -93,6 +93,23 @@ def git_diff(root: Path, base: str = "HEAD") -> tuple[bytes, list[str], list[str
     return patch, untracked, nested
 
 
+def tree_state(root: Path, base_sha: str) -> str:
+    """A fingerprint of what the working tree holds for every path changed since `base_sha`. It stays
+    the same when those changes are committed, and moves when any of them is edited again."""
+    own = ":(exclude).autoharness"
+    # --relative: paths from the project root, like ls-files below, also when it is a subdirectory of the repo
+    paths = set(p for p in _git(root, "diff", "--relative", "--name-only", "-z", base_sha, "--", ".", own)
+                .decode("utf-8", "replace").split("\0") if p)
+    paths |= set(p for p in _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", own)
+                 .decode("utf-8", "replace").split("\0") if p and not p.endswith("/"))
+    h = hashlib.sha256()
+    for rel in sorted(paths):
+        f = root / rel
+        digest = hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() else "-"
+        h.update(f"{rel}\0{digest}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
 def add_diff(task: Task, root: Path, base: str = "HEAD", note: str = "") -> dict:
     """Record the working tree's changes as this round's result, new files included."""
     patch, untracked, nested = git_diff(root, base)
@@ -103,9 +120,30 @@ def add_diff(task: Task, root: Path, base: str = "HEAD", note: str = "") -> dict
     src = dest_dir / f"diff-{time.strftime('%H%M%S')}.patch"
     src.write_bytes(patch)
     note = note or f"git diff {base} + {len(untracked)} untracked file(s)"
-    item = add(task, src, "result", note, {"untracked": untracked} | ({"skipped_nested": nested} if nested else {}))
+    base_sha = _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").decode().strip()
+    item = add(task, src, "result", note, {"untracked": untracked, "base": base, "base_sha": base_sha,
+                                          "tree_state": tree_state(root, base_sha)}
+               | ({"skipped_nested": nested} if nested else {}))
     src.unlink()
     return item
+
+
+def changed_since_review(task: Task, root: Path) -> str | None:
+    """A warning when the working tree no longer matches the diff the last review judged."""
+    reviews = task.info().get("reviews", [])
+    if not reviews:
+        return None
+    judged = next((e for e in task.info().get("evidence", []) if e["n"] == reviews[-1]["result"]), None)
+    if not judged or "tree_state" not in judged:  # only a recorded diff can be compared with the tree
+        return None
+    try:
+        now = tree_state(root, judged["base_sha"])
+    except (HarnessError, OSError):
+        return None  # the base commit is gone (for example rebased away): nothing reliable to compare
+    if now == judged["tree_state"]:
+        return None
+    return (f"the working tree changed after review {reviews[-1]['round']} of diff #{judged['n']}: those changes "
+            "were not reviewed; record `autoharness evidence diff` and review it, or tell the user")
 
 
 def latest(task: Task, kind: str) -> dict | None:
@@ -240,7 +278,8 @@ def pending_arbiter(task: Task) -> str | None:
     return last["needs_arbiter"]
 
 
-def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None = None) -> dict:
+def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None = None,
+           extra: dict | None = None) -> dict:
     if worst not in SEVERITIES:
         raise HarnessError(f"severity must be one of {', '.join(SEVERITIES)}")
     result = latest(task, "result")
@@ -249,6 +288,7 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
     reviews = task.info().get("reviews", [])
     item = {"round": len(reviews) + 1, "by": by, "result": result["n"], "diff": diff, "worst": worst,
             "fixable": worst in BLOCKING, "top": top_issue(diff), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    item |= extra or {}
     if settled:
         if by != "critic":
             raise HarnessError("only a critic settles a disputed point: record --settled with --by critic")
@@ -354,7 +394,7 @@ VERDICT: fix | limit"""
     return {"prompt": prompt, "part": part, "final": final}
 
 
-def arbitrate(task: Task, part: str, verdict: str, answer: str, check: str = "") -> dict:
+def arbitrate(task: Task, part: str, verdict: str, answer: str, check: str = "", extra: dict | None = None) -> dict:
     """Record an arbiter's verdict: a fix becomes the next approach; a limit stops the part blocking."""
     if verdict not in ("fix", "limit"):
         raise HarnessError("verdict must be fix or limit")
@@ -366,7 +406,7 @@ def arbitrate(task: Task, part: str, verdict: str, answer: str, check: str = "")
     rounds = len(info.get("reviews", []))
     items = info.get("arbitrations", [])
     item = {"n": len(items) + 1, "after_round": rounds, "part": part, "verdict": verdict, "text": answer,
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S")} | (extra or {})
     if verdict == "fix":
         item["check"] = check
     update = {"arbitrations": items + [item]}
@@ -565,7 +605,7 @@ Result to judge (the whole result, then any close-ups of it):
 {lines(results)}
 {disputed}{focused}{limited}
 List the most important differences between the result and the reference / quality bar,
-most important first, at most 8. Look in particular at: {focus}.
+most important first, at most 8, numbered 1., 2., ... with each point's tags on the same line. Look in particular at: {focus}.
 Tag each one:
 - severity: blocker (the result fails its purpose), major (clearly wrong, noticeable at a glance),
   or minor (polish, or detail beyond the target fidelity);

@@ -59,6 +59,9 @@ Missing input and know-how are capabilities too: a way to see references, a way 
 compare your output with them. They often need no install at all: a web search
 tool, a browser or a headless render you already have. Say how you will cover them.
 
+If `init` warns that an installed copy of this skill is out of date, tell the user to run
+the `autoharness install-skill` command it names: you may be following old instructions.
+
 If a recipe scores above ~0.3 and fits, `autoharness recipe show <name>` and
 reuse its entries rather than searching again. `init` has already re-run the recipe's
 saved queries (entries in `discovered` marked `recipe`), and `recipe show` lists under
@@ -135,8 +138,8 @@ autoharness add skill <owner/repo@skill>
 - You do not judge the fit yourself. While the brief has constraints, `add` answers
   `vet_required` until a fresh reviewer has checked the candidate: run
   `autoharness vet mcp|skill <name>`, give its prompt unchanged to a fresh subagent,
-  and record its answer with `autoharness vet mcp|skill <name> --verdict fits|breaks
-  --text "<its REASON>"`. On `breaks`, pick another candidate; `add` asks for the
+  save its answer unedited to a file and record it with `autoharness vet mcp|skill <name>
+  --answer-file <file>`. On `breaks`, pick another candidate; `add` asks for the
   user's yes (exit `3`) before installing it anyway.
 - If the project sets `allowed_hosts`, `inspect` shows under `egress` where a server
   can reach. A remote server off the list, or any local process (its network cannot
@@ -189,7 +192,7 @@ resume from where you were.
    autoharness evidence diff                          # code: the whole working-tree diff, new files included
    autoharness review --by self --diff "1 <most important>; 2 ..." --worst blocker|major|minor|none
    autoharness critic                                 # prompt for an independent reviewer
-   autoharness review --by critic --diff "<its list>" --worst <its VERDICT>
+   autoharness review --by critic --answer-file <file>  # the critic's answer, saved unedited
    ```
 
    Rounds: produce, add the result, compare it side by side with the reference, fix the
@@ -204,7 +207,14 @@ resume from where you were.
      round; the critic sees every result added since its last review.
    - **You are not the judge of your own work.** Give the `critic` prompt unchanged to
      a fresh subagent that did not make it (Claude Code: the Agent tool; elsewhere a
-     new session), and record its answer as it is.
+     new session). Save its answer unedited to a file and pass it with `--answer-file`:
+     autoharness checks the prompt's ANSWER-ID and reads the list and the VERDICT itself,
+     so neither can be softened in the retelling. An id is valid for the latest prompt
+     about the latest result only. `--diff`/`--worst` for a critic still work but are
+     recorded as your retelling, with a warning.
+   - **Changes after the review.** For code, record the round with `autoharness evidence
+     diff`. If you edit the reviewed files afterwards, `teardown` warns that those changes
+     were never reviewed: record `evidence diff` again and review it, or tell the user.
    - **Disagreeing is not dropping.** If you think a critic point is wrong, do not skip
      it: add a close-up of that part and run `autoharness critic --dispute "<the point>"`;
      a fresh critic decides. When it settles the point, record that with the review
@@ -217,8 +227,8 @@ resume from where you were.
      know-how for it as a capability gap (step 6). The next critic judges that part first.
      When several different approaches failed, `review` answers `arbitrate`: do not decide
      yourself whether the part can be fixed. Run `autoharness arbiter`, give its prompt to a
-     fresh subagent, and record the verdict with `autoharness arbitrate --verdict fix|limit
-     --text "<its answer>" --check "<its CHECK line>"`. A limit stops the part blocking
+     fresh subagent, save its answer unedited and record it with `autoharness arbitrate
+     --answer-file <file>` (autoharness reads its VERDICT and CHECK line). A limit stops the part blocking
      (critics count it as minor). A fix becomes your next approach and comes with a measurable
      check: run it on the new result and record it with `autoharness check --result
      "<measured>" --pass yes|no` before the critic runs, so a fix that did not take effect is

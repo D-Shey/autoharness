@@ -10,8 +10,10 @@ from autoharness.trust import scan_skill, score_registry_entry, score_skill
 
 
 @pytest.fixture(autouse=True)
-def pin_agent(monkeypatch):
-    """Keep auto-detection from depending on which agent runs the tests."""
+def pin_agent(monkeypatch, tmp_path_factory):
+    """Keep auto-detection from depending on which agent runs the tests, and the user's home out of them."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setenv("AUTOHARNESS_AGENT", "claude")
     monkeypatch.setenv("AUTOHARNESS_OFFLINE", "1")  # init must not hit skills.sh / the MCP registry in tests
 
@@ -1544,7 +1546,7 @@ def test_critic_prompt_grades_severity_at_the_target_fidelity(project, capsys, t
     assert "stylised poster, not photographic" in p and "blocker" in p and "minor" in p
     assert "VERDICT: blocker | major | minor | none" in p
     assert len(res["results"]) == 2 and all(f in p for f in res["results"])
-    assert "--worst" in res["next"]
+    assert "--answer-file" in res["next"] and f"ANSWER-ID: {res['answer_id']}" in p
 
 
 def test_a_disputed_point_goes_to_a_fresh_critic_not_the_author(project, capsys, tmp_path):
@@ -1992,7 +1994,7 @@ def test_add_needs_a_vet_verdict_while_the_brief_has_constraints(project, capsys
     cli_json(capsys, "--project", root, "vet", "skill", "acme/skills@demo", "--verdict", "fits", "--text", "ok")
     monkeypatch.setattr(cli, "resolve_skill", lambda c, s: {"requires_approval": False, "score": 50, "level": "medium"})
     code, res = cli_json(capsys, "--project", root, "add", "skill", "acme/skills@demo")
-    assert code == 0 and res["status"] == "ok" and "warnings" not in res
+    assert code == 0 and res["status"] == "ok" and not any("differ" in w for w in res.get("warnings", []))
     assert "vetted skill `acme/skills@demo`: fits" in (project.task().dir / "harness.md").read_text("utf-8")
 
 
@@ -2005,7 +2007,7 @@ def test_add_warns_when_the_installed_skill_differs_from_the_vetted_one(project,
     monkeypatch.setattr(cli, "npx_stage_skill", fake_stager({"SKILL.md": SAFE_SKILL["SKILL.md"] + "changed\n"}))
     monkeypatch.setattr(cli, "resolve_skill", lambda c, s: {"requires_approval": False, "score": 50, "level": "medium"})
     code, res = cli_json(capsys, "--project", root, "add", "skill", "acme/skills@demo")
-    assert code == 0 and "differ from the ones vetted" in res["warnings"][0]
+    assert code == 0 and any("differ from the ones vetted" in w for w in res["warnings"])
 
 
 def test_vet_prompt_for_an_mcp_server_shows_its_config_and_reach(project, capsys):
@@ -2204,3 +2206,261 @@ def test_evidence_diff_is_an_appliable_patch_and_skips_nested_repos(project, cap
     assert code != 0 and "must be a revision" in capsys.readouterr().out
     code = cli.main(["--project", root, "evidence", "diff", "--base", "no-such-rev"])
     assert code != 0
+
+
+# --- reviewer answers are read by autoharness, not retold -------------------------
+
+def reviewed_task(capsys, project, tmp_path):
+    root = str(project.root)
+    briefed(capsys, project, "none")
+    (tmp_path / "report.md").write_text("# Q3\n", "utf-8")
+    cli_json(capsys, "--project", root, "evidence", "add", str(tmp_path / "report.md"), "--kind", "result")
+    return root
+
+
+def answer(tmp_path, name, nonce, body):
+    path = tmp_path / name
+    path.write_text(f"ANSWER-ID: {nonce}\n{body}", "utf-8")
+    return str(path)
+
+
+def test_critic_answer_file_sets_the_list_and_the_verdict(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    code, res = cli_json(capsys, "--project", root, "critic")
+    nonce = res["answer_id"]
+    f = answer(tmp_path, "a.txt", nonce, "1. totals row is missing (major, fixable)\n2. typo in title (minor)\n\n"
+                                        "## Previous review\n- none\n\nVERDICT: major\n")
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "critic", "--answer-file", f, "--worst", "minor")
+    assert code != 0 and "milder" in res["error"]
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "critic", "--answer-file", f)
+    assert code == 0 and res["review"]["worst"] == "major" and res["review"]["answer_id"] == nonce
+    assert "totals row" in res["review"]["diff"] and "Previous review" not in res["review"]["diff"]
+    assert Path(res["review"]["answer_file"]).read_text("utf-8").startswith(f"ANSWER-ID: {nonce}")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", f])
+    assert code != 0 and "already recorded" in capsys.readouterr().out
+
+
+def test_answer_files_are_checked(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    no_id = tmp_path / "x.txt"
+    no_id.write_text("looks fine\nVERDICT: none\n", "utf-8")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", str(no_id)])
+    assert code != 0 and "no ANSWER-ID" in capsys.readouterr().out
+    forged = answer(tmp_path, "f.txt", "ah-0123456789ab", "fine\nVERDICT: none\n")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", forged])
+    assert code != 0 and "not issued" in capsys.readouterr().out
+    _, res = cli_json(capsys, "--project", root, "critic")
+    unfinished = answer(tmp_path, "u.txt", res["answer_id"], "1. something\n")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", unfinished])
+    assert code != 0 and "no VERDICT" in capsys.readouterr().out
+    done = answer(tmp_path, "d.txt", res["answer_id"], "1. something (minor)\nVERDICT: minor\n")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", done])
+    assert code == 0  # a failed attempt does not burn the id
+
+
+def test_retold_critic_answer_is_recorded_with_a_warning(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", "1 x", "--worst", "minor")
+    assert code == 0 and "--answer-file" in res["review"]["warnings"][0]
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "self", "--diff", "1 x", "--worst", "minor")
+    assert code == 0 and "warnings" not in res["review"]
+
+
+def test_vet_answer_file(project, capsys, tmp_path):
+    root = str(project.root)
+    briefed(capsys, project, "must run offline")
+    _, res = cli_json(capsys, "--project", root, "vet", "mcp", "github")
+    wrong = answer(tmp_path, "w.txt", res["answer_id"], "VERDICT: fits\nREASON: ok\n")
+    code = cli.main(["--project", root, "vet", "mcp", "fetch", "--answer-file", wrong])   # id is for github
+    assert code != 0 and "about mcp:github, not mcp:fetch" in capsys.readouterr().out
+    f = answer(tmp_path, "v.txt", res["answer_id"],
+               "PER CONSTRAINT: must run offline - breaks - url api.githubcopilot.com\nVERDICT: breaks\n"
+               "REASON: it is a hosted API\n")
+    code, res = cli_json(capsys, "--project", root, "vet", "mcp", "github", "--answer-file", f)
+    assert code == 0 and res["verdict"] == "breaks" and res["text"] == "it is a hosted API"
+
+
+def test_arbiter_answer_file_reads_the_check_line(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    _, res = cli_json(capsys, "--project", root, "arbiter", "--part", "totals row")
+    f = answer(tmp_path, "arb.txt", res["answer_id"], "Rebuild the totals row from the ledger.\n"
+                                                     "CHECK: totals equal the ledger sum (ledger: 1200)\nVERDICT: fix\n")
+    code, res = cli_json(capsys, "--project", root, "arbitrate", "--part", "totals row", "--answer-file", f)
+    assert code == 0 and res["arbitration"]["verdict"] == "fix"
+    assert res["arbitration"]["check"] == "totals equal the ledger sum (ledger: 1200)"
+
+
+def test_teardown_warns_about_changes_after_the_last_review(project, capsys):
+    git_repo(project.root)
+    root = str(project.root)
+    briefed(capsys, project, "none")
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    cli_json(capsys, "--project", root, "evidence", "diff")
+    cli_json(capsys, "--project", root, "review", "--by", "self", "--diff", "none", "--worst", "none")
+    (project.root / "a.py").write_text("x = 3\n", "utf-8")
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert any("changed after review" in w for w in res.get("warnings", []))
+
+
+def test_teardown_is_quiet_when_the_reviewed_diff_is_current(project, capsys):
+    git_repo(project.root)
+    root = str(project.root)
+    briefed(capsys, project, "none")
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    cli_json(capsys, "--project", root, "evidence", "diff")
+    cli_json(capsys, "--project", root, "review", "--by", "self", "--diff", "none", "--worst", "none")
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert not any("changed after review" in w for w in res.get("warnings", []))
+
+
+def test_init_warns_when_the_installed_skill_is_stale(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "install-skill")
+
+    def init():
+        code, res = cli_json(capsys, "--project", root, "init", "t")
+        assert code == 0, res
+        cli_json(capsys, "--project", root, "teardown", "--force")
+        return res
+    assert "warnings" not in init()
+    skill = project.root / ".claude" / "skills" / "autoharness" / "SKILL.md"
+    skill.write_bytes(skill.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))  # line endings only
+    assert "warnings" not in init()
+    skill.write_text("old version\n", "utf-8")
+    res = init()
+    assert "install-skill`" in res["warnings"][0] and "install-skill" in res["next"]
+
+
+def test_a_markdown_critic_answer_becomes_one_point_per_item(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    _, res = cli_json(capsys, "--project", root, "critic")
+    f = answer(tmp_path, "md.txt", res["answer_id"],
+               "Differences, most important first:\n\n1. **Totals row missing** (major, fixable)\n"
+               "   - the sum under the table is absent; the ledger has one\n2. **Typo in title**\n"
+               "   - severity: minor\n\nPrevious review\n- point 1: still wrong\n\nVERDICT: major\n")
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "critic", "--answer-file", f)
+    r = res["review"]
+    assert code == 0 and r["top"].startswith("Totals row missing (major, fixable)")
+    assert r["diff"].splitlines()[1] == "2. Typo in title severity: minor"
+    assert "Differences" not in r["diff"] and r["previous_review"] == "- point 1: still wrong"
+    assert "point 1" not in r["diff"]
+
+
+def test_an_answer_id_counts_only_for_the_latest_prompt_about_the_latest_result(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    _, first = cli_json(capsys, "--project", root, "critic")
+    _, second = cli_json(capsys, "--project", root, "critic")
+    mild = answer(tmp_path, "mild.txt", first["answer_id"], "1. nit (minor)\nVERDICT: minor\n")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", mild])
+    assert code != 0 and "replaced by a later prompt" in capsys.readouterr().out
+    (tmp_path / "v2.md").write_text("# Q3 v2\n", "utf-8")
+    cli_json(capsys, "--project", root, "evidence", "add", str(tmp_path / "v2.md"), "--kind", "result")
+    stale = answer(tmp_path, "stale.txt", second["answer_id"], "1. nit (minor)\nVERDICT: minor\n")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", stale])
+    assert code != 0 and "about result #1, not result #2" in capsys.readouterr().out
+
+
+def test_verdict_line_must_name_one_value_and_extra_flags_are_flagged(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    _, res = cli_json(capsys, "--project", root, "critic")
+    echo = answer(tmp_path, "e.txt", res["answer_id"], "1. x\nVERDICT: blocker | major | minor | none\n")
+    code = cli.main(["--project", root, "review", "--by", "critic", "--answer-file", echo])
+    assert code != 0 and "exactly one value" in capsys.readouterr().out
+    ok = answer(tmp_path, "ok.txt", res["answer_id"], "1. x (major)\n**VERDICT: major**\n")
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "critic", "--answer-file", ok, "--fixable", "yes")
+    assert code == 0 and res["review"]["worst"] == "major" and "not used" in res["review"]["warnings"][0]
+
+
+def test_no_drift_warning_after_committing_the_reviewed_changes(project, capsys):
+    run = git_repo(project.root)
+    root = str(project.root)
+    briefed(capsys, project, "none")
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    (project.root / "b.py").write_text("y = 1\n", "utf-8")
+    cli_json(capsys, "--project", root, "evidence", "diff")
+    cli_json(capsys, "--project", root, "review", "--by", "self", "--diff", "none", "--worst", "none")
+    run("add", "a.py", "b.py")
+    run("commit", "-qm", "reviewed")
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert not any("changed after review" in w for w in res.get("warnings", []))
+
+
+def test_drift_check_works_for_a_project_in_a_subdirectory_of_the_repo(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("AUTOHARNESS_HOME", str(tmp_path / "home"))
+    run = git_repo(tmp_path)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "a.py").write_text("x = 1\n", "utf-8")
+    run("add", "sub/a.py")
+    run("commit", "-qm", "sub")
+    project = Project(sub, "claude")
+    root = str(sub)
+    briefed(capsys, project, "none")
+    (sub / "a.py").write_text("x = 2\n", "utf-8")
+    cli_json(capsys, "--project", root, "evidence", "diff")
+    cli_json(capsys, "--project", root, "review", "--by", "self", "--diff", "none", "--worst", "none")
+    (sub / "a.py").write_text("x = 3\n", "utf-8")
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert any("changed after review" in w for w in res.get("warnings", []))
+
+
+def test_answer_list_shapes_and_previous_review_headings():
+    from autoharness import answers as a
+    body = ("Intro line\n### 1. Totals row (major, fixable)\n**2.** Typo (minor, fixable)\n"
+            "Notes:\n- a note that is not part of point 2\n3) Axis label (minor)\n")
+    assert a.items(body) == ["Totals row (major, fixable)", "Typo (minor, fixable)", "Axis label (minor)"]
+    text = "1. x (major)\n### Previous review (by another critic)\n1. fixed\n2. still wrong\n"
+    assert a.PREVIOUS.search(text).group(0).startswith("### Previous review")
+    assert not a.PREVIOUS.search("1. Previous review's point is wrong\n- previous review said so\n")
+
+
+def test_fixable_flag_milder_than_the_verdict_is_named(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    _, res = cli_json(capsys, "--project", root, "critic")
+    f = answer(tmp_path, "m.txt", res["answer_id"], "1. x (major)\nVERDICT: major\n")
+    code, res = cli_json(capsys, "--project", root, "review", "--by", "critic", "--answer-file", f, "--fixable", "no")
+    assert code != 0 and "--fixable no" in res["error"]
+
+
+def test_teardown_flags_a_retold_final_critic_verdict(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    cli_json(capsys, "--project", root, "review", "--by", "critic", "--diff", "none", "--worst", "none")
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert any("retelling" in w for w in res["warnings"])
+
+
+def test_stale_skill_check_covers_every_agent(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "install-skill", "--all")
+    (project.root / ".gemini" / "skills" / "autoharness" / "SKILL.md").write_text("old\n", "utf-8")
+    code, res = cli_json(capsys, "--project", root, "init", "t")
+    assert len(res["warnings"]) == 1 and "--agent gemini install-skill" in res["warnings"][0]
+    assert res["next"].startswith("First tell the user")
+
+
+def test_previous_review_heading_only_at_the_margin():
+    from autoharness import answers as a
+    body = ("1. Totals row missing (major, fixable)\n   Previous review already flagged it, still absent.\n"
+            "2. Typo (minor, fixable)\n\n## Check of the previous review\n1. fixed\n2. still wrong\n")
+    head = body[:a.PREVIOUS.search(body).start()]
+    assert a.items(head) == ["Totals row missing (major, fixable) Previous review already flagged it, still absent.",
+                             "Typo (minor, fixable)"]
+
+
+def test_answer_file_implies_a_critic_review(project, capsys, tmp_path):
+    root = reviewed_task(capsys, project, tmp_path)
+    _, res = cli_json(capsys, "--project", root, "critic")
+    f = answer(tmp_path, "c.txt", res["answer_id"], "1. x (minor)\nVERDICT: minor\n")
+    code, res = cli_json(capsys, "--project", root, "review", "--answer-file", f)
+    assert code == 0 and res["review"]["by"] == "critic"
+
+
+def test_retold_vet_and_arbiter_verdicts_are_flagged_later(project, capsys, tmp_path):
+    root = str(project.root)
+    briefed(capsys, project, "must run offline")
+    cli_json(capsys, "--project", root, "vet", "mcp", "fetch")
+    cli_json(capsys, "--project", root, "vet", "mcp", "fetch", "--verdict", "fits", "--text", "local")
+    code, res = cli_json(capsys, "--project", root, "add", "mcp", "fetch")
+    assert code == 0 and any("retelling" in w for w in res["warnings"])
+    code, res = cli_json(capsys, "--project", root, "teardown", "--force")
+    assert any("vet of mcp:fetch" in w for w in res["warnings"])

@@ -91,7 +91,7 @@ VERDICT: fits | breaks
 REASON: <one sentence>"""
 
 
-def record(task: Task, kind: str, name: str, verdict: str, text: str) -> dict:
+def record(task: Task, kind: str, name: str, verdict: str, text: str, extra: dict | None = None) -> dict:
     if verdict not in VERDICTS:
         raise HarnessError(f"--verdict must be one of {', '.join(VERDICTS)}")
     pending = task.info().get("vet_pending", {}).get(f"{kind}:{name}")
@@ -99,7 +99,7 @@ def record(task: Task, kind: str, name: str, verdict: str, text: str) -> dict:
         raise HarnessError(f"no vetting prompt was made for {kind} {name}: run `autoharness vet {kind} {name}` "
                            "and give its prompt to a fresh reviewer first")
     vetted = task.info().get("vetted", {})
-    vetted[f"{kind}:{name}"] = {"verdict": verdict, "text": text, "sha256": pending["sha256"]}
+    vetted[f"{kind}:{name}"] = {"verdict": verdict, "text": text, "sha256": pending["sha256"]} | (extra or {})
     # one prompt, one verdict: changing it takes a new prompt and a new reviewer
     all_pending = task.info().get("vet_pending", {})
     all_pending.pop(f"{kind}:{name}")

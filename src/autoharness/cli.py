@@ -17,7 +17,7 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, config, egress, evidence, library, recipes, registry, text, vet
+from autoharness import agents, answers, config, egress, evidence, library, recipes, registry, text, vet
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected, Task, npx_stage_skill, parse_skill_spec
 from autoharness.trust import curated_report, score_registry_entry, score_skill
@@ -196,6 +196,9 @@ def cmd_init(args, project, catalog):
         "the brief is recorded.")
     if not suggested:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
+    if stale := stale_skills(project):
+        result["warnings"] = stale
+        result["next"] = "First tell the user: " + "; ".join(stale) + ". Then: " + result["next"]
     out(result)
     return 0
 
@@ -259,10 +262,51 @@ def cmd_evidence(args, project, catalog):
     return 0
 
 
+def critic_subject(result: dict | None) -> str:
+    return f"result #{result['n']}" if result else "no result"
+
+
+RETOLD = ("recorded from your retelling of the reviewer's answer: save its answer unedited to a file and pass "
+          "--answer-file, so autoharness reads the verdict itself")
+
+
+def read_answer(task: Task, path: str, kind: str, allowed, subject: str) -> dict:
+    answer = answers.read(task, Path(path), kind, subject)
+    if answer["verdict"] not in allowed:
+        raise HarnessError(f"the answer's VERDICT is {answer['verdict']!r}, not one of {', '.join(allowed)}")
+    return answer
+
+
 def cmd_review(args, project, catalog):
-    worst = args.worst or ("major" if args.fixable == "yes" else "none")
     task = project.task()
-    item = evidence.review(task, args.diff, worst, args.by, args.settled)
+    warnings, answer = [], None
+    args.by = args.by or ("critic" if args.answer_file else "self")
+    if args.answer_file:
+        if args.by != "critic":
+            raise HarnessError("--answer-file records a critic's answer, not your own review: drop --by self")
+        result = evidence.latest(task, "result")
+        answer = read_answer(task, args.answer_file, "critic", evidence.SEVERITIES,
+                             critic_subject(result))
+        diff, worst = answers.as_diff(answer), answer["verdict"]
+        given = args.worst or ({"yes": "major", "no": "none"}.get(args.fixable) if args.fixable else None)
+        if given and evidence.SEVERITIES.index(given) < evidence.SEVERITIES.index(worst):
+            flag = f"--worst {args.worst}" if args.worst else f"--fixable {args.fixable} ({given})"
+            raise HarnessError(f"{flag} is milder than the critic's own VERDICT: {worst}")
+        if args.diff or given:
+            warnings.append("--diff/--worst/--fixable were not used: the list and the verdict are the critic's own, "
+                            "from the answer file")
+    else:
+        if not args.diff or not (args.worst or args.fixable):
+            raise HarnessError("record a review with --diff and --worst, or a critic's answer with "
+                               "--by critic --answer-file <file>")
+        diff, worst = args.diff, args.worst or ("major" if args.fixable == "yes" else "none")
+        if args.by == "critic":
+            warnings.append(RETOLD)
+    extra = {"answer_id": answer["id"]} | ({"previous_review": answer["previous"]} if answer["previous"] else {}) \
+        if answer else {}
+    item = evidence.review(task, diff, worst, args.by, args.settled, extra | ({"warnings": warnings} if warnings else {}))
+    if answer:
+        item["answer_file"] = answers.consume(task, answer)
     if item.get("auto_limited"):
         out({"status": "limited", "review": item,
              "next": f"\"{item['auto_limited']}\" is ruled out of reach: the final arbiter's fix failed as well, on "
@@ -328,11 +372,13 @@ def cmd_approach(args, project, catalog):
 def cmd_arbiter(args, project, catalog):
     task = project.task()
     res = evidence.arbiter_prompt(catalog, task, args.part or "")
+    res["answer_id"] = answers.issue(task, "arbiter", res["part"])
+    res["prompt"] += answers.instruction(res["answer_id"])
     res["prompt_file"] = evidence.save_prompt(task, "arbiter", res["prompt"])
     out({"status": "ok"} | res | {
         "next": "Give the prompt unchanged to a fresh subagent that neither made nor reviewed this work (or tell it "
-                "to read `prompt_file` and follow it). Record its answer: `autoharness arbitrate --verdict <its "
-                "VERDICT> --text \"<its answer>\"`."})
+                "to read `prompt_file` and follow it). Save its answer unedited to a file and record it: "
+                "`autoharness arbitrate --answer-file <file>`; autoharness reads the VERDICT and the CHECK line."})
     return 0
 
 
@@ -342,7 +388,22 @@ def cmd_arbitrate(args, project, catalog):
     if not part:
         out({"status": "error", "error": "no part given and no arbiter pending: pass --part \"<part>\""})
         return 1
-    item = evidence.arbitrate(task, part, args.verdict, args.text, args.check or "")
+    answer, ignored = None, []
+    if args.answer_file:
+        answer = read_answer(task, args.answer_file, "arbiter", ("fix", "limit"), part)
+        verdict, text_, check = answer["verdict"], answer["body"], answer["check"]
+        if args.verdict or args.text or args.check:
+            ignored = ["--verdict/--text/--check were not used: they come from the answer file"]
+    elif not (args.verdict and args.text):
+        raise HarnessError("record the arbiter's answer with --answer-file <file> (or --verdict and --text)")
+    else:
+        verdict, text_, check = args.verdict, args.text, args.check or ""
+    extra = {"answer_id": answer["id"]} | ({"warnings": ignored} if ignored else {}) if answer else \
+        {"warnings": [RETOLD]}
+    item = evidence.arbitrate(task, part, verdict, text_, check, extra)
+    if answer:
+        item["answer_file"] = answers.consume(task, answer)
+    args.verdict = verdict
     nxt = (f"Follow the arbiter's technique for \"{part}\" (it is now the next approach): rebuild that part and add "
            f"the result and a close-up of it. Then run the arbiter's check on it (\"{item.get('check')}\") and record "
            "what it measured with `autoharness check --result \"<measured>\" --pass yes|no`: if it fails, the fix "
@@ -366,12 +427,14 @@ def cmd_check(args, project, catalog):
 def cmd_critic(args, project, catalog):
     task = project.task()
     res = evidence.critic_prompt(catalog, task, args.dispute or "")
+    res["answer_id"] = answers.issue(task, "critic", critic_subject(evidence.latest(task, "result")))
+    res["prompt"] += answers.instruction(res["answer_id"])
     res["prompt_file"] = evidence.save_prompt(task, "critic", res["prompt"])
     out({"status": "ok"} | res | {
         "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
                 "elsewhere a new session), unchanged: paste it, or tell the subagent to read `prompt_file` and "
-                "follow it. Do not add your own opinion to it. Record its answer verbatim in "
-                "substance: `autoharness review --by critic --diff \"<its list>\" --worst <its VERDICT>`."})
+                "follow it. Do not add your own opinion to it. Save its answer unedited to a file and record it: "
+                "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT."})
     return 0
 
 
@@ -425,6 +488,9 @@ def cmd_add(args, project, catalog):
         return already_kept(project, "skills", parse_skill_spec(args.name)[1])
     if (gate := vet_gate(task, args)) is not None:
         return gate
+    vetted = vet.verdict(task, args.kind, args.name) or {}
+    retold = [f"its vet verdict was recorded from your retelling, not from the reviewer's answer file: tell the user"
+              ] if vetted and "answer_id" not in vetted else []
     if args.kind == "mcp":
         report, source = resolve_mcp(catalog, args.name)
         if not report["config"]:
@@ -440,7 +506,7 @@ def cmd_add(args, project, catalog):
         if report["requires_approval"] and not args.approve:
             return need_approval(f"add MCP server {args.name}", report | {"egress": reach})
         local = args.as_name or local_mcp_name(args.name)
-        warnings = task.add_mcp(local, report["config"], source=source, permissions=report["permissions"],
+        warnings = retold + task.add_mcp(local, report["config"], source=source, permissions=report["permissions"],
                                 trust={"score": report["score"], "level": report["level"]}, direct=args.direct)
         secrets = report["permissions"].get("secrets", [])
         agent = task.agent
@@ -473,8 +539,9 @@ def cmd_add(args, project, catalog):
             return 1
         skill = parse_skill_spec(args.name)[1]
         vetted = vet.verdict(task, "skill", args.name) or {}
-        drift = ([f"the installed files differ from the ones vetted; run `autoharness vet skill {args.name}` again"]
-                 if vetted.get("sha256") and vetted["sha256"] != task.skills_lock()[skill]["sha256"] else [])
+        drift = retold + ([f"the installed files differ from the ones vetted; run `autoharness vet skill {args.name}` "
+                           "again"] if vetted.get("sha256") and vetted["sha256"] != task.skills_lock()[skill]["sha256"]
+                          else [])
         out({"status": "ok", "added": skill, **({"warnings": drift} if drift else {}),
              "scan_findings": [f.__dict__ for f in findings],
              "next": f"Skill is in {task.agent.skills_dir}; invoke it by name (restart the session if it does not show up)."})
@@ -504,8 +571,18 @@ def cmd_vet(args, project, catalog):
     if not vet.constraints(task):
         raise HarnessError("the brief records no constraints to vet against; record `autoharness brief "
                            "--constraints \"<the user's words>\"` first (or there is nothing to vet)")
-    if args.verdict:
-        v = vet.record(task, args.kind, args.name, args.verdict, args.text or "")
+    if args.answer_file or args.verdict:
+        subject = f"{args.kind}:{args.name}"
+        answer = read_answer(task, args.answer_file, "vet", vet.VERDICTS, subject) if args.answer_file else None
+        verdict, reason = (answer["verdict"], answer["reason"] or answer["body"]) if answer else (args.verdict,
+                                                                                                  args.text or "")
+        ignored = (["--verdict/--text were not used: they come from the answer file"]
+                   if answer and (args.verdict or args.text) else [])
+        v = vet.record(task, args.kind, args.name, verdict, reason,
+                       {"answer_id": answer["id"]} | ({"warnings": ignored} if ignored else {}) if answer
+                       else {"warnings": [RETOLD]})
+        if answer:
+            v["answer_file"] = answers.consume(task, answer)
         out({"status": "ok", "vetted": args.name} | v | {
             "next": f"`autoharness add {args.kind} {args.name}`." if v["verdict"] == "fits" else
                     "Pick another candidate; install this one only if the user agrees after seeing the verdict."})
@@ -522,11 +599,12 @@ def cmd_vet(args, project, catalog):
         stage = library.stage_from_library if args.name.startswith("local:") else npx_stage_skill
         content, digest = vet.skill_content(args.name, stage, repo, skill)
         vet.note_pending(task, "skill", args.name, digest)
-    text = vet.prompt(task, args.kind, args.name, content)
-    out({"status": "ok", "prompt": text, "prompt_file": evidence.save_prompt(task, "vet", text),
+    nonce = answers.issue(task, "vet", f"{args.kind}:{args.name}")
+    text = vet.prompt(task, args.kind, args.name, content) + answers.instruction(nonce)
+    out({"status": "ok", "prompt": text, "answer_id": nonce, "prompt_file": evidence.save_prompt(task, "vet", text),
          "next": "Give `prompt` to a fresh subagent that did not pick this candidate (Claude Code: the Agent tool), "
-                 "unchanged. Record its answer: `autoharness vet " + f"{args.kind} {args.name} --verdict fits|breaks "
-                 "--text \"<its REASON>\"`."})
+                 "unchanged. Save its answer unedited to a file and record it: `autoharness vet "
+                 f"{args.kind} {args.name} --answer-file <file>`."})
     return 0
 
 
@@ -596,6 +674,17 @@ def cmd_teardown(args, project, catalog):
         warnings.append("no discovery ran: no skill or MCP search was made for this task")
     if not info.get("brief"):
         warnings.append("no brief recorded: goal, missing inputs, constraints and verification were never written down")
+    if drift := evidence.changed_since_review(task, project.root):
+        warnings.append(drift)
+    critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
+    if critics and "answer_id" not in critics[-1]:
+        warnings.append(f"the last critic review (round {critics[-1]['round']}) was recorded from your retelling, "
+                        "not from the critic's answer file: tell the user its verdict is unconfirmed")
+    retold = [f"arbiter on `{a['part']}`" for a in info.get("arbitrations", []) if "answer_id" not in a]
+    retold += [f"vet of {k}" for k, v in info.get("vetted", {}).items() if "answer_id" not in v]
+    if retold:
+        warnings.append("recorded from your retelling, not from the reviewer's answer file: " + ", ".join(retold)
+                        + "; tell the user these verdicts are unconfirmed")
     policy, source = config.teardown_policy(project.root, args.policy)
     result = task.teardown(policy)
     kept = result["kept"]["mcp"] + result["kept"]["skills"]
@@ -732,8 +821,32 @@ def cmd_recipe(args, project, catalog):
     return 0
 
 
-def cmd_install_skill(args, project, catalog):
+def render_skill(agent) -> str:
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
+    return (text.replace("{{AGENT}}", agent.name).replace("{{MCP_FILE}}", agent.mcp_file)
+            .replace("{{RELOAD}}", agent.reload_hint))
+
+
+def stale_skills(project) -> list[str]:
+    """Installed copies of the autoharness skill, for any agent, that differ from the one this version ships."""
+    stale, seen = [], set()
+    for agent in agents.AGENTS.values():
+        want = render_skill(agent).replace("\r\n", "\n")
+        for flag, base in (("", agent.skills_path(project.root)), (" --user", agent.user_skills_path())):
+            path = base / "autoharness" / "SKILL.md"
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                if path.is_file() and path.read_text("utf-8").replace("\r\n", "\n") != want:
+                    stale.append(f"{path} is out of date with this autoharness: run "
+                                 f"`autoharness --agent {agent.name} install-skill{flag}`")
+            except OSError:
+                continue
+    return stale
+
+
+def cmd_install_skill(args, project, catalog):
     names = list(agents.AGENTS) if args.all else [project.agent.name]
     installed = {}
     for name in names:
@@ -741,8 +854,7 @@ def cmd_install_skill(args, project, catalog):
         base = agent.user_skills_path() if args.user else agent.skills_path(project.root)
         dest = base / "autoharness" / "SKILL.md"
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text.replace("{{AGENT}}", agent.name).replace("{{MCP_FILE}}", agent.mcp_file)
-                        .replace("{{RELOAD}}", agent.reload_hint), "utf-8")
+        dest.write_text(render_skill(agent), "utf-8")
         installed[name] = str(dest)
     out({"status": "ok", "installed": installed})
     return 0
@@ -932,6 +1044,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("vet", help="check a candidate against the brief's constraints by an independent reviewer")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")
+    s.add_argument("--answer-file", help="record the reviewer's answer, saved unedited")
     s.add_argument("--verdict", choices=list(vet.VERDICTS), help="record the reviewer's VERDICT")
     s.add_argument("--text", help="with --verdict: the reviewer's REASON")
     s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
@@ -980,12 +1093,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--base", default="HEAD", help="for `diff`: the revision to compare the working tree with")
     s.add_argument("--note", help="what it shows")
     s = sub.add_parser("review", help="record one review round of the latest result")
-    s.add_argument("--diff", required=True, help="the differences found, most important first")
-    g = s.add_mutually_exclusive_group(required=True)
+    s.add_argument("--answer-file", help="with --by critic: the critic's answer, saved unedited; autoharness reads "
+                                         "its list and VERDICT")
+    s.add_argument("--diff", help="the differences found, most important first (your own review)")
+    g = s.add_mutually_exclusive_group()
     g.add_argument("--worst", choices=list(evidence.SEVERITIES),
                    help="worst severity among the fixable differences (the critic's VERDICT)")
     g.add_argument("--fixable", choices=["yes", "no"], help="short form: yes = major, no = none")
-    s.add_argument("--by", choices=["self", "critic"], default="self")
+    s.add_argument("--by", choices=["self", "critic"], help="default: critic with --answer-file, else self")
     s.add_argument("--settled", action="append", default=[], metavar="POINT",
                    help="a disputed point this critic settled from measurements in the files, and how; "
                         "later critics see it (repeatable)")
@@ -999,8 +1114,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--part", help="the part to arbitrate (default: the one the last review sent to an arbiter)")
     s = sub.add_parser("arbitrate", help="record an arbiter's verdict: fix (next approach) or limit (stops blocking)")
     s.add_argument("--part", help="the part (default: the one waiting for an arbiter)")
-    s.add_argument("--verdict", required=True, choices=["fix", "limit"])
-    s.add_argument("--text", required=True, help="the arbiter's answer: the technique, or why it is out of reach")
+    s.add_argument("--answer-file", help="the arbiter's answer, saved unedited; autoharness reads VERDICT and CHECK")
+    s.add_argument("--verdict", choices=["fix", "limit"])
+    s.add_argument("--text", help="the arbiter's answer: the technique, or why it is out of reach")
     s.add_argument("--check", help="for a fix: the arbiter's measurable CHECK line")
     s = sub.add_parser("check", help="record what the arbiter's check measured on the new result")
     s.add_argument("--result", required=True, help="what the check measured")
