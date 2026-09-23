@@ -1,413 +1,277 @@
 # AutoHarness
 
-Мета-harness: агент стартует «голым» (только skill `autoharness`), сам определяет,
-какие capabilities нужны задаче, находит MCP-серверы и skills, проверяет их,
-ставит их, решает задачу и в конце либо оставляет поставленное в проекте (по умолчанию),
-либо всё снимает — это настраивается. Удачные наборы сохраняются как recipes и
-переиспользуются.
+**AutoHarness собирает агенту инструменты под конкретную задачу — и проверяет, что задача
+действительно сделана.**
+
+Coding-агент (Claude Code, Codex CLI, Gemini CLI, Qwen Code, GigaCode, Strands) обычно работает
+с тем набором MCP-серверов и skills, который кто-то заранее прописал в конфиг. Этого набора либо
+не хватает (нет браузера, чтобы посмотреть на страницу; нет актуальных доков API; нет референса,
+под который надо попасть), либо он раздут: десятки серверов на все случаи жизни съедают контекст
+и дают агенту доступ к тому, что задаче не нужно.
+
+AutoHarness переворачивает это. Агент стартует почти «голым» — с одним skill `autoharness` — и
+на каждую задачу сам строит себе *harness*: решает, какие возможности нужны, ищет подходящие
+MCP-серверы и skills в публичных реестрах, проверяет их на доверие и на ограничения пользователя,
+ставит, работает, проверяет результат руками независимого критика и в конце оставляет
+поставленное в проекте или снимает. Удачные наборы сохраняются как *recipes* и переиспользуются
+в похожих задачах.
+
+## Как это работает
 
 ```
-task → init → capabilities → recipe? → search → trust check → add → smoke-test
-                    ↑                                                  │
-                    └──── capability gap (need) ◄──── execute ◄────────┘
-                                                        │
-                                  verify → teardown --save-recipe
+задача → init → capabilities → recipe? → поиск → brief → trust (+ vet) → add → smoke-test
+                      ↑                                                            │
+                      └────────── не хватает возможности (need) ◄──── работа ◄─────┘
+                                                                         │
+                                      проверка + критик → teardown (--save-recipe)
 ```
 
-Какие capabilities нужны, решает агент, а не autoharness. `init` отдаёт подсказки
-(`suggested`) — совпадения по ключевым словам с учётом русских и английских окончаний
-(`text.py`, без стеммера и без LLM) — и всегда полный список `all_capabilities` каталога,
-чтобы случайное совпадение не скрыло остальное.
+Две части делят работу так: **думает агент, считает и охраняет CLI**. Агент решает, что нужно
+задаче и хорош ли результат. CLI `autoharness` ведёт учёт (lockfiles, что поставлено, кем и
+зачем), ищет в реестрах, считает trust score, пишет конфиги агента, не даёт пропустить шаги и
+всё отдаёт в JSON. Код выхода `3` всегда значит одно: *остановись и спроси пользователя*.
 
-## Установка
-
-Установка состоит из трёх шагов: поставить CLI (один раз на машину), положить skill агенту
-(в проект или глобально) и, по желанию, подключить gateway, чтобы новые MCP-серверы работали
-без перезапуска агента.
-
-### 1. CLI `autoharness`
-
-Ставится через [uv](https://docs.astral.sh/uv/) как отдельный инструмент: uv сам берёт
-подходящий Python (3.10+) и кладёт команду `autoharness` в свою папку для исполняемых файлов.
-Внешних зависимостей нет.
-
-Если uv ещё не стоит:
+### 1. Разбор задачи — `init`
 
 ```bash
-# Linux/macOS
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+autoharness init "сверстай лендинг по макету из Figma"
 ```
 
-Установка autoharness прямо из GitHub:
+`init` создаёт окружение задачи в `.autoharness/tasks/<id>/` и возвращает:
+
+- `suggested` — подсказки capabilities по ключевым словам (с учётом русских и английских
+  окончаний, без LLM) и всегда полный каталог `all_capabilities`, чтобы случайное совпадение
+  не скрыло остальное. Решает всё равно агент;
+- `recipes` — похожие сохранённые наборы;
+- `discovered` — что уже нашлось под эту задачу на [skills.sh](https://skills.sh) и в
+  [официальном MCP registry](https://registry.modelcontextprotocol.io).
+
+Capability — это не «инструмент», а то, что нужно уметь: `browser-automation`, `library-docs`,
+`visual-reference`, `visual-review`, `postgres`… Главный вопрос здесь не «чем сделать», а
+**«чем проверить»**: веб-задаче нужен браузер, чтобы увидеть страницу, а не только редактор.
+Отдельная и частая дыра — недостающий вход: агент рисует по памяти то, что можно найти и
+посмотреть (кадр из фильма, макет, ответ API). Это тоже capability, и её закрывают первой.
+
+### 2. Поиск — `need`, `search`
+
+Агент читает всё, что нашёл `init`, и ищет дальше своими словами:
 
 ```bash
-uv tool install git+https://github.com/D-Shey/autoharness
-autoharness agents        # проверка: печатает поддерживаемых агентов и обнаруженного
+autoharness need library-docs --reason "нужны актуальные доки Next.js 16"
+autoharness search mcp "figma"
+autoharness search skill "landing page"
 ```
 
-Репозиторий приватный: uv берёт доступ из настроек git, поэтому сначала войдите, например,
-через `gh auth login` (он настраивает git на ваш аккаунт).
+Порядок предпочтения: свой skill из локальной библиотеки → курированный каталог → высокий
+trust из реестра → ничего. «Ничего» — законный ответ: если хватает shell, `gh`, `psql` или
+`npx playwright`, сервер не нужен.
 
-Команда `autoharness` должна находиться через `PATH`: её вызывают и агент, и gateway. uv кладёт
-её в `~/.local/bin` (на Windows — `%USERPROFILE%\.local\bin`; точный путь — `uv tool dir --bin`).
-Если `autoharness agents` отвечает «command not found», выполните `uv tool update-shell` и
-откройте новый терминал. Агента после этого тоже запускайте из нового терминала, иначе он не
-увидит обновлённый `PATH`.
-
-Обновление и удаление:
+### 3. Brief — план до начала работы
 
 ```bash
-uv tool upgrade autoharness       # подтянуть последний коммит из GitHub
-uv tool uninstall autoharness
+autoharness brief --goal "..." --inputs "..." --constraints "..." --verify "..." \
+  --candidates "figma-mcp: take, ...; some-skill: skip, ..." --gaps "..."
 ```
 
-Если вы правите сам autoharness, ставьте из локальной копии в режиме редактирования — изменения
-в коде сразу видны команде `autoharness`:
+Brief фиксирует: какой результат считается хорошим и как это проверить; каких входных данных не
+хватает и откуда они возьмутся; ограничения пользователя **дословно** («без новых зависимостей»,
+«только офлайн»); вердикт по каждому найденному кандидату. Если нужного know-how нет ни в одном
+skill, агент планирует написать свой (`--gaps "create <name>: ..."`) и пишет его до основной
+работы. С установленным [хуком](docs/installation.md#4-хук-для-claude-code-по-желанию) Claude
+Code не даёт агенту ничего менять, пока brief не записан.
+
+### 4. Проверка и установка — `vet`, `inspect`, `add`
 
 ```bash
-git clone https://github.com/D-Shey/autoharness.git
-cd autoharness
-uv tool install -e .
+autoharness inspect mcp figma      # trust score, секреты, куда сервер может ходить
+autoharness add mcp figma
+autoharness add skill owner/repo@skill
 ```
 
-Для большинства skills и MCP-серверов из каталога нужен ещё Node.js (`npx`); Python-серверы
-запускаются через `uvx`, который ставится вместе с uv.
+Перед установкой каждый кандидат проходит несколько фильтров:
 
-### 2. Skill для агента
+- **Trust score.** Курированный каталог доверенный; серверы из реестра оцениваются по
+  проверенному namespace, закреплённой версии и издателю. Всё не «high», всё с секретами или
+  удалённое ставится только после явного «да» пользователя (`exit 3` → `--approve`).
+- **Статический скан skills.** Skill сначала скачивается во временную папку и проверяется на
+  опасное: чтение `~/.ssh`, `curl | sh`, «не говори пользователю», обфускация. Такие — `rejected`.
+- **Независимая проверка на ограничения.** Если в brief есть ограничения, `add` отвечает
+  `vet_required`: `autoharness vet` собирает промпт с ограничениями и содержимым кандидата, его
+  получает свежий субагент, и его ответ записывается без правок.
+- **Сеть.** С настройкой `allowed_hosts` удалённый сервер вне списка и любой локальный процесс
+  ставятся только с согласия пользователя.
 
-Skill — это `SKILL.md`, из которого агент узнаёт, как пользоваться autoharness. В каждый агент
-кладётся свой вариант: с правильным именем агента, путём к MCP-конфигу и подсказкой о перезапуске.
-Поэтому **агент надо указывать явно**: в обычном терминале autoharness не знает, для кого
-ставит, и по умолчанию берёт `claude`.
+`add` пишет сервер в конфиг нужного агента (или в gateway, см. ниже), skill — в его папку skills,
+и всё — в lockfile задачи. Секреты в файлы не попадают, только `${ENV_VAR}`. Затем агент делает
+один дешёвый вызов (smoke-test); не работает — `remove` и следующий кандидат.
 
-`--agent` — глобальный флаг, он пишется **до** подкоманды:
+### 5. Работа и новые пробелы
+
+Агент решает задачу. Застрял — спрашивает себя: *поможет ли подумать ещё, или мне чего-то не
+хватает?* Не видно то, что надо проверить (UI, сеть, базу, логи), угадывается API без доков,
+рисуется то, чего нет перед глазами, — это пробел в возможностях, и агент возвращается к шагу 2
+через `need`.
+
+### 6. Проверка результата — evidence, критик, арбитр
+
+AutoHarness не верит агенту на слово, что всё готово:
 
 ```bash
-cd /path/to/your/project                       # команды работают с текущей папкой (или --project)
-
-autoharness --agent claude   install-skill     # в проект: .claude/skills/autoharness/SKILL.md
-autoharness --agent codex    install-skill --user   # глобально: ~/.agents/skills/autoharness/SKILL.md
-autoharness install-skill --all                # в проект, сразу для всех пяти агентов
+autoharness evidence add ref.png --kind reference   # с чем сравниваем
+autoharness evidence add shot.png --kind result     # что получилось в этом раунде
+autoharness evidence diff                           # для кода: весь diff рабочей копии
+autoharness review --by self --diff "1 ...; 2 ..." --worst major
+autoharness critic                                  # промпт для независимого критика
+autoharness review --by critic --answer-file answer.txt
 ```
 
-| Агент | `--agent` | Skill в проекте | Skill глобально (`--user`) |
-|---|---|---|---|
-| Claude Code | `claude` | `.claude/skills/autoharness/` | `~/.claude/skills/autoharness/` |
-| Codex CLI | `codex` | `.agents/skills/autoharness/` | `~/.agents/skills/autoharness/` |
-| Gemini CLI | `gemini` | `.gemini/skills/autoharness/` | `~/.gemini/skills/autoharness/` |
-| Qwen Code | `qwen` | `.qwen/skills/autoharness/` | `~/.qwen/skills/autoharness/` |
-| GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
-| Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (сам strands его не читает: передайте путь в `create_harness(skills=...)`) |
+- Работа идёт раундами: результат → сравнение с референсом → исправление главного → снова.
+- **Судит не автор.** `critic` выдаёт промпт для свежего субагента, который работу не делал.
+  Его ответ сохраняется в файл как есть; autoharness сам читает из него список замечаний и
+  `VERDICT`, и одноразовый `ANSWER-ID` не даёт подставить старый ответ. Критик обязателен, если
+  этого требует capability задачи (например, `visual-review`) или brief записан с
+  `--review critic`; тогда задача заканчивается, когда его вердикт по последнему результату —
+  `minor` или `none`.
+- **Защита от зацикливания.** Если одна и та же блокирующая проблема держится три раунда,
+  `review` требует сменить подход (`approach`). Если не помогли несколько подходов — `arbiter`:
+  независимый арбитр решает, чинить (с измеримой проверкой `check`) или признать предел.
+- Для визуальных задач teardown требует референсы, минимум два раунда результата и финального
+  критика. Последнее слово у пользователя: `teardown --accepted "<его слова>"`.
 
-В проект или глобально:
-
-- **в проект** — skill работает только в этом проекте, его можно закоммитить, и он будет
-  у всей команды;
-- **глобально (`--user`)** — skill есть в любом проекте на этой машине.
-
-Агенты читают skills при старте сессии: после установки начните новую сессию.
-Повторный `install-skill` перезаписывает `SKILL.md` — так он обновляется после
-`git pull` в autoharness.
-
-### 3. Gateway (по желанию, но рекомендуется)
-
-Без gateway каждый новый MCP-сервер пишется прямо в конфиг агента, и агента нужно
-перезапускать. С gateway перезапуск нужен **один раз** — после установки самого gateway:
+### 7. Конец задачи — teardown, skills, recipes
 
 ```bash
-autoharness --agent claude gateway install     # пишет сервер `autoharness` в конфиг агента
-autoharness --agent claude gateway status      # установлен ли, какие серверы запущены
+autoharness skill new pptx-qa --description "Check .pptx slides visually"
+autoharness skill save pptx-qa                 # проверки; код 3 — нужно согласие пользователя
+autoharness skill save pptx-qa --approve       # после «да» — в библиотеку
+autoharness teardown --save-recipe landing-from-figma --notes "лендинг по макету"
 ```
 
-Gateway ставится в проект и **отдельно для каждого агента**: у `gateway install` нет `--all`,
-повторите команду с нужным `--agent`. `add mcp` идёт через gateway только для того агента,
-у которого gateway установлен.
+- **Свои skills.** Всё, чему агент научился (как собрать и проверить такой проект, причуды API),
+  он записывает в skill и сохраняет в библиотеку `~/.autoharness/skills/`: `skill save` проверяет
+  его, блокирует секреты и опасные паттерны и сохраняет только с `--approve` после «да»
+  пользователя. В другом проекте — `autoharness add skill local:pptx-qa`; recipe ссылается на
+  такой skill как `local:<name>`, а `need` показывает его, если совпала capability.
+- **Recipe** запоминает набор и поисковые запросы, которые его нашли. В похожей задаче `init`
+  предложит recipe (score ≥ 0.3) и заново прогонит запросы: если появилось что-то лучше, оно
+  окажется в `fresh`.
+- **Что остаётся в проекте** — настройка `teardown`:
+  - `keep` (по умолчанию) — поставленное остаётся, записи переходят в `.autoharness/kept.json`,
+    следующие задачи видят его как `already_installed`. Снять: `remove` или `prune`.
+  - `remove` — teardown удаляет всё, что поставила задача.
 
-Что сделать после `gateway install` в каждом агенте:
+  Приоритет: флаг `teardown --keep|--remove` → `$AUTOHARNESS_TEARDOWN` → `.autoharness/config.json`
+  проекта → `~/.autoharness/config.json` → по умолчанию.
 
-| Агент | Куда пишется gateway | Как агенту его подхватить |
-|---|---|---|
-| Claude Code | `.mcp.json` | перезапустить Claude Code (или `/mcp`) и **одобрить** проектный сервер `autoharness` |
-| Codex CLI | `.codex/config.toml` | перезапустить Codex; проектный конфиг читается, только если проект помечен **trusted** |
-| Gemini CLI | `.gemini/settings.json` | перезапустить или выполнить `/mcp refresh` |
-| Qwen Code | `.qwen/settings.json` | перезапустить или выполнить `/mcp refresh` |
-| GigaCode CLI | `.gigacode/settings.json` | перезапустить или выполнить `/mcp refresh` |
-| Strands harness | `.agent/mcp.json` | передать `create_harness(mcp_servers=".agent/mcp.json")` и пересоздать агента |
+  ```bash
+  autoharness config set teardown remove            # для этого проекта
+  autoharness config set teardown remove --global   # для всех проектов
+  autoharness config get                            # текущее значение и откуда оно
+  ```
 
-Проверка: в агенте должны появиться инструменты `harness_tools` и `harness_call`. В Claude Code
-они могут прийти отложенными — их находит поиск инструментов.
+## Пример
 
-Если autoharness не найден в `PATH` в момент `gateway install`, в конфиг пишется
-`python -m autoharness gateway serve` с полным путём к Python, в котором он запущен. Это работает,
-пока этот Python на месте: после `uv tool uninstall` или переустановки выполните
-`gateway install` заново, уже с `autoharness` в `PATH`.
+Пользователь просит Claude Code: *«нарисуй в SVG постер в стиле кадра из „Бегущего по лезвию“»*.
 
-### Проверка целиком
-
-Попросите агента в новой сессии: «запусти autoharness init для задачи „прочитай
-https://example.com“ и добавь fetch». Ожидаемо: агент вызывает `autoharness init`, затем
-`autoharness add mcp fetch`; с gateway ответ содержит `"via": "gateway"`, и страница читается
-через `harness_call` без перезапуска.
-
-### Несколько агентов в одном проекте
+(Сессия условная; ответы CLI сокращены.)
 
 ```bash
-autoharness install-skill --all
-autoharness --agent claude gateway install
-autoharness --agent codex  gateway install
+autoharness init "SVG-постер в стиле кадра из Blade Runner, без генераторов"
+# → suggested: visual-reference, visual-review; discovered: skills про SVG, браузерные MCP
+
+autoharness brief --goal "узнаваемая композиция и палитра кадра, уровень стилизованного постера" \
+  --inputs "сам кадр: найти веб-поиском" --constraints "без генераторов" \
+  --verify "рендер SVG в PNG, сравнение рядом с кадром" \
+  --candidates "svg-generator-skill: skip, это генератор; playwright: take, рендер" --gaps "none: ..."
+
+autoharness add mcp playwright
+# → {"status": "vet_required", ...}   в brief есть ограничения — сначала независимая проверка
+autoharness vet mcp playwright                               # промпт → свежий субагент
+autoharness vet mcp playwright --answer-file vet.txt         # его ответ: VERDICT: fits
+autoharness add mcp playwright                               # → {"status": "ok", "added": "playwright", "via": "gateway"}
+
+autoharness evidence add still.jpg --kind reference
+autoharness evidence add poster-1.png --kind result
+autoharness critic                                           # → субагент: «небо светлое, нет вертикалей», VERDICT: major
+autoharness review --by critic --answer-file critic-1.txt
+autoharness evidence add poster-2.png --kind result
+autoharness critic                                           # → VERDICT: minor
+autoharness review --by critic --answer-file critic-2.txt
+
+autoharness teardown --save-recipe svg-poster --notes "стилизованный постер по кадру"
 ```
 
-Задачи и gateway у агентов общие (`.autoharness/`), а конфиги у каждого свои. Внутри сессии
-агент определяется сам — по переменным окружения, которые он ставит своим командам
-(`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, …). Если определение не сработало, задайте
-`AUTOHARNESS_AGENT=<агент>` в окружении, из которого запускаете агента.
-
-### Удаление
-
-```bash
-autoharness --agent claude gateway uninstall   # убирает `autoharness` из конфига агента
-```
-
-Skill удаляется вместе с папкой `autoharness` в каталоге skills (таблица выше). CLI — `uv tool uninstall autoharness`.
-
-## Агенты
-
-| `--agent` | MCP-конфиг проекта | Skills проекта |
-|---|---|---|
-| `claude` (Claude Code) | `.mcp.json` | `.claude/skills` |
-| `codex` (Codex CLI) | `.codex/config.toml` | `.agents/skills` |
-| `gemini` (Gemini CLI) | `.gemini/settings.json` | `.gemini/skills` |
-| `qwen` (Qwen Code) | `.qwen/settings.json` | `.qwen/skills` |
-| `gigacode` (GigaCode CLI) | `.gigacode/settings.json` | `.gigacode/skills` |
-| `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
-
-Агент выбирается при `init` и запоминается в задаче. Порядок: `--agent`, затем
-`$AUTOHARNESS_AGENT`, затем автоопределение по окружению (`CLAUDECODE`, `GEMINI_CLI`, …),
-иначе `claude`. `autoharness agents` показывает таблицу и обнаруженного агента.
-
-Lockfiles и recipes хранят конфиг в одном каноническом виде (формат `.mcp.json`,
-секреты как `${VAR}`), адаптер переводит его при записи: для Gemini-семейства
-remote-серверы становятся `httpUrl`/`url`, для Codex секреты уходят в `env_vars`,
-`bearer_token_env_var`, `env_http_headers`. Codex не раскрывает `${VAR}` в `args`;
-в этом случае `add` возвращает `warnings`. Проектный `.codex/config.toml` Codex читает
-только для trusted-проектов. Правки в TOML обёрнуты маркерами `# >>> autoharness:<name>`,
-так что комментарии и остальной конфиг пользователя не трогаются.
-
-Для установки skills нужен Node.js (`npx skills`), для большинства MCP тоже.
-
-## Команды
-
-| Команда | Что делает |
-|---|---|
-| `init "<задача>"` | создаёт task-окружение, подсказывает capabilities и похожие recipes |
-| `plan "<задача>"` | то же без побочных эффектов |
-| `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов |
-| `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
-| `inspect mcp\|skill <name>` | подробный trust-отчёт; для MCP ещё `egress` — куда сервер может ходить |
-| `vet mcp\|skill <name> [--answer-file F]` | промпт для независимой проверки кандидата против `--constraints` из brief; запись ответа проверяющего |
-| `review --by critic --answer-file F` / `arbitrate --answer-file F` | записать ответ критика или арбитра как он есть: autoharness сам читает список, `VERDICT` и `CHECK` |
-| `add mcp <name>` / `add skill owner/repo@skill` | ставит в MCP-конфиг и папку skills агента и пишет в lockfile |
-| `remove mcp\|skill <name>` | снимает то, что поставила эта задача или сохранила в проекте прошлая |
-| `prune` | снимает всё, что прошлые задачи сохранили в проекте |
-| `status` | текущий harness, что сохранено в проекте, журнал |
-| `teardown [--keep\|--remove] [--save-recipe NAME --notes ... --query kind:q]` | завершает задачу по политике `teardown`; recipe хранит и запросы к реестрам (`skill:<q>`/`mcp:<q>`), которые нашли поставленное |
-| `config get\|set [teardown keep\|remove \| allowed_hosts "<хосты>"] [--global]` | настройки |
-| `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
-| `gateway install\|uninstall\|status\|serve` | один MCP-сервер autoharness, через который новые серверы работают без перезапуска |
-| `add mcp <name> --direct` | мимо gateway, сразу в конфиг агента |
-| `recipe list\|match\|show` | сохранённые наборы; `show` перезапускает запросы recipe и отдаёт в `fresh` новых кандидатов, `init` делает то же для recipe со score ≥ 0.3 |
-| `agents` | поддерживаемые агенты и их пути |
-
-Всё печатается как JSON. Код выхода `3` = нужно согласие пользователя.
-
-## Что происходит в конце задачи
-
-Настройка `teardown`:
-
-- `keep` (по умолчанию) — поставленное остаётся в проекте. Записи о нём переходят из
-  lockfile задачи в `.autoharness/kept.json`, следующие задачи видят эти skills и MCP
-  как уже установленные (`add` отвечает `already_installed`). Снять: `remove` или `prune`.
-- `remove` — teardown удаляет всё, что поставила задача.
-
-Кто главнее, сверху вниз: флаг `teardown --keep|--remove`, `$AUTOHARNESS_TEARDOWN`,
-`.autoharness/config.json` проекта, `~/.autoharness/config.json`, значение по умолчанию.
-
-```bash
-autoharness config set teardown remove            # для этого проекта
-autoharness config set teardown remove --global   # для всех проектов
-autoharness config get                            # текущее значение и откуда оно
-```
-
-## Куда могут ходить MCP-серверы
-
-Настройка `allowed_hosts` — список шаблонов хостов через запятую (`api.github.com,*.example.com`);
-пусто (по умолчанию) — без ограничений. Честно о том, что она может:
-
-- **удалённый** сервер (HTTP/SSE) живёт на одном известном хосте: хост не из списка — `add` просит
-  согласия пользователя (код `3`), а gateway не подключается к нему и отключает уже работающий, если список сузили позже (в течение секунды);
-- **локальный процесс** (`npx`, `uvx`, `docker`) ходит куда хочет, autoharness это не ограничивает.
-  Поэтому при заданном списке такой сервер тоже ставится только с согласия пользователя.
-
-```bash
-autoharness config set allowed_hosts "api.githubcopilot.com,*.context7.com"
-autoharness inspect mcp github      # поле egress: host, enforced, ok, reason
-```
-
-## Проверка кандидатов против ограничений
-
-Если в brief записаны `--constraints` пользователя, `add` не ставит skill или сервер без вердикта
-независимой проверки (статус `vet_required`). `autoharness vet skill <spec>` ставит skill во
-временную папку и собирает промпт из ограничений дословно и содержимого файлов (для MCP — конфиг,
-права и `egress`). Промпт отдаётся свежему subagent'у, его ответ сохраняется в файл без правок и
-записывается через `--answer-file <файл>`. На `breaks` `add` отвечает кодом `3`: ставить только если
-пользователь согласен. Если файлы skill при установке отличаются от проверенных, `add` предупреждает.
-Свои skills из библиотеки (`local:`) проверку не требуют.
-
-`.autoharness/.gitignore` пропускает `config.json` и `kept.json`, так что их можно
-закоммитить вместе с папкой skills; остальное состояние задач в git не попадает.
-
-## Ответы проверяющих записываются как есть
-
-Промпты `critic`, `arbiter` и `vet` получают одноразовый `ANSWER-ID`. Агент сохраняет ответ
-субагента в файл без правок и передаёт его через `--answer-file`: autoharness проверяет, что id выдан
-этой задачей для такого промпта и ещё не использован, и сам берёт из ответа список, `VERDICT`,
-`CHECK` и `REASON`. Указать `--worst` мягче, чем `VERDICT` критика, нельзя. Это защита от пересказа
-и от подстановки старого или чужого ответа, а не от подделки: id виден агенту в промпте, и файл «от
-критика» агент технически может написать сам. Честность здесь держится на инструкции skill, а не на
-криптографии. Копия ответа остаётся в
-`.autoharness/tasks/<id>/answers/`. Старая запись (`--diff`/`--worst`, `--verdict`/`--text`) работает,
-но помечается предупреждением: это пересказ автора.
-
-`teardown` предупреждает, если рабочее дерево изменилось после последнего review записанного
-`evidence diff`: эти изменения никто не проверял. `init` предупреждает, если установленный
-`SKILL.md` autoharness отличается от версии в пакете (`autoharness install-skill [--user]`).
-
-## Свои skills
-
-В конце задачи агент может записать выученное (как собрать и проверить такой проект,
-особенности API) в skill и сохранить его в библиотеку `~/.autoharness/skills/`:
-
-```bash
-autoharness skill new pptx-qa --description "Check .pptx slides visually"   # заготовка в папке skills
-autoharness skill save pptx-qa              # проверки; код 3 — нужно согласие пользователя
-autoharness skill save pptx-qa --approve    # в библиотеку
-autoharness add skill local:pptx-qa         # в другом проекте
-```
-
-`skill save` блокирует секреты (токены, приватные ключи, `password=…`) и опасные паттерны,
-предупреждает об абсолютных путях и email и без `--approve` ничего не сохраняет. Recipe
-ссылается на такой skill как `local:<name>`; `need` показывает skills из библиотеки
-с подходящей capability.
+В следующий раз `init` для похожей задачи сразу предложит recipe `svg-poster`.
 
 ## Gateway: серверы без перезапуска
 
-```bash
-autoharness gateway install     # один раз; после этого — последний перезапуск агента
-autoharness add mcp fetch       # доступен сразу: harness_tools / harness_call
-autoharness gateway status      # что запущено и что упало
-```
+Обычно новый MCP-сервер агент видит только после перезапуска. Gateway убирает это: в конфиг
+агента один раз прописывается MCP-сервер `autoharness`, и дальше `add mcp` пишет новые серверы в
+`.autoharness/gateway.json`, а gateway запускает их на лету. Агенту он отдаёт два неизменных
+инструмента — `harness_tools` (серверы, их инструменты и схемы) и
+`harness_call(server, tool, arguments)`, — которые работают в любом агенте. Кроме того, gateway
+публикует родные инструменты `<server>__<tool>` и шлёт `tools/list_changed`: в Claude Code они
+появляются без перезапуска (проверено вживую 21.09.2026: после `add mcp fetch` появился
+`mcp__autoharness__fetch__fetch` — отложенным инструментом, который находится поиском инструментов); в Codex и Gemini CLI это не проверено, там надёжный путь — мета-инструменты.
 
-Gateway — MCP-сервер `autoharness` в конфиге агента. Он запускает серверы из
-`.autoharness/gateway.json` (туда `add mcp` пишет, когда gateway установлен) и отдаёт агенту
-два неизменных инструмента: `harness_tools` (серверы и их инструменты со схемами) и
-`harness_call(server, tool, arguments)`. Они работают в любом агенте. Дополнительно gateway
-отдаёт родные инструменты `<server>__<tool>` и шлёт `tools/list_changed`. В Claude Code это
-проверено вживую (21.09.2026): после `add mcp fetch` без перезапуска появился
-`mcp__autoharness__fetch__fetch` — отложенным инструментом, который подгружается через поиск
-инструментов. В Codex и Gemini CLI родные инструменты не проверены, там переносимый путь —
-мета-инструменты.
+Через gateway идут локальные серверы и HTTP-серверы с заголовками. Серверы с OAuth-входом и
+`add mcp --direct` пишутся прямо в конфиг агента. Серверам gateway передаёт только безопасный
+минимум окружения, а сервер, пришедший в `gateway.json` через `git pull`, не запустится, пока
+его не одобрят на этой машине (`autoharness gateway approve`).
 
-Через gateway идут локальные серверы и HTTP-серверы с заголовками (токен из env).
-Серверы с OAuth-входом и `add mcp --direct` пишутся в конфиг агента, как раньше.
-Секреты подставляются из окружения процесса агента; лог — `.autoharness/gateway.log`.
-Локальный сервер наследует из окружения агента **только** фиксированный безопасный набор: где система,
-пользователь, временные папки, локаль, сертификаты и прокси (`PATH`, `HOME`, `SystemRoot`, `APPDATA`, `TEMP`,
-`LC_*`, `XDG_*`, `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`, `SSH_AUTH_SOCK`, выбор конфигурации и аккаунта вроде
-`DOCKER_*`, `AWS_PROFILE`, `KUBECONFIG`, `GH_HOST`, кэши `npm_config_*`/`UV_*`/`PIP_*`, `PLAYWRIGHT_*` и т. п.,
-см. `PASS_ENV` в `mcp_client.py`). Даже из них отбрасываются имена, похожие на секреты, и URL с паролем внутри
-(кроме прокси). Если сервер не запустился, в ошибке перечислены имена (не значения) переменных, которых он не
-получил.
-Всё остальное, включая `DB_PASS`, строки подключения, webhook-URL и пути к файлам ключей
-(`GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE`), сервер видит, только если оно указано в его
-`env` как `${VAR}`. Такие `${VAR}` показываются при `add` и требуют согласия пользователя — все, а не только
-помеченные в реестре как секретные. Нужна ещё переменная — допишите её в `env` сервера в `gateway.json` и
-выполните `autoharness gateway approve <name>`. Серверы, записанные напрямую в конфиг агента (`--direct`), запускает сам
-агент — на них это не распространяется.
+## Безопасность коротко
 
-`gateway.json` можно коммитить, поэтому после `git pull` в нём может оказаться чужая команда. Gateway запускает
-сервер, только если **именно этот конфиг** одобрен на этой машине: `add mcp` записывает одобрение сам, а сервер,
-пришедший из репозитория (или изменённый в нём), ждёт со статусом `not approved`. Одобрения хранятся вне
-репозитория, в `~/.autoharness/gateway-approved.json` (или `$AUTOHARNESS_HOME`), по абсолютному пути проекта:
-после переноса проекта в другую папку одобрить придётся заново. `init`, `status` и `gateway status` показывают,
-какие серверы ждут одобрения.
+- Ставится только то, что прошло trust-проверку, или то, на что пользователь сказал «да».
+- Skills сканируются до копирования в проект; секреты в конфиги не пишутся.
+- Ограничения пользователя проверяет независимый субагент, а не тот, кто хочет поставить.
+- Удаляется только то, что поставил autoharness на этой машине; ваши серверы и skills не трогаются.
+- Хук и `--approve` — рамка процедуры, а не песочница: честность агента держится на инструкции
+  skill. Где граница каждой защиты — в [docs/security.md](docs/security.md).
+
+## Быстрый старт
 
 ```bash
-autoharness gateway status            # поле unapproved: что ждёт одобрения
-autoharness gateway approve <name>    # показывает конфиг, код 3; с --approve — после «да» пользователя
-autoharness gateway approve --all     # то же для всех, кто ждёт
+uv tool install git+https://github.com/D-Shey/autoharness   # CLI (нужен uv; для skills и MCP — Node.js)
+autoharness agents                                          # проверка: агенты и обнаруженный
+cd /path/to/your/project
+autoharness --agent claude install-skill                    # skill для агента
+autoharness --agent claude gateway install                  # по желанию: MCP без перезапусков
+autoharness install-hook                                    # по желанию, Claude Code: обязательный brief
 ```
 
-**После обновления autoharness** серверы, добавленные через gateway старой версией, одобрений ещё не
-имеют и не запускаются, пока пользователь один раз не выполнит `autoharness gateway approve --all`
-(посмотрев конфиги). Засеять одобрения автоматически нельзя: всё, что лежит в проекте, включая
-`kept.json` и `.autoharness/tasks/`, может прийти коммитом (`git add -f` обходит `.gitignore`).
+Репозиторий приватный: до `uv tool install` войдите в GitHub (`gh auth login`). Если после
+установки `autoharness` не находится, выполните `uv tool update-shell` и откройте новый терминал.
+Перезапустите агента и дайте ему задачу. Все агенты, пути, глобальная установка, обновление и
+удаление — в [docs/installation.md](docs/installation.md).
 
-`--approve` запускает агент, и то, что пользователь действительно сказал «да», держится на инструкции
-skill, как и у остальных `--approve`: защита от подменённого через pull `gateway.json`, а не от агента,
-который решил обойти пользователя.
+| Агент | `--agent` |
+|---|---|
+| Claude Code | `claude` |
+| Codex CLI | `codex` |
+| Gemini CLI | `gemini` |
+| Qwen Code | `qwen` |
+| GigaCode CLI | `gigacode` |
+| [Strands harness](https://github.com/strands-agents/harness-sdk) | `strands` |
 
-## Безопасность
+## Документация
 
-- **Курированный каталог** (`src/autoharness/data/catalog.json`) — доверенная база.
-- **MCP из registry** получают score: проверенный namespace, pinned-версия пакета,
-  publisher из trusted-списка. Всё, что не «high», требует секреты или удалённый
-  сервер, ставится только с `--approve` после явного «да» от пользователя.
-  `repository.url` издатель пишет сам, поэтому бонус trusted-списка даётся, только если namespace
-  `io.github.<owner>` проверен реестром против того же владельца, или DNS-namespace (`com.stripe/…`) есть в
-  курированной таблице `trusted_mcp_namespaces` каталога (домен → издатель) точно, без поддоменов: поддомен
-  может принадлежать кому угодно (`<bucket>.s3.amazonaws.com`). Прочие DNS-namespace
-  доказывают домен, но не того, кто за ним стоит, и бонуса не получают: такой сервер ставится после «да».
-- **Skills** сначала скачиваются во временную staging-папку, статически сканируются
-  (чтение `~/.ssh`, `curl | sh`, «не говори пользователю», обфускация) и только
-  потом копируются в проект. High-находки блокируют установку.
-- **Удаляется только то, что поставил autoharness.** Ваши собственные MCP и skills не перезаписываются
-  и не удаляются; изменённый после установки skill сохраняется в бэкап (кэши вроде `__pycache__` правкой
-  не считаются). `kept.json` коммитится, поэтому `remove`/`prune` сами снимают только то, что оставила
-  задача на этой машине (запись в `~/.autoharness/kept-here.json`). Запись, о которой знает лишь файл
-  (pull, старая версия autoharness, другой клон, перенесённый проект), ждёт «да» пользователя: код `3`,
-  ничего не меняется; `prune --approve` / `remove … --approve` снимают её. Так же задача, начатая не на
-  этой машине (`.autoharness/tasks/` тоже можно закоммитить), ничего не удаляет по своим lockfile:
-  завершите её `teardown --keep`, а дальше `prune --approve`. Имена из lockfile и `kept.json` сверяются с листингом папки буква в букву, так что
-  `Mine`, `mine.` или `nul` не открывают чужую папку; ссылку (symlink, junction) autoharness не трогает;
-  `add` не заменяет папку, которая отличается от поставленной задачей. `prune` и `teardown --remove`
-  сначала проверяют всё и только потом что-то удаляют.
-- Секреты не записываются: в конфиге только `${ENV_VAR}`.
-- **Хук** (`install-hook`) пропускает до brief только `autoharness …` отдельной командой: можно с
-  `cd <dir> &&` или `cd <dir>;` впереди, в Bash — с `\`-переносами, `\"` в двойных кавычках и
-  `AUTOHARNESS_*=…` перед командой, а в конце — `2>&1` и фильтры только для чтения (`| head`, `| tail`,
-  `| jq`, `| grep` с аргументами без подстановок, `| Select-Object -First N`, `| Out-String`,
-  `| ConvertFrom-Json`). Других `;`, `|`,
-  `&&`, `#` и перенаправлений нет, а `$(…)` и обратные кавычки — только внутри одинарных кавычек.
-  Это рамка процедуры, а не песочница: агент может и `waive`.
-- **Evidence для кода:** `autoharness evidence diff [--base REV]` сохраняет как result весь diff рабочей
-  копии против `REV` (по умолчанию `HEAD`), включая новые неотслеживаемые файлы, без изменения индекса.
+- [docs/installation.md](docs/installation.md) — установка для всех агентов, gateway, хук, удаление.
+- [docs/reference.md](docs/reference.md) — все команды и где что лежит.
+- [docs/security.md](docs/security.md) — как устроена каждая защита и где её граница.
 
-Состояние задачи: `.autoharness/tasks/<id>/` (`task.json`, `mcp.lock.json`,
-`skills.lock.json`, `permissions.json`, `harness.md`). Recipes:
-`~/.autoharness/recipes/` (`AUTOHARNESS_HOME` переопределяет).
+## Ограничения
 
-## Ограничения MVP
-
-- Gateway не умеет OAuth-вход и устаревший SSE-транспорт: такие серверы по-прежнему пишутся
-  в конфиг агента и требуют перезапуска. Уведомления от HTTP-серверов gateway не слушает.
+- Gateway не умеет OAuth-вход и устаревший SSE-транспорт: такие серверы пишутся в конфиг агента и
+  требуют перезапуска. Уведомления от HTTP-серверов gateway не слушает.
 - Родные инструменты `<server>__<tool>` появляются только в агентах, которые обрабатывают
   `tools/list_changed`: в Claude Code — да, Codex и Gemini CLI не проверены. Мета-инструменты
   работают везде.
+- `allowed_hosts` ограничивает только удалённые серверы; локальный процесс ходит куда хочет.
 
-## Тесты
+## Разработка
 
 ```bash
-uv run --extra dev pytest      # uv сам создаёт .venv и ставит pytest
+git clone https://github.com/D-Shey/autoharness.git && cd autoharness
+uv tool install -e .            # команда autoharness сразу видит правки
+uv run --extra dev pytest       # тесты; uv сам создаёт .venv и ставит pytest
 ```
