@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from autoharness import text
 from autoharness.env import RUNTIME_JUNK, HarnessError, _hash_dir
 from autoharness.recipes import home
 from autoharness.trust import TrustReport, scan_skill
@@ -168,6 +169,23 @@ def delete(name: str) -> None:
 def with_capability(capability: str) -> list[dict]:
     return [{"name": e["name"], "description": e["description"]}
             for e in list_skills()[0] if capability in e["capabilities"]]
+
+
+MATCH_STEMS = 2  # shared content-word stems between a query and a skill's name and description
+
+
+def matching(capabilities: list[str], query: str) -> list[dict]:
+    """Saved skills that fit: tagged with one of `capabilities` (the capability they were saved for), named
+    `query`, or sharing MATCH_STEMS content words with it in their name and description. The tag is what
+    carries across languages: a Russian task finds an English description through its capability."""
+    wanted = text.stems(query.replace("-", " "))
+    out = []
+    for e in list_skills()[0]:
+        own = text.stems(f"{e['name'].replace('-', ' ')} {e['description']}")
+        if (set(e["capabilities"]) & set(capabilities) or e["name"] == query.strip()
+                or len(wanted & own) >= MATCH_STEMS):
+            out.append({"name": e["name"], "description": e["description"]})
+    return out
 
 
 def stage_from_library(repo: str, skill: str, stage_dir: Path) -> Path:

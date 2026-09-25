@@ -616,6 +616,31 @@ def test_teardown_has_no_unsaved_key_when_generated_skill_was_saved(project):
     assert "unsaved_generated" not in task.teardown("remove")
 
 
+def test_a_saved_skill_is_found_by_its_name_its_words_and_the_task_it_fits(tmp_path, lib_home, capsys):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    cli_json(capsys, "--project", str(a), "init", "chart the files that changed most in git history")
+    cli_json(capsys, "--project", str(a), "need", "charting")
+    path = project_skill = Project(a, "claude").task().new_skill(
+        "git-churn", "Use when ranking the files of a git repository by how often they changed.")
+    (path / "SKILL.md").write_text(FILLED.replace("name: pptx-qa", "name: git-churn").replace(
+        "Check .pptx slides visually", "Use when ranking the files of a git repository by how often they changed."),
+        "utf-8")
+    code, res = cli_json(capsys, "--project", str(a), "skill", "save", "git-churn", "--approve")
+    assert code == 0 and project_skill
+    code, res = cli_json(capsys, "--project", str(b), "init", "Какие файлы в репозитории чаще всего менялись? "
+                         "Построй график по истории git")
+    assert [s["name"] for s in res["local"]] == ["git-churn"]  # through the capability, across languages
+    assert "local:<name>" in res["next"]
+    assert "github" not in [s["capability"] for s in res["suggested"]]  # a repository is not GitHub
+    code, res = cli_json(capsys, "--project", str(b), "need", "git-churn")
+    assert [s["name"] for s in res["local"]] == ["git-churn"]  # by its name
+    code, res = cli_json(capsys, "--project", str(b), "need", "hotspots", "--reason", "rank files of the repository")
+    assert [s["name"] for s in res["local"]] == ["git-churn"]  # by the words of its description
+    code, res = cli_json(capsys, "--project", str(b), "need", "postgres")
+    assert res["local"] == []
+
+
 def test_cli_generated_skill_full_cycle(tmp_path, lib_home, capsys):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir(); b.mkdir()
@@ -928,6 +953,34 @@ def test_gateway_meta_and_native_tools(project):
     project.save_gateway_registry({"installed": ["claude"], "servers": {}})
     assert gw.sync() and sent
     assert "fake__echo" not in [t["name"] for t in rpc(gw, "tools/list")["result"]["tools"]]
+    gw.close_all()
+
+
+def test_the_first_call_waits_for_a_server_that_is_still_starting(project, monkeypatch):
+    import time as _time
+    approved_servers(project, {"fake": FAKE_CFG})
+    gw, _ = make_gateway(project.root)
+    real = gw.client_factory
+
+    def slow(*a, **kw):  # a server that takes a while to come up, like `uvx` fetching a package
+        client = real(*a, **kw)
+        start = client.start
+        client.start = lambda: (_time.sleep(1.0), start())[1]
+        return client
+    gw.client_factory = slow
+    assert gw.sync()
+    assert gw.status["fake"]["status"] == "starting"
+    res = call(gw, "harness_call", {"server": "fake", "tool": "echo", "arguments": {"text": "a"}})
+    assert not res.get("isError") and res["content"][0]["text"] == "a"   # waited, did not fail
+    gw.close_all()
+
+    monkeypatch.setattr(gateway, "STARTUP_WAIT", 0.2)
+    gw, _ = make_gateway(project.root)
+    gw.client_factory = slow
+    gw.sync()
+    res = call(gw, "harness_call", {"server": "fake", "tool": "echo", "arguments": {"text": "b"}})
+    assert res["isError"] and "starting" in res["content"][0]["text"]     # a limit, not a hang
+    wait_for(lambda: settled(gw))
     gw.close_all()
 
 
@@ -1293,7 +1346,7 @@ def test_init_searches_skills_and_mcp_by_itself(project, capsys, monkeypatch):
     assert code == 0
     kinds = {k for k, _ in calls}
     assert kinds == {"skill", "mcp"}
-    assert any(q == "svg illustration" for _, q in calls)
+    assert any(q == "visual regression" for _, q in calls)
     found = [r["name"] for d in res["discovered"] for r in d.get("results", [])]
     assert "someone/skills@svg-scene" in found
     assert "autoharness brief" in res["next"]
@@ -1438,8 +1491,129 @@ def test_critic_prompt_points_at_the_files_the_bar_and_the_focus(project, capsys
     p = res["prompt"]
     assert code == 0 and res["result"] in p and res["references"][0] in p
     assert "matches the film frame" in p and "no generators" in p and "VERDICT" in p
-    assert "camera angle" in p  # focus from the visual-review capability
+    assert "signature details" in p  # focus from the visual-review capability
     assert "fresh subagent" in res["next"]
+
+
+def test_a_page_to_copy_pixel_for_pixel_is_visual_work():
+    names = [c.name for c, _ in Catalog.load().classify(
+        "Сверстай главную страницу https://example.com одним HTML-файлом так, чтобы на скриншоте она была "
+        "неотличима от оригинала")]
+    assert "visual-review" in names and "visual-reference" in names
+    assert "visual-review" in [c.name for c, _ in Catalog.load().classify("recreate this landing page layout")]
+
+
+ECB_TASK = ("Напиши Python-скрипт rate.py, который берёт текущий курс USD к EUR из официального API Европейского "
+            "центробанка и печатает его с датой курса. Без сторонних зависимостей, только стандартная библиотека.")
+
+
+def test_a_constraint_naming_the_standard_library_is_not_a_docs_task():
+    catalog = Catalog.load()
+    assert [c.name for c, _ in catalog.classify(ECB_TASK)] == ["api-response"]
+    assert "library-docs" not in [c.name for c, _ in catalog.classify("parse it with only the standard library")]
+    assert "library-docs" in [c.name for c, _ in catalog.classify("документация библиотеки httpx")]
+    assert "library-docs" in [c.name for c, _ in catalog.classify("upgrade the library to 2.0")]
+    assert cli.discovery_queries(catalog, ECB_TASK)[0] == "http api testing"  # not "библиотека"
+
+
+def test_an_api_task_owes_a_real_response_and_a_critic_sees_no_close_ups(project, capsys, tmp_path):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", ECB_TASK, "--mode", "reviewed")
+    cli_json(capsys, "--project", root, "brief", *BRIEF)
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and "reference" in " ".join(res["problems"])
+    sample = tmp_path / "api-sample.csv"
+    sample.write_text("TIME_PERIOD,OBS_VALUE\n2026-09-25,1.1403\n", "utf-8")
+    ev(capsys, root, sample, "reference")
+    out = tmp_path / "checks.txt"
+    out.write_text("ok", "utf-8")
+    ev(capsys, root, out, "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    p = res["prompt"]
+    assert "close-up" not in p and "stylised drawing" not in p and "what running the result does" in p
+    assert "checked against the real response" in p  # focus from api-response
+
+
+MEMO_TASK = ("Сделай Word-документ (.docx) — памятку на одну страницу А4: как восстановить случайно удалённую "
+             "git-ветку через reflog, с примерами команд. Команды должны реально работать.")
+
+
+def test_a_site_named_in_the_task_is_web_fetch_and_a_table_is_not_a_spreadsheet():
+    catalog = Catalog.load()
+    names = lambda t: [c.name for c, _ in catalog.classify(t)]  # noqa: E731
+    assert names("Собери по официальным страницам python.org таблицу веток Python, результат в markdown") == ["web-fetch"]
+    assert "web-fetch" in names("summarize https://example.com/docs") and "web-fetch" in names("see www.example.com")
+    assert names("open config.json and fix it") == [] and names("update setup.py") == []
+    assert "documents" in names("сделай электронную таблицу с бюджетом") and "documents" in names("fill the xlsx")
+
+
+def test_a_word_document_is_not_documentation():
+    catalog = Catalog.load()
+    assert [c.name for c, _ in catalog.classify(MEMO_TASK)] == ["documents"]
+    assert "library-docs" in [c.name for c, _ in catalog.classify("обнови документацию библиотеки")]
+
+
+def test_a_render_of_a_document_does_not_make_the_critic_visual(project, capsys, tmp_path):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", MEMO_TASK, "--mode", "reviewed")
+    cli_json(capsys, "--project", root, "brief", *BRIEF)
+    sample = tmp_path / "git-output.txt"
+    sample.write_text("Deleted branch feature (was 81eaf45).", "utf-8")
+    ev(capsys, root, sample, "reference")
+    ev(capsys, root, png(tmp_path / "page1.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    p = res["prompt"]
+    assert "close-up" not in p and "stylised drawing" not in p
+    assert "page count, paper size" in p  # focus from documents
+
+
+def test_adding_a_skill_names_its_missing_tools_and_where_to_read_it(project, capsys, monkeypatch):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "write the release notes")
+    skill_md = ("---\nname: demo\ndescription: demo\n---\nUse `git` here.\n\n## Dependencies\n\n"
+                "`git` · `nosuchtool-autoharness` (render) · LibreOffice (`soffice-autoharness-missing`)\n\n"
+                "## Notes\n`notatool-outside-deps`\n")
+    monkeypatch.setattr(cli, "npx_stage_skill", fake_stager({"SKILL.md": skill_md}))
+    monkeypatch.setattr(cli, "resolve_skill", lambda c, s: {"requires_approval": False, "score": 50, "level": "medium"})
+    code, res = cli_json(capsys, "--project", root, "add", "skill", "acme/skills@demo")
+    assert code == 0 and res["missing_tools"] == ["nosuchtool-autoharness", "soffice-autoharness-missing"]
+    assert Path(res["skill_md"]).is_file() and res["skill_md"] in res["next"] and "not found on PATH" in res["warnings"][0]
+
+
+def test_a_third_party_api_has_its_own_verification_guide(project, capsys):
+    code, res = cli_json(capsys, "--project", str(project.root), "verify", "guide", "api-client")
+    assert code == 0 and "reference" in res["brief_verify"] and "unreachable host" in res["brief_verify"]
+    assert not any("Start the service" in s for s in res["steps"])
+
+
+def test_a_result_that_is_the_reference_itself_is_flagged(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    still = png(tmp_path / "still.png")
+    ev(capsys, root, still, "reference")
+    code, res = ev(capsys, root, still, "result")
+    assert code == 0 and res["evidence"]["same_as"] == 1 and "byte for byte" in res["warnings"][0]
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert "byte for byte the same file as evidence #1" in res["prompt"]
+    code, res = ev(capsys, root, png(tmp_path / "r2.png"), "result")
+    assert "same_as" not in res["evidence"] and "warnings" not in res
+
+
+def test_critic_reads_notes_as_labels_sees_the_project_and_lists_only_differences(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    cli_json(capsys, "--project", root, "evidence", "add", str(png(tmp_path / "r1.png")), "--kind", "result",
+             "--note", "pixel diff 0")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    p = res["prompt"]
+    assert "(author's label: pixel diff 0)" in p and "not findings" in p
+    assert str(project.root) in p and "user's constraints there" in p
+    assert "never what matches" in p and "No differences." in p
+
+
+def test_a_point_tagged_severity_none_does_not_block():
+    from autoharness import evidence
+    diff = "1. no visible difference. Severity: none.\n2. hair too pastel, major, fixable\n3. grain, minor"
+    assert evidence.issues(diff) == ["hair too pastel, major, fixable"]
 
 
 def test_visual_teardown_needs_image_references_results_and_a_final_critic(project, capsys, tmp_path):

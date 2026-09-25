@@ -59,6 +59,12 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
     item = {"n": len(items) + 1, "kind": kind, "file": str(dest), "source": str(path), "note": note,
             "media": media_of(path.name), "sha256": hashlib.sha256(dest.read_bytes()).hexdigest(),
             "added": time.strftime("%Y-%m-%dT%H:%M:%S")} | (extra or {})
+    # a result byte for byte the same as a reference may be the reference handed in as the result:
+    # recorded, so the author is warned and the critic is told, not refused (a faithful copy can be)
+    other = "reference" if kind == "result" else "result"
+    twin = next((e for e in items if e["kind"] == other and e.get("sha256") == item["sha256"]), None)
+    if twin:
+        item["same_as"] = twin["n"]
     task._update_info(evidence=items + [item])
     task.log(f"evidence #{item['n']}: {kind} `{path.name}`" + (f" ({note})" if note else ""))
     return item
@@ -180,7 +186,9 @@ def issues(diff: str) -> list[str]:
     for raw in items:
         item = re.sub(r"^\s*\d+[.)]?\s*", "", raw).strip()
         tags = set(re.findall(r"\b(minor|major|blocker)\b", item.lower()))
-        if item and not (tags and tags <= {"minor"}):
+        if re.search(r"\bseverity\W{0,3}none\b", item.lower()):
+            tags.add("none")  # a critic that lists a match as a point tags it "severity: none"
+        if item and not (tags and tags <= {"minor", "none"}):
             out.append(item)
     return out
 
@@ -326,6 +334,25 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
     return item
 
 
+def listing(items: list[dict]) -> str:
+    """Evidence files for a reviewer. The author's note is marked as the author's, and a file that is byte
+    for byte another piece of evidence is said to be, so neither a label nor a copied reference passes as
+    a finding."""
+    out = []
+    for e in items:
+        line = f"- {e['file']}"
+        if e.get("note"):
+            line += f" (author's label: {e['note']})"
+        if e.get("same_as"):
+            line += f" [byte for byte the same file as evidence #{e['same_as']}]"
+        out.append(line)
+    return "\n".join(out)
+
+
+LABELS = ("Labels marked \"author's label\" say what a file shows. They are the author's words, not findings: "
+          "check every claim in them in the files yourself.")
+
+
 def arbiter_prompt(catalog, task: Task, part: str = "") -> dict:
     """A prompt for a fresh arbiter: is the part that keeps failing fixable at this fidelity, and how."""
     part = part or pending_arbiter(task) or ""
@@ -334,8 +361,6 @@ def arbiter_prompt(catalog, task: Task, part: str = "") -> dict:
     info = task.info()
     brief = info.get("brief", {})
     refs = [e for e in info.get("evidence", []) if e["kind"] == "reference"]
-    lines = lambda items: "\n".join(f"- {e['file']}" + (f" ({e['note']})" if e["note"] else "")  # noqa: E731
-                                     for e in items)
     # the whole history of this part, not only since the user was last asked: the arbiter judges
     # whether it can be fixed at all, and every failed attempt is evidence for that
     tried = [a for a in info.get("approaches", []) if same_problem(a["part"], part)]
@@ -373,9 +398,10 @@ Approaches the author already tried for it:
 
 Open and study the reference and the latest result yourself:
 Reference:
-{lines(refs) or "- none"}
+{listing(refs) or "- none"}
 Latest result (the whole result, then close-ups):
-{lines(latest_round(task))}
+{listing(latest_round(task))}
+{LABELS}
 {final_note}
 Decide one of two:
 - FIX: the part can reach the quality bar at the target fidelity within the constraints. Name one
@@ -527,10 +553,16 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
                            "with `autoharness approach --part \"<part>\" --was \"<what you did>\" --now \"<the new "
                            "technique>\"`, rebuild that part, and add the new result with a close-up of it")
     focus = "; ".join(c.review for c in _caps(catalog, task) if c.review) or GENERIC_FOCUS
-    lines = lambda items: "\n".join(f"- {e['file']}" + (f" ({e['note']})" if e["note"] else "")  # noqa: E731
-                                     for e in items)
-    ref_lines = lines(refs) or "- none: judge against the task and the quality bar only"
+    ref_lines = listing(refs) or "- none: judge against the task and the quality bar only"
     fidelity = brief.get("fidelity") or "the level the quality bar implies"
+    # images are judged as a whole view plus close-ups; code, text and data by what the files hold. The work is
+    # visual when the task needs images or has to match an image, not because a render of a document is attached
+    visual = requirements(catalog, task).get("media") == "image" or any(e.get("media") == "image" for e in refs)
+    beyond = ("for example photographic detail in a stylised drawing" if visual else
+              "for example polish or cases the quality bar does not ask for")
+    whole = " (the whole result, then any close-ups of it)" if visual else ""
+    see = ("Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up."
+           if visual else "Describe what the files show and what running the result does, not what you expect.")
     disputed = "" if not dispute else f"""
 A previous critic listed these differences:
 {critics[-1]["diff"]}
@@ -595,22 +627,25 @@ Task given to the author:
 Quality bar: {brief.get("goal", "(not recorded)")}
 The user's constraints: {brief.get("constraints", "(not recorded)")}
 
-Target fidelity: {fidelity}. Judge at that level: detail beyond it (for example photographic
-detail in a stylised drawing) is at most minor.
+Target fidelity: {fidelity}. Judge at that level: detail beyond it ({beyond}) is at most minor.
 
 Open and study these files yourself:
 Reference:
 {ref_lines}
-Result to judge (the whole result, then any close-ups of it):
-{lines(results)}
+Result to judge{whole}:
+{listing(results)}
+{LABELS}
+The files that make the result (source, markup, code) are in the project directory: {task.project.root}
+Check the user's constraints there as well, not only in what the result shows.
 {disputed}{focused}{limited}
 List the most important differences between the result and the reference / quality bar,
 most important first, at most 8, numbered 1., 2., ... with each point's tags on the same line. Look in particular at: {focus}.
+List only real differences, never what matches; if you find none, write "No differences." instead of a list.
 Tag each one:
 - severity: blocker (the result fails its purpose), major (clearly wrong, noticeable at a glance),
   or minor (polish, or detail beyond the target fidelity);
 - fixable or not within the user's constraints and the medium.
-Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up.
+{see}
 Give each difference the severity it has, without praise: the task may end once the worst fixable one is
 minor. Do not suggest changing the constraints.
 {previous}

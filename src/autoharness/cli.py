@@ -19,8 +19,8 @@ from pathlib import Path
 
 from autoharness import agents, answers, approvals, config, egress, evidence, library, recipes, registry, text, vet
 from autoharness.catalog import Catalog
-from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, npx_stage_skill,
-                             parse_skill_spec)
+from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
+                             npx_stage_skill, parse_skill_spec, skill_dir)
 from autoharness.trust import curated_report, score_registry_entry, score_skill
 
 EXIT_APPROVAL = 3
@@ -73,6 +73,11 @@ def resolve_skill(catalog: Catalog, spec: str) -> dict:
     except OSError:
         pass
     return score_skill(spec, installs, catalog.trusted_skill_owners).to_dict()
+
+
+def local_skills(catalog: Catalog, task_text: str) -> list[dict]:
+    """Skills from the user's own library that fit the task: by the capabilities it matches, or its words."""
+    return library.matching([c.name for c, _ in catalog.classify(task_text)], task_text)
 
 
 def suggestions(catalog: Catalog, caps) -> list[dict]:
@@ -208,6 +213,8 @@ def cmd_init(args, project, catalog):
                                 "mcp": list(r["mcp"]), "skills": r["skills"], "queries": r.get("queries", [])}
                                for s, r in matches],
                    "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
+        if local := local_skills(catalog, args.task):
+            result["local"] = local
         result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
         task.record_discovery(discovered)
         result["next"] = (
@@ -218,6 +225,9 @@ def cmd_init(args, project, catalog):
         "capability no found skill covers, `create <skill-name>: <capability>` (you write that skill before "
         "producing the result), or `none: <why tools at hand cover it>`. Tools that do work stay blocked until "
         "the brief is recorded.")
+        if result.get("local"):
+            result["next"] = ("`local` lists skills you saved earlier that fit this task: prefer them "
+                              "(`autoharness add skill local:<name>`). " + result["next"])
     if mode == "full" and not result["suggested"]:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
     warnings = stale_skills(project) + unapproved_warning(project)
@@ -244,7 +254,11 @@ def cmd_mode(args, project, catalog):
            "Review the discovered candidates and record `autoharness brief ...` before adding tools.")
     if level == "reviewed":
         nxt += " Before teardown an independent critic must pass the result: `autoharness critic`."
-    out({"status": "ok", "task_id": task.id, "mode": level, "discovered": info.get("discovery", []), "next": nxt})
+    local = local_skills(catalog, info.get("task", ""))
+    if local:
+        nxt = "`local` lists skills you saved earlier that fit this task: prefer them. " + nxt
+    out({"status": "ok", "task_id": task.id, "mode": level, "discovered": info.get("discovery", []),
+         **({"local": local} if local else {}), "next": nxt})
     return 0
 
 
@@ -267,7 +281,9 @@ def cmd_need(args, project, catalog):
     task = project.task()
     task.note_capability(args.capability, args.reason or "")
     cap = catalog.capabilities.get(args.capability)
-    local = library.with_capability(args.capability)
+    asked = f"{args.capability.replace('-', ' ')} {args.reason or ''}"
+    local = library.matching([args.capability] + [c.name for c, _ in catalog.classify(asked)],
+                             args.capability) or library.matching([], asked)
     if cap:
         out({"status": "ok", "capability": cap.name, "curated": {"mcp": cap.mcp, "skills": cap.skills}, "local": local}
             | ({"next": "Prefer a `local` skill: `autoharness add skill local:<name>`."} if local else {}))
@@ -320,7 +336,9 @@ def cmd_evidence(args, project, catalog):
            if args.kind == "reference" else
            "Review this result: record your own pass with `autoharness review --by self ...`, then get an "
            "independent one with `autoharness critic`.")
-    out({"status": "ok", "evidence": item, "next": nxt})
+    warnings = ([f"this file is byte for byte the same as evidence #{item['same_as']}: a result must be what "
+                 "you produced, not the reference itself; the critic is told"] if item.get("same_as") else [])
+    out({"status": "ok", "evidence": item, "next": nxt} | ({"warnings": warnings} if warnings else {}))
     return 0
 
 
@@ -626,9 +644,16 @@ def cmd_add(args, project, catalog):
                  "next": "Do not install. Pick another skill, or show the findings to the user; --force only on their explicit say-so."})
             return 1
         skill = parse_skill_spec(args.name)[1]
-        out({"status": "ok", "added": skill, **({"warnings": retold} if retold else {}),
+        where = skill_dir(task.skills_dir, skill)
+        missing = missing_tools(where)
+        warnings = retold + ([f"its dependencies name {', '.join(missing)}, not found on PATH: check that the parts "
+                              "you need run here before relying on it (a library listed there is not a command)"]
+                             if missing else [])
+        out({"status": "ok", "added": skill, "skill_md": str(where / "SKILL.md"),
+             **({"missing_tools": missing} if missing else {}), **({"warnings": warnings} if warnings else {}),
              "scan_findings": [f.__dict__ for f in findings],
-             "next": f"Skill is in {task.agent.skills_dir}; invoke it by name (restart the session if it does not show up)."})
+             "next": f"Read {where / 'SKILL.md'} now and follow it: a running session may not list a new skill "
+                     "until it restarts. Smoke-test the parts you will use before relying on it."})
     return 0
 
 
@@ -1390,7 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task_id", nargs="?")
     s = sub.add_parser("verify", help="use a verification guide and record its result")
     s.add_argument("action", choices=["guide", "record"])
-    s.add_argument("kind", choices=["browser", "api", "logs", "database"])
+    s.add_argument("kind", choices=["browser", "api", "api-client", "logs", "database"])
     s.add_argument("--passed", choices=["yes", "no"])
     s.add_argument("--evidence")
     s = sub.add_parser("need", help="record a capability gap and get curated candidates")
@@ -1467,7 +1492,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file", nargs="?")
     s.add_argument("--kind", choices=list(evidence.KINDS))
     s.add_argument("--base", default="HEAD", help="for `diff`: the revision to compare the working tree with")
-    s.add_argument("--note", help="what it shows")
+    s.add_argument("--note", help="what it shows; reviewers see it as your label, not as a finding")
     s = sub.add_parser("review", help="record one review round of the latest result")
     s.add_argument("--answer-file", help="with --by critic: the critic's answer, saved unedited; autoharness reads "
                                          "its list and VERDICT")
@@ -1509,7 +1534,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fidelity", help="the level to judge the result at, e.g. `stylised poster, not photographic`")
     s.add_argument("--review", choices=["critic"],
                    help="require an independent critic for this task even if its capabilities do not")
-    s.add_argument("--verify-template", choices=["browser", "api", "logs", "database"],
+    s.add_argument("--verify-template", choices=["browser", "api", "api-client", "logs", "database"],
                    help="use a built-in verification guide instead of --verify")
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
     s.add_argument("session_id")

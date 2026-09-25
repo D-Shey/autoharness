@@ -4,9 +4,10 @@ No stemmer library (stdlib only), so two cheap rules stand in for one:
 
 - words of STEM letters or more compare by their first STEM letters
   ("документация" / "документацию", "исследуй" / "исследовать"), as long as
-  the shared start covers all but the last SLACK letters of the keyword, so a
-  short word is not taken for a long keyword that merely starts with it
-  ("light" is not "lighthouse");
+  the shared start covers all but the last SLACK letters of the keyword and
+  the word is at most ENDING letters shorter than it, so a short word is not
+  taken for a long keyword that merely starts with it ("light" is not
+  "lighthouse", "документ" is not "документация");
 - shorter keywords are written as stems in the catalog ("баз", "тест", "форм")
   and match a word that is the stem plus a common English or Russian ending
   ("базе", "тесты", "forms"), but not a longer word that merely starts with it
@@ -22,6 +23,7 @@ import re
 WORD = re.compile(r"[^\W_]+", re.UNICODE)
 STEM = 5
 SLACK = 4
+ENDING = 2  # letters an inflected word may be shorter than its keyword
 STOP = {"the", "and", "for", "with", "from", "into", "this", "that", "please", "make", "should", "would",
         "could", "there", "their", "about", "which", "using", "don't", "dont",
         "для", "как", "что", "это", "или", "при", "без", "все", "под", "было", "была", "были", "будет",
@@ -46,7 +48,9 @@ def _word_matches(keyword: str, word: str) -> bool:
         return word == keyword
     if len(keyword) >= STEM:
         shared = len(os.path.commonprefix([keyword, word]))
-        return shared >= max(STEM, len(keyword) - SLACK)
+        # an ending changes a word by a letter or two; a word much shorter than the keyword is another
+        # word that happens to start it ("документ" is not "документация")
+        return shared >= max(STEM, len(keyword) - SLACK) and len(word) >= len(keyword) - ENDING
     return word.startswith(keyword) and word[len(keyword):] in ENDINGS
 
 
@@ -54,3 +58,19 @@ def matches(keyword: str, text_words: list[str]) -> bool:
     """True if every word of `keyword` (one word or a phrase) is in `text_words`."""
     parts = words(keyword)
     return bool(parts) and all(any(_word_matches(p, w) for w in text_words) for p in parts)
+
+
+def without(text_words: list[str], phrases: list[str]) -> list[str]:
+    """`text_words` with every run of consecutive words that matches one of `phrases` taken out, so a
+    keyword inside a constraint ("only the standard library") does not count as the task's subject."""
+    out, i = [], 0
+    parts = [words(p) for p in phrases]
+    while i < len(text_words):
+        hit = next((len(p) for p in parts if p and all(
+            i + j < len(text_words) and _word_matches(w, text_words[i + j]) for j, w in enumerate(p))), 0)
+        if hit:
+            i += hit
+        else:
+            out.append(text_words[i])
+            i += 1
+    return out

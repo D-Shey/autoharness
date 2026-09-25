@@ -20,11 +20,12 @@
       "keywords": ["docs", "documentation", "api reference", "library", "framework", "sdk", "upgrade", "migrate", "документация", "миграция", "библиотека", "фреймворк"],
       "mcp": ["context7"],
       "skills": [],
-      "search": ["library documentation"]
+      "search": ["library documentation"],
+      "exclude": ["standard library", "third party libraries", "external libraries", "стандартная библиотека", "сторонних библиотек"]
     },
     "github": {
       "description": "Issues, pull requests, code search and repos on GitHub.",
-      "keywords": ["github", "pull request", "pr", "issue", "repository", "репозиторий", "пулл"],
+      "keywords": ["github", "pull request", "pr", "issue", "пулл"],
       "mcp": ["github"],
       "skills": [],
       "search": ["github"]
@@ -43,6 +44,23 @@
       "skills": [],
       "search": ["web research", "fetch web page"]
     },
+    "charting": {
+      "description": "Turn data into a chart or a data summary (matplotlib and the like): pick the chart for the question, compute the numbers in code, check them against the source.",
+      "keywords": ["chart", "plot", "visualization", "visualize", "dashboard", "matplotlib", "seaborn", "график", "диаграмм", "визуализац"],
+      "mcp": [],
+      "skills": ["anthropics/knowledge-work-plugins@data-visualization"],
+      "search": ["data visualization", "matplotlib charts"],
+      "review": "every number checked against the source data with an independent count; the chart type fits the question; labels, axes and scale honest and readable at the size it will be shown"
+    },
+    "api-response": {
+      "description": "Look at an API's actual response (a real request, saved as a reference) and its docs before writing or changing code that calls or serves it.",
+      "keywords": ["api", "endpoint", "rest api", "webhook", "эндпоинт", "вебхук"],
+      "mcp": ["fetch"],
+      "skills": [],
+      "search": ["http api testing", "api client"],
+      "requires": {"reference": 1},
+      "review": "every field and value the code relies on, checked against the real response; what it does on network errors, error statuses and unexpected or missing values; the user's constraints (dependencies, runtime)"
+    },
     "debugging": {
       "description": "Disciplined root-cause debugging.",
       "keywords": ["bug", "debug", "error", "crash", "fail", "flaky", "баг", "ошибка", "пада", "не работает"],
@@ -59,14 +77,15 @@
     },
     "documents": {
       "description": "Read and produce PDF, Word, Excel, PowerPoint files.",
-      "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "таблица", "презентация"],
+      "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "электронная таблица", "презентация"],
       "mcp": [],
       "skills": ["anthropics/skills@pdf", "anthropics/skills@docx", "anthropics/skills@xlsx", "anthropics/skills@pptx"],
-      "search": ["pdf docx xlsx pptx"]
+      "search": ["pdf docx xlsx pptx"],
+      "review": "every fact, figure and command in it is correct for its reader and checked; nothing the reader needs is missing; the format and limits the task sets (page count, paper size, file type) hold in a render of the file; it opens without errors"
     },
     "visual-reference": {
       "description": "Find and study reference images of the real subject (a film still, product, place or brand) before drawing or designing it: note composition, scale, camera angle and palette.",
-      "keywords": ["movie", "film", "scene", "poster", "reference", "фильм", "кадр", "сцен", "постер", "персонаж", "референс"],
+      "keywords": ["movie", "film", "scene", "poster", "reference", "фильм", "кадр", "сцен", "постер", "персонаж", "референс", "pixel", "неотличим"],
       "mcp": ["playwright"],
       "skills": [],
       "search": ["reference images", "image search"],
@@ -74,12 +93,12 @@
     },
     "visual-review": {
       "description": "Render a visual result (SVG, canvas, HTML, chart) to an image and critique it side by side with the reference, over several rounds.",
-      "keywords": ["svg", "draw", "drawing", "illustration", "graphics", "picture", "logo", "icon", "canvas", "mockup", "нарису", "рисун", "иллюстрация", "картинк", "логотип", "иконк", "макет"],
+      "keywords": ["svg", "draw", "drawing", "illustration", "graphics", "picture", "logo", "icon", "canvas", "mockup", "layout", "pixel", "нарису", "рисун", "иллюстрация", "картинк", "логотип", "иконк", "макет", "сверстай", "вёрстка", "верстка", "неотличим"],
       "mcp": ["playwright"],
       "skills": [],
-      "search": ["svg illustration", "visual review"],
+      "search": ["visual regression", "screenshot comparison"],
       "requires": {"result": 2, "critic": 1, "media": "image"},
-      "review": "scale and composition, camera angle, anatomy and pose, likeness of the signature details, palette and light"
+      "review": "composition and layout, scale and position, likeness of the signature details, colors and light, text and type"
     },
     "skill-authoring": {
       "description": "Write a new skill when no existing one fits: when it triggers, the steps, how to verify.",

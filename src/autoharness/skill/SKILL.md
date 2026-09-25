@@ -71,7 +71,7 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get 
 ```
 
 Give a verdict for every plausible candidate. Show the user the brief in a few lines.
-For browser, API, logs or database checks, `autoharness verify guide <kind>` has a template:
+For browser, API (your own, or a third-party one: `api-client`), logs or database checks, `autoharness verify guide <kind>` has a template:
 pass `--verify-template <kind>` instead of `--verify`. Visual work needs image references, at
 least two results and a critic before teardown; `brief` lists what this task owes.
 

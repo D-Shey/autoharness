@@ -119,6 +119,28 @@ def skill_dir(base: Path, name: str) -> Path:
     return base / name
 
 
+DEPS_HEADING = re.compile(r"^#{1,6}\s*(?:dependencies|requirements|prerequisites|зависимости|требования)\b",
+                          re.IGNORECASE)
+TOOL_NAME = re.compile(r"`([A-Za-z][\w.+-]{1,40})`")
+
+
+def missing_tools(root: Path) -> list[str]:
+    """Commands a skill's SKILL.md lists under a Dependencies-like heading that are not on PATH: a skill can
+    fit the constraints and still not run here. A heuristic: a listed library that is not a command shows
+    up too, so the list is a warning, never a refusal."""
+    try:
+        lines = (root / "SKILL.md").read_text("utf-8").splitlines()
+    except OSError:
+        return []
+    names, inside = [], False
+    for line in lines:
+        if line.lstrip().startswith("#"):
+            inside = bool(DEPS_HEADING.match(line.strip()))
+        elif inside:
+            names += [n for n in TOOL_NAME.findall(line) if n not in names]
+    return [n for n in names if shutil.which(n) is None]
+
+
 def existing_skill_dir(base: Path, name: str) -> Path | None:
     """The folder `name` in `base`, or None. Names come from lockfiles and kept.json, which a pull can bring
     (a commit can add ignored files too), so the name must be spelled exactly as the directory listing spells

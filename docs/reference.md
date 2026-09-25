@@ -16,7 +16,7 @@
 | `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
 | `inspect mcp\|skill <name>` | подробный trust-отчёт; для MCP ещё `egress` — куда сервер может ходить |
 | `brief --goal ... --constraints ... [--verify ... \| --verify-template browser\|api\|logs\|database] [--review critic]` | план задачи: цель, входы, ограничения, проверка, вердикты по кандидатам |
-| `verify guide browser\|api\|logs\|database` | шаги и ожидаемые доказательства типовой проверки |
+| `verify guide browser\|api\|api-client\|logs\|database` | шаги и ожидаемые доказательства типовой проверки |
 | `verify record KIND --passed yes\|no --evidence FILE` | сохраняет исход проверки и файл доказательства |
 | `decision mcp\|skill NAME select\|skip --reason TEXT` / `audit [TASK_ID]` | причина выбора и структурированный журнал решений |
 | `vet mcp\|skill <name> [--answer-file F]` | промпт для независимой проверки кандидата против ограничений; запись ответа |

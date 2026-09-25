@@ -23,6 +23,17 @@ GUIDES = {
         ],
         "evidence": "API test output or redacted request/response file with assertions.",
     },
+    "api-client": {
+        "brief_verify": "Save a real response of the third-party API as the reference, check the code's output against a separate request, and check its behaviour on an unreachable host, an error status and an unexpected answer.",
+        "steps": [
+            "Send the real request with curl first and save the raw response as a reference: that is what the code must parse.",
+            "Run the code and compare every value it prints or returns with a separate request made at the same time.",
+            "Point it at an unreachable host, an error status and a malformed or unexpected answer (missing, zero or non-numeric values); "
+            "check each gives a clear error and the documented exit code or exception, not a traceback or a wrong value.",
+            "Check the code stays within the user's constraints (dependencies, runtime, keys kept out of the source).",
+        ],
+        "evidence": "The saved raw response plus the output of the comparison and failure checks.",
+    },
     "logs": {
         "brief_verify": "Exercise the affected path, inspect service logs for the expected event and new errors, save a bounded log excerpt.",
         "steps": [

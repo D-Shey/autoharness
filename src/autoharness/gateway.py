@@ -34,7 +34,8 @@ META_TOOLS = [
     {"name": "harness_call",
      "description": "Call one tool on an MCP server autoharness added and return that tool's own result unchanged. "
                     "Take `server` and `tool` from harness_tools and pass `arguments` that match the tool's input "
-                    "schema. A server whose process exited is restarted once; an unknown server, a server that "
+                    "schema. A server still starting is waited for up to 30 seconds and one whose process exited is "
+                    "restarted once; an unknown server, a server that "
                     "could not start, or the tool's own failure comes back as an error result that names the "
                     "cause. Calling <server>__<tool> directly, where the client shows it, does the same.",
      "inputSchema": {"type": "object", "properties": {
@@ -43,6 +44,7 @@ META_TOOLS = [
          "arguments": {"type": "object", "description": "The tool's arguments, per its input schema."}},
                      "required": ["server", "tool"]}},
 ]
+STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 
 
@@ -309,8 +311,15 @@ class Gateway:
         return out
 
     def _forward(self, server: str | None, tool: str | None, arguments: dict) -> dict:
-        with self._lock:
-            client, st = self.clients.get(server), self.status.get(server)
+        # a server added a moment ago is still starting in the background: the agent's first call waits
+        # for it instead of failing, since `add` told the agent it is available now
+        deadline = time.monotonic() + STARTUP_WAIT
+        while True:
+            with self._lock:
+                client, st = self.clients.get(server), self.status.get(server)
+            if client is not None or not st or st["status"] != "starting" or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
         if client is None:
             if st:
                 return _text(f"server {server!r} is {st['status']}" + (f": {st['error']}" if st.get("error") else ""), True)
