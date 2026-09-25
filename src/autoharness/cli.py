@@ -177,29 +177,37 @@ def cmd_init(args, project, catalog):
     if args.profile and args.mode:
         raise HarnessError("use either --profile or --mode, not both")
     classified = catalog.classify(args.task)
-    profiles = {"quick": "light", "standard": "full", "reviewed": "full"}
-    selected = profiles[args.profile] if args.profile else (args.mode or "full")
-    mode = ("full" if classified else "light") if selected == "auto" else selected
+    # --profile is the older spelling of the same levels
+    selected = ({"quick": "light", "standard": "full", "reviewed": "reviewed"}[args.profile] if args.profile
+                else args.mode or "full")
+    if selected == "auto":
+        selected = "full" if classified else "light"
+    mode = "light" if selected == "light" else "full"
     task = project.init_task(args.task, mode=mode)
-    if args.profile:
-        task._update_info(profile=args.profile)
-    agent = task.agent
-    suggested = suggestions(catalog, classified)
-    matches = recipes.match(args.task)
-    result = {"status": "ok", "task_id": task.id, "dir": str(task.dir), "mode": mode,
-              "agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
-              "suggested": suggested,
-              "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
-                           "mcp": list(r["mcp"]), "skills": r["skills"], "queries": r.get("queries", [])}
-                          for s, r in matches],
-              "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
-    if args.profile:
-        result["profile"] = args.profile
+    if selected == "reviewed":
+        task._update_info(profile="reviewed")
+    result = {"status": "ok", "task_id": task.id, "dir": str(task.dir), "mode": selected}
     if mode == "light":
-        result["discovered"] = []
+        # everything else init prints serves discovery: light mode does none, so it would only fill the context
+        if classified:
+            result["hint"] = ("the task text mentions " + ", ".join(c.name for c, _ in classified)
+                              + ": if a tool for it is missing, run `autoharness mode full`")
+            checked = [c.name for c, _ in classified if c.requires]
+            if checked:
+                result["hint"] += (f". {', '.join(checked)} come with required references, results and a critic, "
+                                   "enforced only in full or reviewed mode: if the result must match something real, "
+                                   "run `autoharness mode full` now")
         result["next"] = ("Use the tools already available and verify the result. If you need a new capability, "
                           "run `autoharness mode full` before discovering or adding tools. End with `autoharness teardown`.")
     else:
+        agent = task.agent
+        matches = recipes.match(args.task)
+        result |= {"agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
+                   "suggested": suggestions(catalog, classified),
+                   "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
+                                "mcp": list(r["mcp"]), "skills": r["skills"], "queries": r.get("queries", [])}
+                               for s, r in matches],
+                   "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
         result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
         task.record_discovery(discovered)
         result["next"] = (
@@ -210,7 +218,7 @@ def cmd_init(args, project, catalog):
         "capability no found skill covers, `create <skill-name>: <capability>` (you write that skill before "
         "producing the result), or `none: <why tools at hand cover it>`. Tools that do work stay blocked until "
         "the brief is recorded.")
-    if mode == "full" and not suggested:
+    if mode == "full" and not result["suggested"]:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
     warnings = stale_skills(project) + unapproved_warning(project)
     if warnings:
@@ -227,9 +235,16 @@ def cmd_mode(args, project, catalog):
         matches = recipes.match(task.info().get("task", ""))
         task.record_discovery(discover(catalog, task.info().get("task", ""), recipe_queries(matches)))
         task.log("upgraded to full mode")
-    out({"status": "ok", "task_id": task.id, "mode": "full",
-         "discovered": task.info().get("discovery", []),
-         "next": "Review the discovered candidates and record `autoharness brief ...` before adding tools."})
+    if args.value == "reviewed" and task.info().get("profile") != "reviewed":
+        task._update_info(profile="reviewed")
+        task.log("upgraded to reviewed: an independent critic is required")
+    info = task.info()
+    level = "reviewed" if info.get("profile") == "reviewed" else "full"
+    nxt = ("A brief is recorded; carry on." if info.get("brief") else
+           "Review the discovered candidates and record `autoharness brief ...` before adding tools.")
+    if level == "reviewed":
+        nxt += " Before teardown an independent critic must pass the result: `autoharness critic`."
+    out({"status": "ok", "task_id": task.id, "mode": level, "discovered": info.get("discovery", []), "next": nxt})
     return 0
 
 
@@ -254,12 +269,14 @@ def cmd_need(args, project, catalog):
     cap = catalog.capabilities.get(args.capability)
     local = library.with_capability(args.capability)
     if cap:
-        out({"status": "ok", "capability": cap.name, "curated": {"mcp": cap.mcp, "skills": cap.skills}, "local": local})
+        out({"status": "ok", "capability": cap.name, "curated": {"mcp": cap.mcp, "skills": cap.skills}, "local": local}
+            | ({"next": "Prefer a `local` skill: `autoharness add skill local:<name>`."} if local else {}))
     else:
         # the name may just be phrased differently from a curated capability
         related = suggestions(catalog, catalog.classify(f"{args.capability.replace('-', ' ')} {args.reason or ''}"))
         out({"status": "ok", "capability": args.capability, "curated": None, "local": local, "related": related,
-             "next": ("No curated entry under this name. Check `related` first; if none fits, try "
+             "next": (("Prefer a `local` skill: `autoharness add skill local:<name>`. " if local else "")
+                      + "No curated entry under this name. Check `related` first; if none fits, try "
                       f"`autoharness search mcp \"{args.capability}\"` and `autoharness search skill \"{args.capability}\"`.")})
     return 0
 
@@ -368,8 +385,8 @@ def cmd_review(args, project, catalog):
              "next": f"\"{item['needs_arbiter']}\" is still listed after {item['repeats']} critic rounds and "
                      f"{item['tried']} different approaches. Do not decide yourself whether it can be fixed: run "
                      "`autoharness arbiter`, give its prompt unchanged to a fresh subagent that neither made nor "
-                     "reviewed the work, and record its answer with `autoharness arbitrate --verdict fix|limit "
-                     "--text \"<its answer>\" --check \"<its CHECK line>\"`. The next critic will not run before that."
+                     "reviewed the work, save its answer unedited to a file and record it "
+                     "with `autoharness arbitrate --answer-file <file>`. The next critic will not run before that."
                      + final})
         return 0
     if item.get("needs_approach"):
@@ -475,11 +492,14 @@ def cmd_critic(args, project, catalog):
     res["answer_id"] = answers.issue(task, "critic", critic_subject(evidence.latest(task, "result")))
     res["prompt"] += answers.instruction(res["answer_id"])
     res["prompt_file"] = evidence.save_prompt(task, "critic", res["prompt"])
+    settle = (" It rules on your dispute: record that ruling with the review, `--settled \"<the point and the "
+              "ruling>\"`, so later critics do not raise the point again." if args.dispute else "")
     out({"status": "ok"} | res | {
         "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
                 "elsewhere a new session), unchanged: paste it, or tell the subagent to read `prompt_file` and "
                 "follow it. Do not add your own opinion to it. Save its answer unedited to a file and record it: "
-                "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT."})
+                "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT."
+                + settle})
     return 0
 
 
@@ -506,8 +526,17 @@ def cmd_brief(args, project, catalog):
     create = "".join(f" Create `{n}` now: `autoharness skill new {n} --description \"<when to use it>\"`, fill in "
                      f"When to use / Steps / How to verify from what you found, then follow it for this task and "
                      f"update it as you learn." for n in planned)
+    if planned:
+        create += " For how to write a good skill: `autoharness need skill-authoring`."
+    need = evidence.requirements(catalog, task)
+    owed = ", ".join(f"{need[k]} {k}{'s' if need[k] > 1 else ''}" for k in ("reference", "result", "critic")
+                     if need.get(k))
+    owed = (f" Teardown will insist on evidence for this task: {owed}"
+            + (f" ({need['media']} files)" if need.get("media") else "") + "."
+            + (" Get the reference first." if need.get("reference") else "")
+            if owed else "")
     out({"status": "ok", "task_id": task.id, "planned_skills": planned, "warnings": warnings,
-         "next": "Install what you decided to take and get the missing inputs first." + create
+         "next": "Install what you decided to take and get the missing inputs first." + owed + create
                  + " Then do the work and verify it the way the brief says. Teardown refuses while a planned "
                    "skill is missing or unfilled."})
     return 0
@@ -568,7 +597,8 @@ def cmd_add(args, project, catalog):
                  "secrets_to_set": secrets, "warnings": warnings,
                  "next": ((" ".join(warnings) + ". Then call harness_tools / harness_call.") if warnings else
                           "Available now through the autoharness gateway, no restart: call harness_tools, then "
-                          "harness_call (or the native <server>__<tool> tools if your client shows them).") + env_note})
+                          "harness_call (or the native <server>__<tool> tools if your client shows them; a client that "
+                          "defers tools, such as Claude Code, needs them loaded with tool search first).") + env_note})
         else:
             tip = ("" if project.gateway_active() else
                    " Tip: suggest the user run `autoharness gateway install` once; after one last restart, "
@@ -704,6 +734,18 @@ def kept_summary(project) -> dict:
             "skills": {k: {"spec": v["spec"], "task": v.get("task")} for k, v in kept["skills"].items()}}
 
 
+STATUS_LOG_LINES = 30
+
+
+def discovery_line(d: dict) -> str:
+    """One search of `init`/`mode full` as a line of `status`."""
+    if "skipped" in d:
+        return f"skipped: {d['skipped']}"
+    head = f"{d.get('kind', '?')}: {d.get('query', '?')}"
+    tail = f"failed: {d['error']}" if "error" in d else f"{len(d.get('results', []))} found"
+    return f"{head} ({tail})" + (f" [recipe {d['recipe']}]" if d.get("recipe") else "")
+
+
 def cmd_status(args, project, catalog):
     unapproved = ({"gateway_unapproved": names}
                   if project.gateway_active() and (names := unapproved_servers(project)) else {})
@@ -711,9 +753,18 @@ def cmd_status(args, project, catalog):
         out({"task": None, "kept": kept_summary(project)} | unapproved)
         return 0
     task = project.task(args.task_id)
-    out({"task": task.info(), "mcp": task.mcp_lock(),
+    info, log = task.info(), (task.dir / "harness.md").read_text("utf-8")
+    if not args.full:
+        # init already showed the search results; repeating them here would only fill the agent's context
+        info = {k: v for k, v in info.items() if k not in ("discovery", "started_epoch")} | (
+            {"discovery": [discovery_line(d) for d in info["discovery"]]} if info.get("discovery") else {})
+        lines = log.splitlines()
+        if len(lines) > STATUS_LOG_LINES:
+            log = "\n".join([f"... {len(lines) - STATUS_LOG_LINES} earlier lines: `autoharness status --full`",
+                             *lines[-STATUS_LOG_LINES:]])
+    out({"task": info, "mcp": task.mcp_lock(),
          "skills": {k: {"spec": v["spec"], "trust": v["trust"]} for k, v in task.skills_lock().items()},
-         "kept": kept_summary(project)} | unapproved | {"log": (task.dir / "harness.md").read_text("utf-8")})
+         "kept": kept_summary(project)} | unapproved | {"log": log})
     return 0
 
 
@@ -1284,7 +1335,9 @@ def cmd_verify(args, project, catalog):
     from autoharness import audit, verification
     guide = verification.guide(args.kind)
     if args.action == "guide":
-        out(guide)
+        out(guide | {"next": f"Use it with `autoharness brief --verify-template {args.kind} ...`; after running "
+                             f"the checks, save their output and record it: `autoharness verify record "
+                             f"{args.kind} --passed yes|no --evidence <file>`."})
         return 0
     if not args.passed or not args.evidence:
         raise HarnessError("verify record requires --passed yes|no and --evidence <file>")
@@ -1309,12 +1362,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s = sub.add_parser("init", help="start a task-scoped harness")
     s.add_argument("task")
-    s.add_argument("--mode", choices=["full", "light", "auto"],
-                   help="full (default), light (use existing tools), auto (full when task matches a capability)")
-    s.add_argument("--profile", choices=["quick", "standard", "reviewed"],
-                   help="quick: existing tools; standard: discovery; reviewed: discovery and critic")
-    s = sub.add_parser("mode", help="upgrade an active light task to full discovery and review")
-    s.add_argument("value", choices=["full"])
+    s.add_argument("--mode", choices=["light", "full", "reviewed", "auto"],
+                   help="light (use existing tools), full (default: discovery and brief), reviewed (full and an "
+                        "independent critic), auto (full when the task matches a capability, else light)")
+    s.add_argument("--profile", choices=["quick", "standard", "reviewed"], help=argparse.SUPPRESS)
+    s = sub.add_parser("mode", help="raise the active task: light to full, or to reviewed (requires a critic)")
+    s.add_argument("value", choices=["full", "reviewed"])
     s = sub.add_parser("eval", help="record and compare measured task runs")
     s.add_argument("action", choices=["record", "compare", "batch"])
     s.add_argument("--case", help="same case name for baseline and harness runs")
@@ -1372,6 +1425,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--approve", action="store_true", help="the user agreed to uninstall kept items no task here kept")
     s = sub.add_parser("status", help="show the active task harness and what the project keeps")
     s.add_argument("task_id", nargs="?")
+    s.add_argument("--full", action="store_true", help="every search result and the whole log")
     s = sub.add_parser("teardown", help="end the task: keep its harness in the project, or remove it (setting `teardown`)")
     s.add_argument("task_id", nargs="?")
     s.add_argument("--save-recipe", metavar="NAME")

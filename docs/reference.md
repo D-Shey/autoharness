@@ -9,9 +9,8 @@
 
 | Команда | Что делает |
 |---|---|
-| `init "<задача>" [--mode full\|light\|auto]` | создаёт задачу; `full` по умолчанию, `light` использует готовые инструменты, `auto` выбирает режим по каталогу |
-| `init "<задача>" --profile quick\|standard\|reviewed` | готовые правила: короткий путь, полный поиск, либо полный поиск с обязательным критиком |
-| `mode full` | переводит лёгкую задачу в полный режим и запускает поиск кандидатов |
+| `init "<задача>" [--mode light\|full\|reviewed\|auto]` | создаёт задачу; `full` по умолчанию, `light` использует готовые инструменты (вывод без каталога и поиска), `reviewed` — полный цикл с обязательным критиком, `auto` выбирает light/full по каталогу; `--profile quick\|standard\|reviewed` — старый синоним |
+| `mode full\|reviewed` | поднимает идущую задачу: лёгкую в полный режим с поиском кандидатов, или любую до обязательного критика |
 | `plan "<задача>"` | то же без побочных эффектов |
 | `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов и свои skills |
 | `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
@@ -29,7 +28,7 @@
 | `review` / `critic` | раунд проверки; промпт для независимого критика |
 | `approach` / `arbiter` / `arbitrate` / `check` | смена подхода к части, которая не проходит review; арбитр и его проверка |
 | `teardown [--keep\|--remove] [--save-recipe NAME --notes ... --query kind:q] [--accepted ...]` | завершает задачу |
-| `status` | текущий harness, что сохранено в проекте, журнал |
+| `status [--full]` | текущий harness, что сохранено в проекте, журнал; по умолчанию сжато (поиск — строка на запрос, лог — последние 30 строк) |
 | `eval record --case NAME --variant baseline\|harness --passed yes\|no [--seconds N] [--task-id ID] [--tokens N] [--cost N] [--tool-calls N]` | сохраняет измерение прогона; завершённая задача задаёт время и статистику CLI |
 | `eval batch --dataset FILE --variant baseline\|harness -- RUNNER [ARGS]` | запускает внешний runner на каждом JSONL случае и записывает измерения |
 | `eval compare` | сравнивает только случаи, у которых есть оба варианта прогона |

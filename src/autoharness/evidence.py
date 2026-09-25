@@ -513,8 +513,8 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
     waiting = pending_arbiter(task)
     if waiting:
         raise HarnessError(f"a loop on \"{waiting}\" outlasted {MAX_APPROACHES} approaches and waits for an "
-                           "arbiter: run `autoharness arbiter`, give its prompt to a fresh subagent, and record "
-                           "the verdict with `autoharness arbitrate --verdict fix|limit --text \"<its answer>\"`")
+                           "arbiter: run `autoharness arbiter`, give its prompt to a fresh subagent, save its answer "
+                           "unedited to a file and record it with `autoharness arbitrate --answer-file <file>`")
     unchecked = pending_check(task)
     if unchecked:
         raise HarnessError(f"the arbiter's fix comes with a check the author has not run: \"{unchecked['check']}\". "

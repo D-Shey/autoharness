@@ -19,12 +19,56 @@ def test_profiles_set_rules_and_reviewed_requires_critic(tmp_path, capsys, monke
     assert run(root, capsys, 'add', 'mcp', 'playwright')[0] == 1
     assert run(root, capsys, 'teardown')[0] == 0
     result = run(root, capsys, 'init', 'review this', '--profile', 'reviewed')[1]
-    assert result['mode'] == 'full' and result['profile'] == 'reviewed'
+    assert result['mode'] == 'reviewed'
     task = Project(root, 'claude').task()
-    assert task.info()['profile'] == 'reviewed'
+    assert task.info()['profile'] == 'reviewed' and task.info()['mode'] == 'full'
     assert run(root, capsys, 'init', 'another', '--mode', 'light', '--profile', 'quick')[0] == 1
     code, incomplete = run(root, capsys, 'teardown')
     assert code == 1 and 'critic' in str(incomplete).lower()
+
+
+def test_one_mode_flag_covers_every_level_and_a_task_can_be_raised(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv('AUTOHARNESS_HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('AUTOHARNESS_OFFLINE', '1')
+    root = tmp_path / 'repo'
+    root.mkdir()
+    light = run(root, capsys, 'init', 'check the page in a real browser', '--mode', 'light')[1]
+    # light mode does no discovery, so init prints none of what discovery needs
+    assert not {'all_capabilities', 'recipes', 'discovered', 'suggested'} & set(light)
+    assert 'browser-automation' in light['hint'] and 'dir' in light
+    raised = run(root, capsys, 'mode', 'reviewed')[1]
+    assert raised['mode'] == 'reviewed' and 'critic' in raised['next']
+    assert run(root, capsys, 'status')[0] == 0   # offline discovery is `skipped`, which status must survive
+    task = Project(root, 'claude').task()
+    assert task.info()['mode'] == 'full' and task.info()['profile'] == 'reviewed'
+    # asking for full afterwards does not quietly drop the critic
+    assert run(root, capsys, 'mode', 'full')[1]['mode'] == 'reviewed'
+    assert run(root, capsys, 'teardown')[0] == 1   # reviewed: a critic is still missing
+    assert run(root, capsys, 'teardown', '--force')[0] == 0
+    assert run(root, capsys, 'init', 'review this', '--mode', 'reviewed')[1]['mode'] == 'reviewed'
+    assert Project(root, 'claude').task().info()['profile'] == 'reviewed'
+
+
+def test_status_is_compact_unless_asked_for_everything(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv('AUTOHARNESS_HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('AUTOHARNESS_OFFLINE', '1')
+    root = tmp_path / 'repo'
+    root.mkdir()
+    assert run(root, capsys, 'init', 'a task')[0] == 0
+    task = Project(root, 'claude').task()
+    task.record_discovery([{'kind': 'skill', 'query': 'svg', 'results': [{'name': f's{i}'} for i in range(5)]}])
+    for i in range(40):
+        task.log(f'step {i}')
+    short = run(root, capsys, 'status')[1]
+    assert short['task']['discovery'] == ['skill: svg (5 found)']
+    assert 'step 39' in short['log'] and 'step 0\n' not in short['log'] and 'status --full' in short['log']
+    task.record_discovery([{'skipped': 'offline'},
+                           {'kind': 'mcp', 'query': 'browser', 'error': 'timeout', 'recipe': 'web'}])
+    assert run(root, capsys, 'status')[1]['task']['discovery'] == [
+        'skipped: offline', 'mcp: browser (failed: timeout) [recipe web]']
+    task.record_discovery([{'kind': 'skill', 'query': 'svg', 'results': [{'name': f's{i}'} for i in range(5)]}])
+    full = run(root, capsys, 'status', '--full')[1]
+    assert full['task']['discovery'][0]['results'][4]['name'] == 's4' and 'step 0\n' in full['log']
 
 
 def test_audit_records_decisions_install_and_removal(tmp_path, capsys, monkeypatch):

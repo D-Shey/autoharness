@@ -28,7 +28,7 @@ def test_light_init_skips_discovery_and_brief_and_can_upgrade(project, capsys, m
     monkeypatch.setattr(module, 'discover', lambda *a, **k: pytest.fail('light mode searched registries'))
     code, created = run(project, capsys, 'init', '--mode', 'light', 'fix a typo')
     assert code == 0 and created['mode'] == 'light'
-    assert created['discovered'] == []
+    assert 'discovered' not in created and 'all_capabilities' not in created
     assert project.task().info()['mode'] == 'light'
     code, denied = run(project, capsys, 'add', 'mcp', 'playwright')
     assert code == 1 and 'mode full' in denied['error']
