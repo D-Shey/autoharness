@@ -611,7 +611,8 @@ Tag each one:
   or minor (polish, or detail beyond the target fidelity);
 - fixable or not within the user's constraints and the medium.
 Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up.
-Do not praise, do not soften, do not suggest changing the constraints.
+Give each difference the severity it has, without praise: the task may end once the worst fixable one is
+minor. Do not suggest changing the constraints.
 {previous}
 End with exactly one line naming the worst severity among the FIXABLE differences:
 VERDICT: blocker | major | minor | none"""

@@ -24,13 +24,23 @@ INSTRUCTIONS = ("Servers added with `autoharness add mcp` appear here without a 
                 "tools named <server>__<tool>, you can call those directly.")
 META_TOOLS = [
     {"name": "harness_tools",
-     "description": "List MCP servers autoharness added for this task and their tools (with input schemas). "
-                    "Call this after `autoharness add mcp`.",
-     "inputSchema": {"type": "object", "properties": {"server": {"type": "string"}}}},
+     "description": "List the MCP servers autoharness added for this task: each server's status (running, or the "
+                    "error that stopped it) and its tools with their input schemas and, where the client shows "
+                    "them, their native <server>__<tool> names. Call it after `autoharness add mcp`, and when "
+                    "harness_call reports an unknown server or tool. It lists only servers added through "
+                    "autoharness, not other MCP servers the client already has.",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string", "description": "Only this server; omit to list all of them."}}}},
     {"name": "harness_call",
-     "description": "Call a tool of an MCP server autoharness added: harness_call(server, tool, arguments).",
-     "inputSchema": {"type": "object", "properties": {"server": {"type": "string"}, "tool": {"type": "string"},
-                                                      "arguments": {"type": "object"}},
+     "description": "Call one tool on an MCP server autoharness added and return that tool's own result unchanged. "
+                    "Take `server` and `tool` from harness_tools and pass `arguments` that match the tool's input "
+                    "schema. A server whose process exited is restarted once; an unknown server, a server that "
+                    "could not start, or the tool's own failure comes back as an error result that names the "
+                    "cause. Calling <server>__<tool> directly, where the client shows it, does the same.",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string", "description": "Server name as harness_tools lists it."},
+         "tool": {"type": "string", "description": "Tool name on that server (not the <server>__<tool> name)."},
+         "arguments": {"type": "object", "description": "The tool's arguments, per its input schema."}},
                      "required": ["server", "tool"]}},
 ]
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
