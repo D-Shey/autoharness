@@ -98,15 +98,15 @@
   },
   "mcp_servers": {
     "playwright": {
-      "config": {"command": "npx", "args": ["-y", "@playwright/mcp@latest"]},
+      "config": {"command": "npx", "args": ["-y", "@playwright/mcp@0.0.82"]},
       "permissions": {"network": "any", "filesystem": "write-temp", "shell": false, "secrets": []}
     },
     "chrome-devtools": {
-      "config": {"command": "npx", "args": ["-y", "chrome-devtools-mcp@latest"]},
+      "config": {"command": "npx", "args": ["-y", "chrome-devtools-mcp@1.10.1"]},
       "permissions": {"network": "any", "filesystem": "write-temp", "shell": false, "secrets": []}
     },
     "context7": {
-      "config": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+      "config": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@4.1.1"]},
       "permissions": {"network": "context7.com", "filesystem": "none", "shell": false, "secrets": []}
     },
     "github": {
@@ -114,11 +114,11 @@
       "permissions": {"network": "api.githubcopilot.com", "filesystem": "none", "shell": false, "secrets": ["GITHUB_PERSONAL_ACCESS_TOKEN"]}
     },
     "postgres": {
-      "config": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-postgres", "${POSTGRES_URL}"]},
+      "config": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-postgres@0.6.2", "${POSTGRES_URL}"]},
       "permissions": {"network": "database-host", "filesystem": "none", "shell": false, "secrets": ["POSTGRES_URL"]}
     },
     "fetch": {
-      "config": {"command": "uvx", "args": ["mcp-server-fetch"]},
+      "config": {"command": "uvx", "args": ["mcp-server-fetch==2026.8.18"]},
       "permissions": {"network": "any", "filesystem": "none", "shell": false, "secrets": []}
     }
   },

@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from autoharness import agents, approvals
+from autoharness import agents, approvals, transactions
 from autoharness.agents import Agent, AgentError
 from autoharness.trust import ScanFinding, is_blocking, scan_skill
 
@@ -179,7 +179,7 @@ def npx_stage_skill(repo: str, skill: str, stage_dir: Path) -> Path:
     npx = shutil.which("npx")
     if not npx:
         raise HarnessError("npx not found; install Node.js to add skills")
-    cmd = [npx, "-y", "skills", "add", repo, "--skill", skill, "-a", "claude-code", "-y", "--copy"]
+    cmd = [npx, "-y", "skills@1.7.0", "add", repo, "--skill", skill, "-a", "claude-code", "-y", "--copy"]
     proc = subprocess.run(cmd, cwd=stage_dir, capture_output=True, text=True, timeout=300,
                           stdin=subprocess.DEVNULL)
     target = stage_dir / ".claude" / "skills" / skill
@@ -289,13 +289,43 @@ class Project:
         path = agent.mcp_path(self.root)
         if not path.exists():
             reg.setdefault("created_config", {})[agent.name] = {"dir": not path.parent.exists()}
+        native = agent.translate(server)[0]
+        if agent.name == "codex":
+            native["env_vars"] = self._gateway_env(reg)
         try:
-            store.add(GATEWAY_NAME, agent.translate(server)[0])
+            rendered = store.preview_add(GATEWAY_NAME, native)
         except AgentError as e:
             raise HarnessError(str(e)) from e
         if agent.name not in reg["installed"]:
             reg["installed"].append(agent.name)
-        self.save_gateway_registry(reg)
+        ensure_state_dir(self.state)
+        transactions.commit(self.root, {
+            path: rendered, self.state / "gateway.json": json.dumps(reg, indent=2) + "\n"})
+
+    def _gateway_env(self, registry: dict) -> list[str]:
+        names = {"AUTOHARNESS_HOME", "AUTOHARNESS_GATEWAY_TIMEOUT"}
+        for name, cfg in registry["servers"].items():
+            if approvals.approved(self.root, name, cfg):
+                names.update(agents.ENV_REF.findall(json.dumps(cfg)))
+        return sorted(names)
+
+    def codex_gateway_update(self, registry: dict) -> tuple[dict, list[str]]:
+        if "codex" not in registry.get("installed", []):
+            return {}, []
+        store = agents.get("codex").mcp_store(self.root)
+        native = store._parse(store._text()).get("mcp_servers", {}).get(GATEWAY_NAME)
+        if native is None:
+            return {}, ["Codex gateway is listed in the registry but absent from .codex/config.toml; "
+                        "run `autoharness --agent codex gateway install` in this project"]
+        old = native.get("env_vars", [])
+        names = self._gateway_env(registry)
+        added = sorted(set(names) - {v for v in old if isinstance(v, str)})
+        if not added:
+            return {}, []
+        native["env_vars"] = old + added
+        return {store.path: store.preview_add(GATEWAY_NAME, native)}, [
+            f"Restart Codex to forward new gateway environment variables: {', '.join(added)}; "
+            "the running gateway cannot receive new environment variables without a restart"]
 
     def uninstall_gateway(self) -> None:
         agent, reg = self.agent, self.gateway_registry()
@@ -327,13 +357,14 @@ class Project:
             raise HarnessError(f"task {task_id} targets {t.agent.name}, not {self.agent_name}")
         return t
 
-    def init_task(self, text: str) -> "Task":
+    def init_task(self, text: str, mode: str = "full") -> "Task":
         if (active := self.active_id()) and Task(self, active).info().get("status") == "active":
             raise HarnessError(f"task {active} is still active; run `autoharness teardown` first")
         task_id = time.strftime("%Y%m%d-%H%M%S") + "-" + hashlib.sha1(text.encode()).hexdigest()[:6]
         approvals.note_task(self.root, task_id)   # first: if the record cannot be written, nothing starts
         t = Task(self, task_id)
         _write_json(t.dir / "task.json", {"id": task_id, "task": text, "agent": self.agent.name, "status": "active",
+                                          "mode": mode, "started_epoch": time.time(),
                                           "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "capabilities": []})
         _write_json(t.dir / "mcp.lock.json", {})
         _write_json(t.dir / "skills.lock.json", {})
@@ -437,8 +468,15 @@ class Task:
 
     def add_mcp(self, name: str, config: dict, *, source: str, trust: dict, permissions: dict,
                 direct: bool = False) -> list[str]:
+        with transactions.locked(self.project.root):
+            transactions.recover(self.project.root)
+            return self._add_mcp(name, config, source=source, trust=trust,
+                                 permissions=permissions, direct=direct)
+
+    def _add_mcp(self, name: str, config: dict, *, source: str, trust: dict, permissions: dict,
+                 direct: bool = False) -> list[str]:
         """Add an MCP server: through the gateway when it is installed and can run it, else into the
-        agent's MCP file. Returns translation warnings (always empty through the gateway)."""
+        agent's MCP file. Returns translation or gateway environment restart warnings."""
         agent = self.agent
         store = agent.mcp_store(self.project.root)
         path = agent.mcp_path(self.project.root)
@@ -453,30 +491,49 @@ class Task:
         if not direct and proxyable(config) and self.project.gateway_active():
             approvals.approve(self.project.root, name, config)  # the user approved it for `add`
             registry["servers"][name] = config
-            self.project.save_gateway_registry(registry)
             lock[name] = {"config": config, "source": source, "trust": trust, "agent": agent.name, "via": "gateway",
                           "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            _write_json(self.dir / "mcp.lock.json", lock)
-            self._grant(f"mcp:{name}", permissions)
+            extra, warnings = self.project.codex_gateway_update(registry)
+            self._commit_mcp(name, lock, permissions, {
+                self.project.state / "gateway.json": json.dumps(registry, indent=2) + "\n", **extra})
+            self._audit_install_mcp(name, config, source)
             self.log(f"added MCP `{name}` through the gateway from {source} (trust {trust.get('level')}, {trust.get('score')})")
-            return []
+            return warnings
         created = self.info().get("created_mcp_config", {})
         if not path.exists() and agent.name not in created:
             created[agent.name] = {"dir": not path.parent.exists()}
-            self._update_info(created_mcp_config=created)
         native, warnings = agent.translate(config)
         try:
-            store.add(name, native)
+            rendered = store.preview_add(name, native)
         except AgentError as e:
             raise HarnessError(str(e)) from e
         lock[name] = {"config": config, "source": source, "trust": trust, "agent": agent.name,
                       "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
-        _write_json(self.dir / "mcp.lock.json", lock)
-        self._grant(f"mcp:{name}", permissions)
+        info = self.info() | {"created_mcp_config": created}
+        self._commit_mcp(name, lock, permissions, {
+            path: rendered, self.dir / "task.json": json.dumps(info, indent=2, ensure_ascii=False) + "\n"})
+        self._audit_install_mcp(name, config, source)
         self.log(f"added MCP `{name}` to {agent.mcp_file} from {source} (trust {trust.get('level')}, {trust.get('score')})")
         for w in warnings:
             self.log(f"warning for `{name}`: {w}")
         return warnings
+
+    def _commit_mcp(self, name, lock, permissions, updates):
+        grants = _read_json(self.dir / "permissions.json", {})
+        grants[f"mcp:{name}"] = permissions
+        info_path = self.dir / "task.json"
+        info = json.loads(updates[info_path]) if info_path in updates else self.info()
+        info["mcp_seen"] = sorted(set(info.get("mcp_seen", [])) | {name})
+        updates[info_path] = json.dumps(info, indent=2, ensure_ascii=False) + "\n"
+        updates[self.dir / "mcp.lock.json"] = json.dumps(lock, indent=2, ensure_ascii=False) + "\n"
+        updates[self.dir / "permissions.json"] = json.dumps(grants, indent=2, ensure_ascii=False) + "\n"
+        transactions.commit(self.project.root, updates)
+
+    def _audit_install_mcp(self, name: str, config: dict, source: str) -> None:
+        from autoharness import audit
+        fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        audit.append(self, "install", kind="mcp", name=name, source=source,
+                     version=config.get("version"), fingerprint=fingerprint)
 
     def _require_here(self) -> None:
         """Uninstall what the lockfiles name only for a task started on this machine: a commit can add them."""
@@ -487,7 +544,7 @@ class Task:
                                "`autoharness remove mcp|skill <name> --approve` removes its items one at a time "
                                "(or `autoharness prune --approve` everything kept)")
 
-    def remove_mcp(self, name: str) -> None:
+    def remove_mcp(self, name: str, reason: str = "requested") -> None:
         self._require_here()
         lock = self.mcp_lock()
         if name not in lock:
@@ -498,6 +555,8 @@ class Task:
             _uninstall_mcp(self.project.root, self.agent, name, self._created_mcp_config())
         del lock[name]
         _write_json(self.dir / "mcp.lock.json", lock)
+        from autoharness import audit
+        audit.append(self, "remove", kind="mcp", name=name, reason=reason)
         self.log(f"removed MCP `{name}`")
 
     # --- skills --------------------------------------------------------------
@@ -536,11 +595,15 @@ class Task:
         lock[skill] = {"spec": spec, "sha256": _hash_dir(dest), "trust": trust,
                        "findings": [f.__dict__ for f in findings], "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
         _write_json(self.dir / "skills.lock.json", lock)
+        self._update_info(skills_seen=sorted(set(self.info().get("skills_seen", [])) | {skill}))
+        from autoharness import audit
+        audit.append(self, "install", kind="skill", name=skill, source=spec,
+                     version=None, fingerprint=lock[skill]["sha256"])
         self._grant(f"skill:{skill}", {"runs_with": "full agent permissions", "scan_findings": len(findings)})
         self.log(f"added skill `{spec}` ({len(findings)} scan findings)")
         return findings
 
-    def remove_skill(self, skill: str) -> None:
+    def remove_skill(self, skill: str, reason: str = "requested") -> None:
         self._require_here()
         lock = self.skills_lock()
         if skill not in lock:
@@ -549,6 +612,8 @@ class Task:
             self.log(f"skill `{skill}` was modified after install; kept a backup")
         del lock[skill]
         _write_json(self.dir / "skills.lock.json", lock)
+        from autoharness import audit
+        audit.append(self, "remove", kind="skill", name=skill, reason=reason)
         self.log(f"removed skill `{skill}`")
 
     def new_skill(self, name: str, description: str) -> Path:
@@ -569,6 +634,10 @@ class Task:
                       "trust": {"level": "high", "score": 100}, "findings": [],
                       "added": time.strftime("%Y-%m-%dT%H:%M:%S")}
         _write_json(self.dir / "skills.lock.json", lock)
+        self._update_info(skills_seen=sorted(set(self.info().get("skills_seen", [])) | {name}))
+        from autoharness import audit
+        audit.append(self, "install", kind="skill", name=name, source="generated",
+                     version=None, fingerprint=lock[name]["sha256"])
         self.log(f"created skill `{name}`")
         return dest
 
@@ -624,9 +693,9 @@ class Task:
                 self.log(f"skill `{skill}` was never saved to the library; copied to {backups[skill]}")
             removed = {"mcp": list(self.mcp_lock()), "skills": list(self.skills_lock())}
             for name in removed["mcp"]:
-                self.remove_mcp(name)
+                self.remove_mcp(name, reason="teardown")
             for skill in removed["skills"]:
-                self.remove_skill(skill)
+                self.remove_skill(skill, reason="teardown")
             result = {"removed": removed, "kept": nothing}
         else:
             raise HarnessError(f"unknown teardown policy {policy!r}")
@@ -634,7 +703,11 @@ class Task:
             result["unsaved_generated"] = [{"name": s, "backup": str(backups[s]) if s in backups else None}
                                            for s in unsaved]
         self._update_info(status="kept" if policy == "keep" else "torn-down",
-                          finished=time.strftime("%Y-%m-%dT%H:%M:%S"))
+                          mcp_installed=sorted(set(self.info().get("mcp_seen", [])) |
+                                               set(result["kept"]["mcp"] + result["removed"]["mcp"])),
+                          skills_installed=sorted(set(self.info().get("skills_seen", [])) |
+                                                  set(result["kept"]["skills"] + result["removed"]["skills"])),
+                          finished=time.strftime("%Y-%m-%dT%H:%M:%S"), finished_epoch=time.time())
         self.log(f"teardown complete (policy: {policy})")
         approvals.forget_task(self.project.root, self.id)   # nothing left to uninstall through its lockfiles
         active = self.project.state / "active"

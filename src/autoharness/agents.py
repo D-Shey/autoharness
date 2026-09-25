@@ -28,6 +28,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 
 class AgentError(Exception):
     pass
@@ -134,9 +139,12 @@ class JsonMcpStore:
         return name in _read_json_file(self.path).get("mcpServers", {})
 
     def add(self, name: str, native: dict) -> None:
+        _write_text(self.path, self.preview_add(name, native))
+
+    def preview_add(self, name: str, native: dict) -> str:
         data = _read_json_file(self.path)
         data.setdefault("mcpServers", {})[name] = native
-        _write_text(self.path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
     def remove(self, name: str, *, created_file: bool, created_dir: bool) -> None:
         data = _read_json_file(self.path)
@@ -183,23 +191,54 @@ class TomlMcpStore:
         return re.compile(rf"^# >>> autoharness:{re.escape(name)}\n.*?^# <<< autoharness:{re.escape(name)}\n?",
                           re.M | re.S)
 
+    def _without_block(self, text: str, name: str) -> str:
+        def remove(match: re.Match) -> str:
+            # A real block starts between complete TOML statements. A marker
+            # inside a multiline string (or unfinished array) is user content.
+            try:
+                tomllib.loads(text[:match.start()])
+            except tomllib.TOMLDecodeError:
+                return match.group(0)
+            return ""
+        return self._block_re(name).sub(remove, text)
+
     def has(self, name: str) -> bool:
-        key = re.escape(name) + "|" + re.escape(json.dumps(name))
-        return re.search(rf"^\s*\[mcp_servers\.(?:{key})\s*[\].]", self._text(), re.M) is not None
+        return name in self._parse(self._text()).get("mcp_servers", {})
+
+    def _parse(self, text: str) -> dict:
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as e:
+            raise AgentError(f"{self.path} is not valid TOML ({e}); not changing it") from e
+        if not isinstance(data.get("mcp_servers", {}), dict):
+            raise AgentError(f"{self.path}: mcp_servers must be a TOML table")
+        return data
 
     def add(self, name: str, native: dict) -> None:
+        _write_text(self.path, self.preview_add(name, native))
+
+    def preview_add(self, name: str, native: dict) -> str:
+        original = self._text()
+        self._parse(original)
+        text = self._without_block(original, name)
+        if name in self._parse(text).get("mcp_servers", {}):
+            raise AgentError(f"MCP server {name!r} already exists outside an autoharness block")
         body = "\n".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in native.items())
         block = (f"# >>> autoharness:{name}\n[mcp_servers.{_toml_key(name)}]\n{body}\n"
                  f"# <<< autoharness:{name}\n")
-        text = self._block_re(name).sub("", self._text())
         if text and not text.endswith("\n"):
             text += "\n"
-        _write_text(self.path, text + ("\n" if text.strip() else "") + block)
+        result = text + ("\n" if text.strip() else "") + block
+        self._parse(result)
+        return result
 
     def remove(self, name: str, *, created_file: bool, created_dir: bool) -> None:
         if not self.path.exists():
             return
-        text = self._block_re(name).sub("", self._text()).rstrip("\n")
+        original = self._text()
+        self._parse(original)
+        text = self._without_block(original, name).rstrip("\n")
+        self._parse(text)
         if created_file and not text.strip():
             _cleanup(self.path, created_dir)
         else:

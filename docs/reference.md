@@ -9,22 +9,30 @@
 
 | Команда | Что делает |
 |---|---|
-| `init "<задача>"` | создаёт task-окружение, подсказывает capabilities, recipes и находки из реестров |
+| `init "<задача>" [--mode full\|light\|auto]` | создаёт задачу; `full` по умолчанию, `light` использует готовые инструменты, `auto` выбирает режим по каталогу |
+| `init "<задача>" --profile quick\|standard\|reviewed` | готовые правила: короткий путь, полный поиск, либо полный поиск с обязательным критиком |
+| `mode full` | переводит лёгкую задачу в полный режим и запускает поиск кандидатов |
 | `plan "<задача>"` | то же без побочных эффектов |
 | `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов и свои skills |
 | `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
 | `inspect mcp\|skill <name>` | подробный trust-отчёт; для MCP ещё `egress` — куда сервер может ходить |
-| `brief --goal ... --constraints ... [--review critic]` | план задачи: цель, входы, ограничения, проверка, вердикты по кандидатам |
+| `brief --goal ... --constraints ... [--verify ... \| --verify-template browser\|api\|logs\|database] [--review critic]` | план задачи: цель, входы, ограничения, проверка, вердикты по кандидатам |
+| `verify guide browser\|api\|logs\|database` | шаги и ожидаемые доказательства типовой проверки |
+| `verify record KIND --passed yes\|no --evidence FILE` | сохраняет исход проверки и файл доказательства |
+| `decision mcp\|skill NAME select\|skip --reason TEXT` / `audit [TASK_ID]` | причина выбора и структурированный журнал решений |
 | `vet mcp\|skill <name> [--answer-file F]` | промпт для независимой проверки кандидата против ограничений; запись ответа |
 | `add mcp <name>` / `add skill owner/repo@skill` | ставит в MCP-конфиг (или gateway) и папку skills агента, пишет в lockfile |
 | `add mcp <name> --direct` | мимо gateway, сразу в конфиг агента |
-| `remove mcp\|skill <name>` | снимает то, что поставила эта задача или сохранила в проекте прошлая |
+| `remove mcp\|skill <name> [--reason TEXT]` | снимает то, что поставила эта задача или сохранила в проекте прошлая; причина удаления текущей задачи попадает в audit |
 | `prune` | снимает всё, что прошлые задачи сохранили в проекте |
 | `evidence add <file> --kind reference\|result` / `evidence diff [--base REV]` | референс или результат раунда; для кода — весь diff |
 | `review` / `critic` | раунд проверки; промпт для независимого критика |
 | `approach` / `arbiter` / `arbitrate` / `check` | смена подхода к части, которая не проходит review; арбитр и его проверка |
 | `teardown [--keep\|--remove] [--save-recipe NAME --notes ... --query kind:q] [--accepted ...]` | завершает задачу |
 | `status` | текущий harness, что сохранено в проекте, журнал |
+| `eval record --case NAME --variant baseline\|harness --passed yes\|no [--seconds N] [--task-id ID] [--tokens N] [--cost N] [--tool-calls N]` | сохраняет измерение прогона; завершённая задача задаёт время и статистику CLI |
+| `eval batch --dataset FILE --variant baseline\|harness -- RUNNER [ARGS]` | запускает внешний runner на каждом JSONL случае и записывает измерения |
+| `eval compare` | сравнивает только случаи, у которых есть оба варианта прогона |
 | `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
 | `recipe list\|match\|show` | сохранённые наборы; `show` перезапускает запросы recipe и отдаёт новое в `fresh` |
 | `config get\|set [teardown keep\|remove \| allowed_hosts "<хосты>"] [--global]` | настройки |
@@ -36,7 +44,8 @@
 
 | Путь | Что там |
 |---|---|
-| `.autoharness/tasks/<id>/` | состояние задачи: `task.json`, `mcp.lock.json`, `skills.lock.json`, `permissions.json`, `harness.md`, evidence, ответы проверяющих |
+| `.autoharness/tasks/<id>/` | состояние задачи: `task.json`, lockfiles, `harness.md`, `events.jsonl`, `decisions.jsonl`, evidence, ответы проверяющих |
+| `.autoharness/evals.jsonl` | измерения прогонов; локальный файл, игнорируется Git |
 | `.autoharness/kept.json`, `config.json`, `gateway.json` | что осталось в проекте, настройки проекта, серверы gateway; их можно коммитить (`.autoharness/.gitignore` пропускает только их), остальное состояние в git не попадает |
 | `.autoharness/gateway.log` | лог gateway |
 | `~/.autoharness/` | `recipes/`, библиотека своих skills `skills/`, глобальный `config.json`, одобрения gateway (`AUTOHARNESS_HOME` переопределяет) |

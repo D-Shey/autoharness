@@ -174,20 +174,35 @@ def cmd_plan(args, project, catalog):
 
 
 def cmd_init(args, project, catalog):
-    task = project.init_task(args.task)
+    if args.profile and args.mode:
+        raise HarnessError("use either --profile or --mode, not both")
+    classified = catalog.classify(args.task)
+    profiles = {"quick": "light", "standard": "full", "reviewed": "full"}
+    selected = profiles[args.profile] if args.profile else (args.mode or "full")
+    mode = ("full" if classified else "light") if selected == "auto" else selected
+    task = project.init_task(args.task, mode=mode)
+    if args.profile:
+        task._update_info(profile=args.profile)
     agent = task.agent
-    suggested = suggestions(catalog, catalog.classify(args.task))
+    suggested = suggestions(catalog, classified)
     matches = recipes.match(args.task)
-    result = {"status": "ok", "task_id": task.id, "dir": str(task.dir),
+    result = {"status": "ok", "task_id": task.id, "dir": str(task.dir), "mode": mode,
               "agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
               "suggested": suggested,
               "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
                            "mcp": list(r["mcp"]), "skills": r["skills"], "queries": r.get("queries", [])}
                           for s, r in matches],
               "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
-    result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
-    task.record_discovery(discovered)
-    result["next"] = (
+    if args.profile:
+        result["profile"] = args.profile
+    if mode == "light":
+        result["discovered"] = []
+        result["next"] = ("Use the tools already available and verify the result. If you need a new capability, "
+                          "run `autoharness mode full` before discovering or adding tools. End with `autoharness teardown`.")
+    else:
+        result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
+        task.record_discovery(discovered)
+        result["next"] = (
         "Read `discovered`: these skills and MCP servers were found for this task. Search more with "
         "`autoharness search mcp|skill \"<query>\"` where it falls short. Then record "
         "`autoharness brief --goal ... --inputs ... --constraints ... --verify ... --candidates ...`, "
@@ -195,13 +210,26 @@ def cmd_init(args, project, catalog):
         "capability no found skill covers, `create <skill-name>: <capability>` (you write that skill before "
         "producing the result), or `none: <why tools at hand cover it>`. Tools that do work stay blocked until "
         "the brief is recorded.")
-    if not suggested:
+    if mode == "full" and not suggested:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
     warnings = stale_skills(project) + unapproved_warning(project)
     if warnings:
         result["warnings"] = warnings
         result["next"] = "First tell the user: " + "; ".join(warnings) + ". Then: " + result["next"]
     out(result)
+    return 0
+
+
+def cmd_mode(args, project, catalog):
+    task = project.task()
+    if task.info().get("mode", "full") == "light":
+        task._update_info(mode="full")
+        matches = recipes.match(task.info().get("task", ""))
+        task.record_discovery(discover(catalog, task.info().get("task", ""), recipe_queries(matches)))
+        task.log("upgraded to full mode")
+    out({"status": "ok", "task_id": task.id, "mode": "full",
+         "discovered": task.info().get("discovery", []),
+         "next": "Review the discovered candidates and record `autoharness brief ...` before adding tools."})
     return 0
 
 
@@ -456,7 +484,11 @@ def cmd_critic(args, project, catalog):
 
 
 def cmd_brief(args, project, catalog):
+    from autoharness import verification
     task = project.task()
+    if bool(args.verify) == bool(args.verify_template):
+        raise HarnessError("brief requires either --verify or --verify-template")
+    verify = verification.guide(args.verify_template)["brief_verify"] if args.verify_template else args.verify
     planned = list(dict.fromkeys(CREATE_RE.findall(args.gaps)))
     if not planned and not args.gaps.strip().lower().startswith("none"):
         raise HarnessError("--gaps must name each skill you will create (`create <skill-name>: <capability>`) "
@@ -464,7 +496,8 @@ def cmd_brief(args, project, catalog):
     for name in planned:
         library.validate_name(name)
     task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
-                       "verify": args.verify, "candidates": args.candidates, "gaps": args.gaps}
+                       "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
+                      | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
                       | ({"fidelity": args.fidelity} if args.fidelity else {}))
     task._update_info(planned_skills=planned)
@@ -499,6 +532,8 @@ def already_kept(project, kind: str, name: str) -> int:
 
 def cmd_add(args, project, catalog):
     task = project.task()
+    if task.info().get("mode", "full") == "light":
+        raise HarnessError("adding tools requires full mode; run `autoharness mode full` first")
     if args.kind == "mcp" and (args.as_name or local_mcp_name(args.name)) in project.kept()["mcp"]:
         return already_kept(project, "mcp", args.as_name or local_mcp_name(args.name))
     if args.kind == "skill" and parse_skill_spec(args.name)[1] in project.kept()["skills"]:
@@ -530,9 +565,10 @@ def cmd_add(args, project, catalog):
         env_note = (f" The user must set env vars: {', '.join(secrets)} (visible to the agent process)." if secrets else "")
         if task.mcp_lock()[local].get("via") == "gateway":
             out({"status": "ok", "added": local, "agent": agent.name, "via": "gateway", "file": ".autoharness/gateway.json",
-                 "secrets_to_set": secrets,
-                 "next": "Available now through the autoharness gateway, no restart: call harness_tools, then "
-                         "harness_call (or the native <server>__<tool> tools if your client shows them)." + env_note})
+                 "secrets_to_set": secrets, "warnings": warnings,
+                 "next": ((" ".join(warnings) + ". Then call harness_tools / harness_call.") if warnings else
+                          "Available now through the autoharness gateway, no restart: call harness_tools, then "
+                          "harness_call (or the native <server>__<tool> tools if your client shows them).") + env_note})
         else:
             tip = ("" if project.gateway_active() else
                    " Tip: suggest the user run `autoharness gateway install` once; after one last restart, "
@@ -630,9 +666,9 @@ def cmd_remove(args, project, catalog):
     """Remove from the active task if it added this, else from what earlier tasks kept in the project."""
     task = project.task() if project.active_id() else None
     if task and args.kind == "mcp" and args.name in task.mcp_lock():
-        task.remove_mcp(args.name)
+        task.remove_mcp(args.name, reason=args.reason or "requested")
     elif task and args.kind == "skill" and args.name in task.skills_lock():
-        task.remove_skill(args.name)
+        task.remove_skill(args.name, reason=args.reason or "requested")
     else:
         result = project.remove_kept("mcp" if args.kind == "mcp" else "skills", args.name, approved=args.approve)
         if "approval_required" in result:
@@ -697,7 +733,8 @@ def cmd_teardown(args, project, catalog):
                     if v["spec"].startswith("local:") and not library.exists(parse_skill_spec(v["spec"])[1])]
     info = task.info()
     blocking, skill_warnings = task.planned_skill_problems()
-    blocking += evidence.problems(catalog, task)
+    if info.get("mode", "full") == "full" or info.get("brief", {}).get("review") == "critic" or info.get("profile") == "reviewed":
+        blocking += evidence.problems(catalog, task)
     if blocking and args.accepted:
         task._update_info(accepted_by_user=args.accepted)
         task.log(f"user accepted the result as it is: {args.accepted}")
@@ -743,8 +780,8 @@ def cmd_gateway(args, project, catalog):
         return serve(project.root)
     agent = project.agent
     if args.action == "install":
-        server = ({"command": "autoharness", "args": ["gateway", "serve"]} if shutil.which("autoharness")
-                  else {"command": sys.executable, "args": ["-m", "autoharness", "gateway", "serve"]})
+        server = {"command": sys.executable, "args": ["-m", "autoharness", "--project", str(project.root),
+                                                       "gateway", "serve"]}
         project.install_gateway(server)
         out({"status": "ok", "installed": agent.name, "file": agent.mcp_file, "config": server,
              "next": f"One last restart: ask the user to {agent.reload_hint}. After that, servers added with "
@@ -793,8 +830,12 @@ def gateway_approve(args, project) -> int:
         return EXIT_APPROVAL
     for name, server in chosen.items():
         approvals.approve(project.root, name, server)
-    out({"status": "ok", "approved": sorted(chosen),
-         "next": "The gateway starts them within a second; check with harness_tools."})
+    updates, warnings = project.codex_gateway_update(project.gateway_registry())
+    if updates:
+        from autoharness import transactions
+        transactions.commit(project.root, updates)
+    out({"status": "ok", "approved": sorted(chosen), "warnings": warnings,
+         "next": " ".join(warnings) if warnings else "The gateway starts them within a second; check with harness_tools."})
     return 0
 
 
@@ -823,6 +864,8 @@ def cmd_skill(args, project, catalog):
         out({"status": "ok", "deleted": args.name, "note": "copies already installed in projects are untouched"})
         return 0
     if args.action == "new":
+        if project.task().info().get("mode", "full") == "light":
+            raise HarnessError("creating skills requires full mode; run `autoharness mode full` first")
         if not args.description:
             raise HarnessError("skill new needs --description: when should an agent use this skill?")
         path = project.task().new_skill(args.name, args.description)
@@ -1088,11 +1131,18 @@ def cmd_hook(args, project, catalog):
         data = json.loads(sys.stdin.read() or "{}")
         event = data.get("hook_event_name", "UserPromptSubmit")
         sid = str(data.get("session_id") or "")
-        state = session_state(sid).get("state") if sid else None
+        saved_state = session_state(sid) if sid else {}
+        state = saved_state.get("state")
         active = project.active_id()
-        if active and Task(project, active).info().get("brief") and sid and state != "done":
-            set_session_state(sid, state="done", via="brief")
-            state = "done"
+        task_info = Task(project, active).info() if active else {}
+        if active and sid and state != "waived":
+            ready = task_info.get("mode") == "light" or bool(task_info.get("brief"))
+            wanted = "done" if ready else "pending"
+            if state != wanted or saved_state.get("task_id") != active:
+                set_session_state(sid, state=wanted, task_id=active,
+                                  via=("light" if task_info.get("mode") == "light" else
+                                       "brief" if ready else "waiting"))
+                state = wanted
         if event == "UserPromptSubmit":
             if state in ("done", "waived") or active:
                 return 0
@@ -1189,6 +1239,57 @@ def cmd_agents(args, project, catalog):
     return 0
 
 
+def cmd_eval(args, project, catalog):
+    from autoharness import evals
+    if args.action == "record":
+        if args.case is None or args.variant is None or args.passed is None:
+            raise HarnessError("eval record requires --case, --variant and --passed")
+        entry = evals.record(project, args.case, args.variant, args.passed, args.seconds,
+                             args.tokens, args.cost, args.task_id, args.tool_calls)
+        out({"status": "ok", "run": entry})
+    elif args.action == "batch":
+        if not args.dataset or not args.variant:
+            raise HarnessError("eval batch requires --dataset and --variant")
+        command = args.command[1:] if args.command and args.command[0] == "--" else args.command
+        out(evals.batch(project, Path(args.dataset), args.variant, command, args.timeout))
+    else:
+        out(evals.compare(project))
+    return 0
+
+
+def cmd_decision(args, project, catalog):
+    from autoharness import audit
+    task = project.task()
+    event = audit.append(task, args.verdict, kind=args.kind, name=args.name, reason=args.reason)
+    task.log(f"{args.verdict} {args.kind} `{args.name}`: {args.reason}")
+    out({"status": "ok", "decision": event})
+    return 0
+
+
+def cmd_audit(args, project, catalog):
+    from autoharness import audit
+    out({"status": "ok", "events": audit.read(project.task(args.task_id))})
+    return 0
+
+
+def cmd_verify(args, project, catalog):
+    from autoharness import audit, verification
+    guide = verification.guide(args.kind)
+    if args.action == "guide":
+        out(guide)
+        return 0
+    if not args.passed or not args.evidence:
+        raise HarnessError("verify record requires --passed yes|no and --evidence <file>")
+    task = project.task()
+    proof = evidence.add(task, Path(args.evidence), "result", f"{args.kind} verification")
+    checks = task.info().get("checks", [])
+    check = {"kind": args.kind, "passed": args.passed == "yes", "evidence": proof["n"]}
+    task._update_info(checks=checks + [check])
+    audit.append(task, "verify", **check)
+    out({"status": "ok", "check": check, "guide": guide})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="autoharness", description=__doc__.split("\n")[0])
     p.add_argument("--project", default=".", help="project root (default: cwd)")
@@ -1200,6 +1301,37 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s = sub.add_parser("init", help="start a task-scoped harness")
     s.add_argument("task")
+    s.add_argument("--mode", choices=["full", "light", "auto"],
+                   help="full (default), light (use existing tools), auto (full when task matches a capability)")
+    s.add_argument("--profile", choices=["quick", "standard", "reviewed"],
+                   help="quick: existing tools; standard: discovery; reviewed: discovery and critic")
+    s = sub.add_parser("mode", help="upgrade an active light task to full discovery and review")
+    s.add_argument("value", choices=["full"])
+    s = sub.add_parser("eval", help="record and compare measured task runs")
+    s.add_argument("action", choices=["record", "compare", "batch"])
+    s.add_argument("--case", help="same case name for baseline and harness runs")
+    s.add_argument("--variant", choices=["baseline", "harness"])
+    s.add_argument("--passed", choices=["yes", "no"])
+    s.add_argument("--seconds", type=float, help="wall-clock run duration; inferred for a completed --task-id")
+    s.add_argument("--tokens", type=int, help="model tokens reported by the agent host")
+    s.add_argument("--cost", type=float, help="model cost reported by the agent host")
+    s.add_argument("--tool-calls", type=int, help="tool calls reported by the agent host")
+    s.add_argument("--task-id", help="attach a completed task and its CLI measurements")
+    s.add_argument("--dataset", help="for batch: JSONL with unique case and input fields")
+    s.add_argument("--timeout", type=float, default=300, help="for batch: seconds allowed per case")
+    s.add_argument("command", nargs="*", help="for batch: -- <runner> [arguments]")
+    s = sub.add_parser("decision", help="record why a candidate was selected or skipped")
+    s.add_argument("kind", choices=["mcp", "skill"])
+    s.add_argument("name")
+    s.add_argument("verdict", choices=["select", "skip"])
+    s.add_argument("--reason", required=True)
+    s = sub.add_parser("audit", help="show structured decisions for a task")
+    s.add_argument("task_id", nargs="?")
+    s = sub.add_parser("verify", help="use a verification guide and record its result")
+    s.add_argument("action", choices=["guide", "record"])
+    s.add_argument("kind", choices=["browser", "api", "logs", "database"])
+    s.add_argument("--passed", choices=["yes", "no"])
+    s.add_argument("--evidence")
     s = sub.add_parser("need", help="record a capability gap and get curated candidates")
     s.add_argument("capability")
     s.add_argument("--reason")
@@ -1226,6 +1358,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")
+    s.add_argument("--reason", help="why this task no longer needs the tool (saved in the audit log)")
     s.add_argument("--approve", action="store_true", help="the user agreed to uninstall a kept item no task here kept")
     s = sub.add_parser("prune", help="remove everything earlier tasks kept in the project")
     s.add_argument("--approve", action="store_true", help="the user agreed to uninstall kept items no task here kept")
@@ -1310,10 +1443,12 @@ def build_parser() -> argparse.ArgumentParser:
                        ("--constraints", "the user's constraints, verbatim"),
                        ("--verify", "how the result will be checked, and against what"),
                        ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:
-        s.add_argument(flag, required=True, help=what)
+        s.add_argument(flag, required=flag != "--verify", help=what)
     s.add_argument("--fidelity", help="the level to judge the result at, e.g. `stylised poster, not photographic`")
     s.add_argument("--review", choices=["critic"],
                    help="require an independent critic for this task even if its capabilities do not")
+    s.add_argument("--verify-template", choices=["browser", "api", "logs", "database"],
+                   help="use a built-in verification guide instead of --verify")
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
     s.add_argument("session_id")
     s.add_argument("--reason", required=True, help="the user's words")
@@ -1325,7 +1460,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"plan": cmd_plan, "init": cmd_init, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
+COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_eval, "decision": cmd_decision, "audit": cmd_audit, "verify": cmd_verify, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
@@ -1339,11 +1474,29 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     project = Project(Path(args.project).resolve(), args.agent)
+    started = time.monotonic()
+    before = project.active_id()
+    exit_code = 1
     try:
-        return COMMANDS[args.cmd](args, project, Catalog.load())
-    except HarnessError as e:
+        if (args.cmd == "gateway" and args.action == "serve") or (args.cmd == "eval" and args.action == "batch"):
+            exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
+            return exit_code
+        from autoharness import transactions
+        with transactions.locked(project.root):
+            transactions.recover(project.root)
+            exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
+            return exit_code
+    except (HarnessError, agents.AgentError) as e:
         out({"status": "error", "error": str(e)})
         return 1
     except OSError as e:
         out({"status": "error", "error": f"network or filesystem error: {e}"})
         return 1
+    finally:
+        if args.cmd != "gateway" or args.action != "serve":
+            from autoharness import telemetry
+            try:
+                telemetry.record(project.root, before or project.active_id(), args.cmd,
+                                 exit_code, time.monotonic() - started)
+            except OSError:
+                pass  # metrics must not turn a completed task into a failed command

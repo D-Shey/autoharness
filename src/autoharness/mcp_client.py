@@ -20,6 +20,17 @@ class McpError(Exception):
     pass
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # The approved endpoint is the only destination for credentials/session IDs.
+        raise urllib.error.HTTPError(req.full_url, code,
+                                     "redirect refused; configure the final MCP endpoint", headers, fp)
+
+
+def _http_open(req, timeout):
+    return urllib.request.build_opener(_NoRedirect()).open(req, timeout=timeout)
+
+
 def timeout_s() -> float:
     return float(os.environ.get("AUTOHARNESS_GATEWAY_TIMEOUT", "120"))
 
@@ -254,7 +265,7 @@ class HttpClient(_Client):
         req = urllib.request.Request(self._cfg["url"], data=json.dumps(msg).encode("utf-8"),
                                      headers=headers, method="POST")
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout_s())
+            resp = _http_open(req, timeout=timeout_s())
         except urllib.error.HTTPError as e:
             raise McpError(f"{self.name}: HTTP {e.code} {e.reason}") from e
         except OSError as e:
@@ -289,7 +300,7 @@ class HttpClient(_Client):
             req = urllib.request.Request(self._cfg["url"], method="DELETE",
                                          headers={"Mcp-Session-Id": self.session, **self._cfg.get("headers", {})})
             try:
-                urllib.request.urlopen(req, timeout=5).close()
+                _http_open(req, timeout=5).close()
             except OSError:
                 pass
 

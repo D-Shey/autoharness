@@ -6,6 +6,9 @@ requires-python = ">=3.10"
 name = "autoharness"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+]
 
 [package.optional-dependencies]
 dev = [
@@ -13,7 +16,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=8" }]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
+]
 provides-extras = ["dev"]
 
 [[package]]

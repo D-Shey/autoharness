@@ -13,8 +13,9 @@ taken down, as configured. The `autoharness` CLI does the bookkeeping
 Every command prints JSON. Exit code `3` means **stop and ask the user**.
 
 If `autoharness install-hook` was run, a hook sends every substantial request of a
-session here first: tools that do work stay blocked until you have run `init` and
-recorded a `brief` (step 3), while reading files stays open. Skip it only when the user
+session here first: full-mode tools that do work stay blocked until you have run `init` and
+recorded a `brief` (step 3); light mode opens the gate after `init`. Reading files stays open.
+Skip the harness only when the user
 explicitly said so: `autoharness waive <session id> --reason "<their words>"`, then tell them.
 
 ## Loop
@@ -32,6 +33,23 @@ analyse task → capabilities → reuse recipe? → discover → vet → install
 ```bash
 autoharness --agent {{AGENT}} init "<the user's task, verbatim>"
 ```
+
+The default is `--mode full` for compatibility. For a small task whose inputs
+and verification tools are already available, use `--mode light`: it skips the
+registry search and the required brief. `--mode auto` chooses full when the
+task text matches a catalog capability and light otherwise; keyword matching
+is only a hint, so choose full yourself when important input or verification
+is missing. In light mode, do the work, verify it and run `teardown`.
+If a capability gap appears, run `autoharness mode full`: this searches for
+candidates, and you then record the usual brief before adding tools.
+You can choose `--profile quick`, `standard`, or `reviewed` instead of `--mode`;
+`reviewed` requires an independent critic. For a typical browser, API, logs or
+database task, run `autoharness verify guide <kind>` and use
+`brief --verify-template <kind>` if the guide fits. Save check output and run
+`autoharness verify record <kind> --passed yes|no --evidence <file>`.
+When choosing or skipping a candidate, record the concrete reason with
+`autoharness decision mcp|skill <name> select|skip --reason "..."`. `audit`
+then shows decisions, installs with fingerprints, checks and removals.
 
 The output has keyword `suggested` capabilities, matching `recipes`, the full
 catalog in `all_capabilities`, and `discovered`: skills from skills.sh and servers
@@ -68,9 +86,9 @@ saved queries (entries in `discovered` marked `recipe`), and `recipe show` lists
 `fresh` what they find now besides the pinned entries: take a fresh one when it beats
 a pinned entry.
 
-### 2. Discover (never skip)
+### 2. Discover (full mode)
 
-Looking is cheap; missing a skill that already solves the task is expensive. Read
+In full mode, looking is cheap; missing a skill that already solves the task is expensive. Read
 every entry in `discovered` before deciding anything. Then, for each capability on
 your list, and with your own words for the task where `discovered` falls short:
 
@@ -90,7 +108,7 @@ capability you can cover with tools you already have (shell, a CLI such as `gh`,
 
 ### 3. Brief
 
-Before producing anything, write down what you decided:
+In full mode, before producing anything, write down what you decided:
 
 ```bash
 autoharness brief --goal "<quality bar>" --inputs "<missing inputs and how you get them>" \
@@ -267,3 +285,11 @@ resume from where you were.
 
 If `add` answers `already_installed`, an earlier task kept that item: use it.
 `autoharness status` shows the current harness, what the project keeps, and the log.
+
+For a controlled comparison, give the same case name to a run without the
+harness and a run with it. Record the pass result and elapsed time with
+`autoharness eval record --case <name> --variant baseline|harness --passed yes|no
+--seconds <number>`. For a completed harness task, `--task-id <id>` supplies
+its elapsed time and CLI call counts; tokens and cost must come from the agent
+host (`--tokens`, `--cost`). `autoharness eval compare` reports matched cases.
+These are reported measurements, not independently verified results.

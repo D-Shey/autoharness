@@ -460,7 +460,7 @@ def requirements(catalog, task: Task) -> dict:
     for cap in _caps(catalog, task):
         for key, value in cap.requires.items():
             need[key] = value if key == "media" else max(need.get(key, 0), value)
-    if task.info().get("brief", {}).get("review") == "critic":
+    if task.info().get("brief", {}).get("review") == "critic" or task.info().get("profile") == "reviewed":
         need["critic"] = max(need.get("critic", 0), 1)
         need["result"] = max(need.get("result", 0), 1)
     return need

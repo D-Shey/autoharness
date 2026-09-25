@@ -18,6 +18,71 @@ MCP-серверы и skills в публичных реестрах, прове�
 
 ## Как это работает
 
+Для небольшой задачи с готовыми инструментами есть короткий режим:
+
+```bash
+autoharness init "исправить опечатку" --mode light
+# работа и обычная проверка результата
+autoharness teardown
+```
+
+`light` не запускает поиск и не требует brief. Если понадобилась новая возможность,
+`autoharness mode full` включает поиск и полный цикл. `init --mode auto` выбирает
+полный режим при совпадении задачи с capability из каталога; решение основано на
+ключевых словах, поэтому агент может сразу указать `--mode full`. Без флага
+сохраняется прежний полный цикл.
+
+Профили задают готовые правила: `--profile quick` использует готовые инструменты,
+`--profile standard` запускает полный поиск, `--profile reviewed` дополнительно
+требует независимого критика перед завершением. `--profile` и `--mode` указывают
+по отдельности. Если нужен новый инструмент в `quick`, используйте `mode full`.
+
+Для повторяемой проверки можно взять шаблон и сохранить доказательство:
+
+```bash
+autoharness verify guide api
+autoharness brief --goal "..." --inputs "..." --constraints "..." \
+  --verify-template api --candidates "..." --gaps "none: ..."
+autoharness verify record api --passed yes --evidence api-test-output.txt
+```
+
+Есть шаблоны `browser`, `api`, `logs`, `database`. Они задают шаги и ожидаемое
+доказательство, но сами не запускают приложение. `decision mcp|skill NAME
+select|skip --reason "..."` фиксирует выбор кандидата; `audit` показывает
+структурированный журнал решений, установок, проверок и удалений. Для установки
+журнал хранит источник и отпечаток содержимого, а версию — когда она известна.
+
+Для сравнения пользы harness используйте одинаковый критерий успеха для двух
+прогонов одной задачи:
+
+```bash
+autoharness eval record --case login-fix --variant baseline --passed no --seconds 420 --tokens 9000
+autoharness eval record --case login-fix --variant harness --passed yes --task-id 20260925-120000-abcdef --tokens 7300
+autoharness eval compare
+```
+
+Для завершённой задачи `--task-id` берёт время из `task.json` и число вызовов CLI
+из `events.jsonl`. Токены, стоимость (`--cost`) и исход проверки вводятся по
+данным среды агента; AutoHarness их самостоятельно не наблюдает. Отчёт считает
+только задачи с обоими вариантами, показывает пропущенные пары и средние по
+задачам. Эти числа показывают наблюдаемые различия, а не доказывают причину.
+
+Для набора случаев подготовьте JSONL с уникальными `case` и полем `input` в каждой
+строке. `eval batch` передаёт одну строку во входной поток внешнего runner и
+ожидает один JSON-объект на выходе: `passed` (boolean), необязательные `tokens`,
+`cost`, `tool_calls`, `task_id`. Время измеряется AutoHarness. Запускайте один и
+тот же набор с обоими вариантами:
+
+```bash
+autoharness eval batch --dataset cases.jsonl --variant baseline -- python baseline_runner.py
+autoharness eval batch --dataset cases.jsonl --variant harness -- python harness_runner.py
+autoharness eval compare
+```
+
+Внешний runner выполняет задачу; AutoHarness не подменяет его оценку успеха и
+не видит вызовы инструментов, если runner их не сообщил. Пакет сохраняется после
+того, как runner успешно ответил на все случаи.
+
 ```
 задача → init → capabilities → recipe? → поиск → brief → trust (+ vet) → add → smoke-test
                       ↑                                                            │
@@ -218,6 +283,11 @@ autoharness teardown --save-recipe svg-poster --notes "стилизованны�
 `add mcp --direct` пишутся прямо в конфиг агента. Серверам gateway передаёт только безопасный
 минимум окружения, а сервер, пришедший в `gateway.json` через `git pull`, не запустится, пока
 его не одобрят на этой машине (`autoharness gateway approve`).
+
+В Codex проверены загрузка skill, вызовы через мета-инструменты и добавление/удаление
+серверов в работающем потоке (`tests/test_codex_live.py`). Если новому серверу нужна
+переменная окружения, которую gateway ещё не получает, CLI добавляет её имя в конфиг
+и сообщает о необходимости перезапуска Codex.
 
 ## Безопасность коротко
 
