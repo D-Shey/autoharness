@@ -1120,6 +1120,14 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
             and last[:1] == ["autoharness"])
 
 
+def _read_stdin_utf8() -> str:
+    """Claude Code sends hook input as UTF-8. On Windows a piped stdin decodes with the ANSI code page
+    (cp1251 and the like), which turns Cyrillic into mojibake holding `‚` or `„`: smart quotes that make
+    every autoharness command with such an argument look unsafe."""
+    buffer = getattr(sys.stdin, "buffer", None)
+    return buffer.read().decode("utf-8-sig", "replace") if buffer else sys.stdin.read()
+
+
 def cmd_hook(args, project, catalog):
     """Claude Code hook for UserPromptSubmit and PreToolUse: make every real task go through autoharness.
 
@@ -1128,7 +1136,7 @@ def cmd_hook(args, project, catalog):
     internal failure lets the call through.
     """
     try:
-        data = json.loads(sys.stdin.read() or "{}")
+        data = json.loads(_read_stdin_utf8() or "{}")
         event = data.get("hook_event_name", "UserPromptSubmit")
         sid = str(data.get("session_id") or "")
         saved_state = session_state(sid) if sid else {}

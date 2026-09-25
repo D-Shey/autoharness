@@ -2720,6 +2720,18 @@ def test_hook_recognises_only_a_plain_autoharness_command(tool, command, ok):
     assert cli._is_autoharness_call(tool, {"command": command}) is ok
 
 
+def test_hook_reads_cyrillic_input_as_utf8_whatever_the_code_page(project, capsys, monkeypatch):
+    import io
+    assert prompt(capsys, monkeypatch, project, "build a web page and check it in a real browser")
+    payload = json.dumps({"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
+                          "tool_input": {"command": 'autoharness init "обнови скилл, если отстают репы"'}},
+                         ensure_ascii=False)
+    # a piped stdin on Windows decodes with the ANSI code page: "т" becomes "С‚", a smart quote
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="cp1251"))
+    assert cli.main(["--project", str(project.root), "hook"]) == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
 # --- a skill installs only as vetted, under a safe name --------------------------
 
 def test_add_refuses_a_skill_that_changed_since_it_was_vetted(project, capsys, monkeypatch):
