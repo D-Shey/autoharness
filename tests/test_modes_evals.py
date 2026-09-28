@@ -260,3 +260,39 @@ def test_followup_add_works_without_a_task_and_rejects_bad_input(project, capsys
     assert run(project, capsys, 'followup', 'done', '7')[0] == 1
     assert run(project, capsys, 'followup', 'done', '1')[0] == 0
     assert 'already done' in run(project, capsys, 'followup', 'done', '1')[1]['error']
+
+
+def test_init_reports_candidates_earlier_tasks_turned_down_until_one_takes_them(project, capsys, monkeypatch):
+    import autoharness.cli as module
+    found = [{'kind': 'skill', 'query': 'pdf', 'results': [{'name': 'acme/tools@pdf-magic', 'score': 50}]}]
+    monkeypatch.setattr(module, 'discover', lambda *a, **k: found)
+    code, started = run(project, capsys, 'init', '--mode', 'full', 'render a pdf')
+    assert code == 0 and 'rejected_before' not in started
+    assert run(project, capsys, 'decision', 'skill', 'acme/tools@pdf-magic', 'skip', '--reason', 'needs network')[0] == 0
+    assert run(project, capsys, 'teardown', '--force')[0] == 0
+
+    code, started = run(project, capsys, 'init', '--mode', 'full', 'render another pdf')
+    assert code == 0 and '`rejected_before` lists' in started['next']
+    [entry] = started['rejected_before']
+    assert entry['candidate'] == 'acme/tools@pdf-magic' and entry['rejected'][0]['reason'] == 'needs network'
+    assert run(project, capsys, 'decision', 'skill', 'acme/tools@pdf-magic', 'select', '--reason', 'offline now')[0] == 0
+    assert run(project, capsys, 'teardown', '--force')[0] == 0
+
+    code, started = run(project, capsys, 'init', '--mode', 'full', 'render a third pdf')
+    assert code == 0 and 'rejected_before' not in started
+
+
+def test_history_counts_breaks_and_manual_removal_but_not_teardown(project):
+    from autoharness import audit, history
+    first = project.init_task('first')
+    audit.append(first, 'remove', kind='mcp', name='playwright', reason='teardown')
+    audit.append(first, 'remove', kind='skill', name='pdf-magic', reason='smoke test failed on Windows')
+    first._update_info(vetted={'mcp:io.github.acme/fetcher': {'verdict': 'breaks', 'text': 'sends data out'},
+                               'skill:acme/x@fine': {'verdict': 'fits', 'text': 'ok'}}, status='finished')
+    found = history.rejections(project)
+    assert set(found) == {('skill', 'pdf-magic'), ('mcp', 'fetcher')}
+    assert found[('mcp', 'fetcher')][0]['action'] == 'vet'
+    assert history.rejections(project, exclude=first.id) == {}
+    [warning] = history.warning(found, 'skill', 'other/repo@PDF-Magic')
+    assert 'smoke test failed on Windows' in warning
+    assert history.warning(found, 'mcp', 'playwright') == []

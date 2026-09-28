@@ -124,7 +124,11 @@ autoharness init "сверстай лендинг по макету из Figma"
   не скрыло остальное. Решает всё равно агент;
 - `recipes` — похожие сохранённые наборы;
 - `discovered` — что уже нашлось под эту задачу на [skills.sh](https://skills.sh) и в
-  [официальном MCP registry](https://registry.modelcontextprotocol.io).
+  [официальном MCP registry](https://registry.modelcontextprotocol.io);
+- `rejected_before` — кандидаты из этого вывода, которых прошлые задачи отвергли (`decision skip`),
+  сняли с причиной или признали нарушающими ограничения при vet, с причиной. Recipes помнят, что
+  сработало, а это помнит, что нет. Если более поздняя задача кандидата выбрала или поставила, отказ
+  больше не показывается. `add` такого кандидата предупреждает о том же.
 
 Capability — это не «инструмент», а то, что нужно уметь: `browser-automation`, `library-docs`,
 `visual-reference`, `visual-review`, `postgres`… Главный вопрос здесь не «чем сделать», а

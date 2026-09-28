@@ -50,7 +50,8 @@ no install at all (web search, a browser, a headless render you already have).
 ## 2. Discover (full)
 
 `init` already searched: read every entry in `discovered`, and reuse a matching recipe
-(`autoharness recipe show <name>`, score above ~0.3). Where that falls short:
+(`autoharness recipe show <name>`, score above ~0.3). `rejected_before` names candidates earlier
+tasks skipped or removed, with why: pass over them unless the reason does not apply. Where that falls short:
 
 ```bash
 autoharness need <capability> --reason "<why>"   # curated + your saved local skills

@@ -17,8 +17,8 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import (agents, answers, approvals, config, egress, evidence, followups, library, recipes, registry,
-                         text, vet)
+from autoharness import (agents, answers, approvals, config, egress, evidence, followups, history, library, recipes,
+                         registry, text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
                              npx_stage_skill, parse_skill_spec, skill_dir)
@@ -170,6 +170,20 @@ def recipe_queries(matches: list[tuple[float, dict]]) -> list[tuple[str, dict]]:
     return [(r["name"], q) for s, r in matches if s >= RECIPE_REUSE for q in r.get("queries", [])]
 
 
+def rejected_before(project, task_id: str, shown: dict) -> list[dict]:
+    """Earlier tasks' standing rejections of the candidates this output lists."""
+    candidates = [(d["kind"], r["name"]) for d in shown.get("discovered", []) for r in d.get("results", [])]
+    candidates += [(kind, n) for s in shown.get("suggested", []) for kind in ("mcp", "skill")
+                   for n in s[kind if kind == "mcp" else "skills"]]
+    candidates += [(kind, n) for r in shown.get("recipes", []) for kind in ("mcp", "skill")
+                   for n in r.get(kind if kind == "mcp" else "skills", [])]
+    return history.for_candidates(history.rejections(project, exclude=task_id), candidates)
+
+
+REJECTED_NEXT = ("`rejected_before` lists candidates earlier tasks skipped, removed or found breaking the user's "
+                 "constraints, with the reason: pass over them unless the reason does not apply to this task. ")
+
+
 # --- commands ---------------------------------------------------------------
 
 def cmd_plan(args, project, catalog):
@@ -218,6 +232,8 @@ def cmd_init(args, project, catalog):
             result["local"] = local
         result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
         task.record_discovery(discovered)
+        if rejected := rejected_before(project, task.id, result):
+            result["rejected_before"] = rejected
         result["next"] = (
         "Read `discovered`: these skills and MCP servers were found for this task. Search more with "
         "`autoharness search mcp|skill \"<query>\"` where it falls short. Then record "
@@ -229,6 +245,8 @@ def cmd_init(args, project, catalog):
         if result.get("local"):
             result["next"] = ("`local` lists skills you saved earlier that fit this task: prefer them "
                               "(`autoharness add skill local:<name>`). " + result["next"])
+        if rejected:
+            result["next"] = REJECTED_NEXT + result["next"]
     if mode == "full" and not result["suggested"]:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
     if pending := followups.listing(project):
@@ -263,8 +281,11 @@ def cmd_mode(args, project, catalog):
     local = local_skills(catalog, info.get("task", ""))
     if local:
         nxt = "`local` lists skills you saved earlier that fit this task: prefer them. " + nxt
+    rejected = rejected_before(project, task.id, {"discovered": info.get("discovery", [])})
+    if rejected:
+        nxt = REJECTED_NEXT + nxt
     out({"status": "ok", "task_id": task.id, "mode": level, "discovered": info.get("discovery", []),
-         **({"local": local} if local else {}), "next": nxt})
+         **({"local": local} if local else {}), **({"rejected_before": rejected} if rejected else {}), "next": nxt})
     return 0
 
 
@@ -596,6 +617,7 @@ def cmd_add(args, project, catalog):
     vetted = vet.verdict(task, args.kind, args.name) or {}
     retold = [f"its vet verdict was recorded from your retelling, not from the reviewer's answer file: tell the user"
               ] if vetted and "answer_id" not in vetted else []
+    retold += history.warning(history.rejections(project, exclude=task.id), args.kind, args.name)
     if args.kind == "mcp":
         report, source = resolve_mcp(catalog, args.name)
         if not report["config"]:
