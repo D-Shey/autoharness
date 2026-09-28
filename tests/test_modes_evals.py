@@ -228,3 +228,35 @@ def test_eval_compares_cases_with_equal_weight_and_missing_metrics(project, caps
     assert report['baseline']['seconds'] == 60
     assert report['harness']['seconds'] == 30
     assert report['delta']['tokens'] is None
+
+
+def test_followups_survive_the_task_and_show_in_teardown_and_next_init(project, capsys):
+    assert run(project, capsys, 'init', '--mode', 'light', 'fix a typo')[0] == 0
+    task_id = project.active_id()
+    code, added = run(project, capsys, 'followup', 'add', '  trust score   ignores X  ')
+    assert code == 0 and added['followup']['id'] == 1 and added['followup']['text'] == 'trust score ignores X'
+    assert added['followup']['from_task'] == task_id
+    code, ended = run(project, capsys, 'teardown')
+    assert code == 0 and [i['id'] for i in ended['followups']] == [1] and '#1 trust score ignores X' in ended['next']
+
+    code, started = run(project, capsys, 'init', '--mode', 'light', 'next task')
+    assert code == 0 and [i['id'] for i in started['followups']] == [1] and 'followup done' in started['next']
+    code, closed = run(project, capsys, 'followup', 'done', '#1', '--note', 'fixed')
+    assert code == 0 and closed['followup']['status'] == 'done' and closed['followup']['done_note'] == 'fixed'
+    code, ended = run(project, capsys, 'teardown')
+    assert code == 0 and 'followups' not in ended
+
+    assert run(project, capsys, 'followup', 'list')[1]['followups'] == []
+    assert len(run(project, capsys, 'followup', 'list', '--all')[1]['followups']) == 1
+    assert 'followups' not in run(project, capsys, 'init', '--mode', 'light', 'third task')[1]
+    assert '!followups.json' in (project.state / '.gitignore').read_text('utf-8').split()
+
+
+def test_followup_add_works_without_a_task_and_rejects_bad_input(project, capsys):
+    code, added = run(project, capsys, 'followup', 'add', 'look at the gateway log rotation')
+    assert code == 0 and added['followup']['from_task'] is None
+    assert run(project, capsys, 'followup', 'add', '   ')[0] == 1
+    assert run(project, capsys, 'followup', 'done', 'abc')[0] == 1
+    assert run(project, capsys, 'followup', 'done', '7')[0] == 1
+    assert run(project, capsys, 'followup', 'done', '1')[0] == 0
+    assert 'already done' in run(project, capsys, 'followup', 'done', '1')[1]['error']

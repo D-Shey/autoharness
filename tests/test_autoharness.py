@@ -895,7 +895,7 @@ def test_old_state_gitignore_is_upgraded(project):
     project.state.mkdir(parents=True)
     (project.state / ".gitignore").write_text("*\n!.gitignore\n!config.json\n!kept.json\n", "utf-8")
     project.init_task("t")
-    assert "!gateway.json" in (project.state / ".gitignore").read_text("utf-8").split()
+    assert {"!gateway.json", "!followups.json"} <= set((project.state / ".gitignore").read_text("utf-8").split())
 
 
 from autoharness import gateway

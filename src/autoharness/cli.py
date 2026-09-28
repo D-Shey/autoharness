@@ -17,7 +17,8 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import agents, answers, approvals, config, egress, evidence, library, recipes, registry, text, vet
+from autoharness import (agents, answers, approvals, config, egress, evidence, followups, library, recipes, registry,
+                         text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
                              npx_stage_skill, parse_skill_spec, skill_dir)
@@ -230,6 +231,11 @@ def cmd_init(args, project, catalog):
                               "(`autoharness add skill local:<name>`). " + result["next"])
     if mode == "full" and not result["suggested"]:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
+    if pending := followups.listing(project):
+        result["followups"] = pending[-followups.SHOWN:]
+        result["next"] = (f"`followups` lists {len(pending)} open item(s) earlier tasks found outside their scope: "
+                          "if one bears on this task, say so and take it in; close what this task settles with "
+                          "`autoharness followup done <id> --note \"...\"`. " + result["next"])
     warnings = stale_skills(project) + unapproved_warning(project)
     if warnings:
         result["warnings"] = warnings
@@ -845,8 +851,13 @@ def cmd_teardown(args, project, catalog):
         names = ", ".join(u["name"] for u in result["unsaved_generated"])
         nxt += (f" Skills you wrote are not in the library: {names}. If they are worth reusing, "
                 "run `autoharness skill save <name>` and ask the user.")
+    found = followups.from_task(project, task.id)
+    if found:
+        nxt += (" Tell the user the follow-ups this task left for later: "
+                + "; ".join(f"#{i['id']} {i['text']}" for i in found) + ".")
     out({"status": "ok", "policy": policy, "policy_source": source} | result
-        | {"recipe_saved": saved, "next": nxt} | ({"warnings": warnings} if warnings else {}))
+        | {"recipe_saved": saved} | ({"followups": found} if found else {}) | {"next": nxt}
+        | ({"warnings": warnings} if warnings else {}))
     return 0
 
 
@@ -1350,6 +1361,29 @@ def cmd_decision(args, project, catalog):
     return 0
 
 
+def cmd_followup(args, project, catalog):
+    if args.action == "list":
+        out({"status": "ok", "followups": followups.listing(project, args.all)})
+        return 0
+    if not args.value:
+        raise HarnessError("usage: autoharness followup add \"<what, where>\" | done <id> [--note ...]")
+    task_id = project.active_id()
+    if args.action == "add":
+        item = followups.add(project, args.value, task_id)
+        if task_id:
+            project.task().log(f"follow-up #{item['id']}: {item['text']}")
+        out({"status": "ok", "followup": item,
+             "next": "Carry on with the task; teardown and the next init will show this follow-up."})
+        return 0
+    if not args.value.lstrip("#").isdigit():
+        raise HarnessError("followup done takes the follow-up's number, e.g. `autoharness followup done 3`")
+    item = followups.close(project, int(args.value.lstrip("#")), args.note or "", task_id)
+    if task_id:
+        project.task().log(f"follow-up #{item['id']} done" + (f": {item['done_note']}" if item["done_note"] else ""))
+    out({"status": "ok", "followup": item})
+    return 0
+
+
 def cmd_audit(args, project, catalog):
     from autoharness import audit
     out({"status": "ok", "events": audit.read(project.task(args.task_id))})
@@ -1411,6 +1445,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name")
     s.add_argument("verdict", choices=["select", "skip"])
     s.add_argument("--reason", required=True)
+    s = sub.add_parser("followup", help="keep work found outside the task for later tasks: add, list, done")
+    s.add_argument("action", choices=["add", "list", "done"])
+    s.add_argument("value", nargs="?", help="add: what is left to do and where; done: its number")
+    s.add_argument("--note", help="done: what settled it")
+    s.add_argument("--all", action="store_true", help="list: include done items")
     s = sub.add_parser("audit", help="show structured decisions for a task")
     s.add_argument("task_id", nargs="?")
     s = sub.add_parser("verify", help="use a verification guide and record its result")
@@ -1547,7 +1586,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_eval, "decision": cmd_decision, "audit": cmd_audit, "verify": cmd_verify, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
+COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_eval, "decision": cmd_decision, "followup": cmd_followup, "audit": cmd_audit, "verify": cmd_verify, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,

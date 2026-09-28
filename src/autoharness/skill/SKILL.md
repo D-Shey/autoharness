@@ -115,6 +115,10 @@ thing you must check, guessing at an API whose docs you have not read, or drawin
 you have not looked at are gaps: `autoharness need <capability> --reason "<what blocked me>"`
 (after `mode full` in a light task), then resume.
 
+Found work outside this task (a bug next door, a critic point beyond the brief)? Do not fix it
+now and do not drop it: `autoharness followup add "<what, where>"`. `init` shows open follow-ups;
+close one a task settles with `autoharness followup done <id> --note "..."`.
+
 ## 6. Finish
 
 1. **Verify against the quality bar and keep the evidence** (light mode: verify, then teardown).
@@ -143,7 +147,8 @@ you have not looked at are gaps: `autoharness need <capability> --reason "<what 
 3. **End**: `autoharness teardown`, or `--save-recipe <name> --notes "<what it was good for>"`
    (`--query "skill|mcp:<query>"` to re-run a search next time) when the setup was useful. Pass `--keep`/`--remove` only when the user asked.
 4. **Tell the user** what was installed, kept and removed, any part ruled out of reach, any
-   teardown warning (skipped discovery or brief), and what is left for them (env vars, restart).
+   teardown warning (skipped discovery or brief), follow-ups left for later, and what is left for
+   them (env vars, restart).
 
 `autoharness status` shows the harness and log (`--full` for everything), `audit` the decisions,
 `remove`/`prune` take kept items off, `eval record|compare` measures runs with and without the

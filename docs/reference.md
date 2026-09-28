@@ -9,7 +9,7 @@
 
 | Команда | Что делает |
 |---|---|
-| `init "<задача>" [--mode light\|full\|reviewed\|auto]` | создаёт задачу; `full` по умолчанию, `light` использует готовые инструменты (вывод без каталога и поиска), `reviewed` — полный цикл с обязательным критиком, `auto` выбирает light/full по каталогу; `--profile quick\|standard\|reviewed` — старый синоним |
+| `init "<задача>" [--mode light\|full\|reviewed\|auto]` | создаёт задачу; `full` по умолчанию, `light` использует готовые инструменты (вывод без каталога и поиска), `reviewed` — полный цикл с обязательным критиком, `auto` выбирает light/full по каталогу; `--profile quick\|standard\|reviewed` — старый синоним; открытые follow-ups в любом режиме |
 | `mode full\|reviewed` | поднимает идущую задачу: лёгкую в полный режим с поиском кандидатов, или любую до обязательного критика |
 | `plan "<задача>"` | то же без побочных эффектов |
 | `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов и свои skills |
@@ -19,6 +19,7 @@
 | `verify guide browser\|api\|api-client\|logs\|database` | шаги и ожидаемые доказательства типовой проверки |
 | `verify record KIND --passed yes\|no --evidence FILE` | сохраняет исход проверки и файл доказательства |
 | `decision mcp\|skill NAME select\|skip --reason TEXT` / `audit [TASK_ID]` | причина выбора и структурированный журнал решений |
+| `followup add "<что, где>"` / `followup list [--all]` / `followup done N [--note ...]` | находки вне задачи: сохраняются в проекте, их показывают `teardown` и следующий `init` |
 | `vet mcp\|skill <name> [--answer-file F]` | промпт для независимой проверки кандидата против ограничений; запись ответа |
 | `add mcp <name>` / `add skill owner/repo@skill` | ставит в MCP-конфиг (или gateway) и папку skills агента, пишет в lockfile |
 | `add mcp <name> --direct` | мимо gateway, сразу в конфиг агента |
@@ -45,7 +46,7 @@
 |---|---|
 | `.autoharness/tasks/<id>/` | состояние задачи: `task.json`, lockfiles, `harness.md`, `events.jsonl`, `decisions.jsonl`, evidence, ответы проверяющих |
 | `.autoharness/evals.jsonl` | измерения прогонов; локальный файл, игнорируется Git |
-| `.autoharness/kept.json`, `config.json`, `gateway.json` | что осталось в проекте, настройки проекта, серверы gateway; их можно коммитить (`.autoharness/.gitignore` пропускает только их), остальное состояние в git не попадает |
+| `.autoharness/kept.json`, `config.json`, `gateway.json`, `followups.json` | что осталось в проекте, настройки проекта, серверы gateway, отложенные находки; их можно коммитить (`.autoharness/.gitignore` пропускает только их), остальное состояние в git не попадает |
 | `.autoharness/gateway.log` | лог gateway |
 | `~/.autoharness/` | `recipes/`, библиотека своих skills `skills/`, глобальный `config.json`, одобрения gateway (`AUTOHARNESS_HOME` переопределяет) |
 | `src/autoharness/data/catalog.json` | курированный каталог capabilities, серверов и доверенных издателей |
