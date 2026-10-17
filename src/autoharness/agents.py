@@ -11,6 +11,11 @@ each adapter translates it into the agent's native config on write.
     qwen      .qwen/settings.json        .qwen/skills
     gigacode  .gigacode/settings.json    .gigacode/skills
     strands   .agent/mcp.json            .agent/skills
+    agy       .agents/mcp_config.json    .agents/skills
+
+Antigravity CLI (agy) shares `.agents/skills` with Codex, so the autoharness skill
+installed there speaks to both. Its user-level skills live in `~/.gemini/config/skills`:
+agy 1.4.0 suggests `~/.gemini/antigravity-cli/skills` in /skills but does not load from it.
 
 Strands harness has no fixed MCP config file: it takes `create_harness(mcp_servers=<path>)`,
 so autoharness writes an mcpServers JSON at `.agent/mcp.json` for the user to pass in.
@@ -102,6 +107,42 @@ def to_codex(cfg: dict) -> tuple[dict, list[str]]:
         out["env"] = env
     if forward:
         out["env_vars"] = sorted(set(forward))
+    return out, warnings
+
+
+def to_agy(cfg: dict) -> tuple[dict, list[str]]:
+    """Antigravity CLI: `serverUrl` for remote servers. It does not expand `${VAR}`,
+    but servers inherit agy's environment, so `"K": "${K}"` is simply left out."""
+    warnings: list[str] = []
+    if "url" in cfg:
+        out: dict = {"serverUrl": cfg["url"]}
+        if cfg.get("headers"):
+            out["headers"] = dict(cfg["headers"])
+            for header, value in cfg["headers"].items():
+                if ENV_REF.search(value):
+                    warnings.append(f"header {header!r} uses env vars; Antigravity CLI does not expand them, "
+                                    "put the value in .agents/mcp_config.json by hand")
+        return out, warnings
+
+    out = {"command": cfg["command"]}
+    if cfg.get("args"):
+        out["args"] = list(cfg["args"])
+        refs = sorted({v for a in cfg["args"] for v in ENV_REF.findall(a)})
+        if refs:
+            warnings.append(f"Antigravity CLI does not expand env vars in args ({', '.join(refs)}); "
+                            "replace them in .agents/mcp_config.json or pass the value another way")
+    env = {}
+    for key, value in cfg.get("env", {}).items():
+        m = WHOLE_ENV_REF.match(value)
+        if m and m.group(1) == key:
+            continue
+        if ENV_REF.search(value):
+            warnings.append(f"env {key}={value!r} needs expansion Antigravity CLI does not do; "
+                            f"set {key} in the environment agy starts from")
+        else:
+            env[key] = value
+    if env:
+        out["env"] = env
     return out, warnings
 
 
@@ -286,12 +327,22 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
           _GEMINI_HINT.format(title="GigaCode CLI")),
     Agent("strands", "Strands harness", ".agent/mcp.json", ".agent/skills", ".agent/skills", to_claude,
           "restart the agent; pass mcp_servers=\".agent/mcp.json\" to create_harness() so it loads the server"),
+    Agent("agy", "Antigravity CLI", ".agents/mcp_config.json", ".agents/skills", ".gemini/config/skills", to_agy,
+          "restart agy so it picks up the new server"),
 ]}
 
 DEFAULT_AGENT = "claude"
 
-# Env vars the agents set for the shell commands they run.
-_DETECT = [("CLAUDECODE", "claude"), ("GEMINI_CLI", "gemini"), ("QWEN_CODE", "qwen"),
+
+def sharing_skills_dir(agent: Agent, user: bool = False) -> list[Agent]:
+    """Agents that read their skills from the same directory as `agent` (Codex and agy share `.agents/skills`)."""
+    key = (lambda a: a.user_skills_dir) if user else (lambda a: a.skills_dir)
+    return [a for a in AGENTS.values() if key(a) == key(agent)]
+
+
+# Env vars the agents set for the shell commands they run. agy sets ANTIGRAVITY_AGENT
+# per command and comes first: it inherits CLAUDECODE when started from Claude Code.
+_DETECT = [("ANTIGRAVITY_AGENT", "agy"), ("CLAUDECODE", "claude"), ("GEMINI_CLI", "gemini"), ("QWEN_CODE", "qwen"),
            ("GIGACODE_CLI", "gigacode"), ("CODEX_SANDBOX", "codex"), ("CODEX_THREAD_ID", "codex")]
 
 

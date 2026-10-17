@@ -1046,22 +1046,31 @@ def cmd_recipe(args, project, catalog):
     return 0
 
 
-def render_skill(agent) -> str:
+def render_skill(agent, user: bool = False) -> str:
+    """The skill for `agent`; where several agents read the same skills dir, one text names each of them."""
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")
-    return (text.replace("{{AGENT}}", agent.name).replace("{{MCP_FILE}}", agent.mcp_file)
-            .replace("{{RELOAD}}", agent.reload_hint))
+    group = agents.sharing_skills_dir(agent, user)
+    if len(group) == 1:
+        name, mcp_file, reload = agent.name, f"`{agent.mcp_file}`", agent.reload_hint
+    else:
+        name = "<" + ", ".join(f"{a.name} in {a.title}" for a in group) + ">"
+        mcp_file = " or ".join(f"`{a.mcp_file}` ({a.title})" for a in group)
+        reload = "do what their agent needs (" + "; ".join(f"{a.title}: {a.reload_hint}" for a in group) + ")"
+    return (text.replace("{{AGENT}}", name).replace("`{{MCP_FILE}}`", mcp_file)
+            .replace("{{RELOAD}}", reload))
 
 
 def stale_skills(project) -> list[str]:
     """Installed copies of the autoharness skill, for any agent, that differ from the one this version ships."""
     stale, seen = [], set()
     for agent in agents.AGENTS.values():
-        want = render_skill(agent).replace("\r\n", "\n")
-        for flag, base in (("", agent.skills_path(project.root)), (" --user", agent.user_skills_path())):
+        for flag, base, user in (("", agent.skills_path(project.root), False),
+                                 (" --user", agent.user_skills_path(), True)):
             path = base / "autoharness" / "SKILL.md"
             if path in seen:
                 continue
             seen.add(path)
+            want = render_skill(agent, user).replace("\r\n", "\n")
             try:
                 if path.is_file() and path.read_text("utf-8").replace("\r\n", "\n") != want:
                     stale.append(f"{path} is out of date with this autoharness: run "
@@ -1079,7 +1088,7 @@ def cmd_install_skill(args, project, catalog):
         base = agent.user_skills_path() if args.user else agent.skills_path(project.root)
         dest = base / "autoharness" / "SKILL.md"
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(render_skill(agent), "utf-8")
+        dest.write_text(render_skill(agent, args.user), "utf-8")
         installed[name] = str(dest)
     out({"status": "ok", "installed": installed})
     return 0

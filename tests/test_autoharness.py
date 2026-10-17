@@ -328,6 +328,38 @@ def test_codex_config_created_by_task_is_removed(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
+def test_agy_writes_mcp_config_without_env_expansion(tmp_path):
+    project = Project(tmp_path, "agy")
+    cfg = tmp_path / ".agents" / "mcp_config.json"
+    cfg.parent.mkdir()
+    cfg.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}), "utf-8")
+    task = project.init_task("t")
+    warnings = task.add_mcp("github", GITHUB, source="catalog", trust={}, permissions={})
+    assert warnings and "Authorization" in warnings[0]
+    warnings = task.add_mcp("context7", {"command": "npx", "args": ["-y", "c7"],
+                                         "env": {"K": "${K}", "MODE": "ro", "T": "${OTHER}"}},
+                            source="catalog", trust={}, permissions={})
+    assert len(warnings) == 1 and "set T" in warnings[0]
+    data = json.loads(cfg.read_text())
+    assert data["mcpServers"]["github"] == {"serverUrl": GITHUB["url"], "headers": GITHUB["headers"]}
+    # agy passes its own environment to servers, so a same-name reference is left out
+    assert data["mcpServers"]["context7"] == {"command": "npx", "args": ["-y", "c7"], "env": {"MODE": "ro"}}
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+    assert (tmp_path / ".agents" / "skills" / "demo" / "SKILL.md").exists()
+
+    task.teardown("remove")
+    assert json.loads(cfg.read_text()) == {"mcpServers": {"mine": {"command": "x"}}}
+    assert not (tmp_path / ".agents" / "skills" / "demo").exists()
+
+
+def test_agy_config_created_by_task_is_removed(tmp_path):
+    task = Project(tmp_path, "agy").init_task("t")
+    task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
+    assert (tmp_path / ".agents" / "mcp_config.json").exists()
+    task.teardown("remove")
+    assert not (tmp_path / ".agents").exists()
+
+
 def test_task_remembers_its_agent(tmp_path, capsys):
     cli.main(["--project", str(tmp_path), "--agent", "qwen", "init", "t"])
     capsys.readouterr()
@@ -343,14 +375,31 @@ def test_detect_agent_from_environment():
     assert agents.detect({"GEMINI_CLI": "1"}) == "gemini"
     assert agents.detect({"AUTOHARNESS_AGENT": "gigacode", "CLAUDECODE": "1"}) == "gigacode"
     assert agents.detect({"AI_AGENT": "codex_1.0"}) == "codex"
+    # agy started from Claude Code inherits its variables; agy's own marker wins
+    assert agents.detect({"ANTIGRAVITY_AGENT": "1", "CLAUDECODE": "1",
+                          "AI_AGENT": "claude-code_2_agent"}) == "agy"
     assert agents.detect({}) is None
 
 
 def test_install_skill_for_all_agents(tmp_path, capsys):
     assert cli.main(["--project", str(tmp_path), "install-skill", "--all"]) == 0
-    codex_skill = (tmp_path / ".agents" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
-    assert "autoharness --agent codex init" in codex_skill and "{{" not in codex_skill
+    capsys.readouterr()
+    # Codex and agy both read .agents/skills: the one copy there speaks to each of them
+    shared = (tmp_path / ".agents" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+    assert "autoharness --agent <codex in Codex CLI, agy in Antigravity CLI> init" in shared
+    assert "`.codex/config.toml` (Codex CLI) or `.agents/mcp_config.json` (Antigravity CLI)" in shared
+    assert "do what their agent needs (Codex CLI: restart Codex" in shared
+    assert "Antigravity CLI: restart agy" in shared and "{{" not in shared
     assert ".gigacode/settings.json" in (tmp_path / ".gigacode" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+    code, res = cli_json(capsys, "--project", str(tmp_path), "init", "t")
+    assert code == 0 and not res.get("warnings")
+
+
+def test_agy_user_skill_is_its_own(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(agents.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert cli.main(["--project", str(tmp_path), "--agent", "agy", "install-skill", "--user"]) == 0
+    skill = (tmp_path / "home" / ".gemini" / "config" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+    assert "autoharness --agent agy init" in skill and "`.agents/mcp_config.json`: tell the user to restart agy" in skill
 
 
 # --- teardown policy: keep at project level by default ----------------------

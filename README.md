@@ -3,7 +3,7 @@
 **AutoHarness собирает агенту инструменты под конкретную задачу — и проверяет, что задача
 действительно сделана.**
 
-Coding-агент (Claude Code, Codex CLI, Gemini CLI, Qwen Code, GigaCode, Strands) обычно работает
+Coding-агент (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands) обычно работает
 с тем набором MCP-серверов и skills, который кто-то заранее прописал в конфиг. Этого набора либо
 не хватает (нет браузера, чтобы посмотреть на страницу; нет актуальных доков API; нет референса,
 под который надо попасть), либо он раздут: десятки серверов на все случаи жизни съедают контекст
@@ -341,6 +341,7 @@ autoharness install-hook                                    # по желани�
 | Qwen Code | `qwen` |
 | GigaCode CLI | `gigacode` |
 | [Strands harness](https://github.com/strands-agents/harness-sdk) | `strands` |
+| Antigravity CLI | `agy` |
 
 ## Документация
 

@@ -83,6 +83,13 @@ autoharness install-skill --all                # в проект, сразу д�
 | Qwen Code | `qwen` | `.qwen/skills/autoharness/` | `~/.qwen/skills/autoharness/` |
 | GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
 | Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (сам strands его не читает: передайте путь в `create_harness(skills=...)`) |
+| Antigravity CLI | `agy` | `.agents/skills/autoharness/` | `~/.gemini/config/skills/autoharness/` |
+
+Codex и Antigravity CLI читают один и тот же `.agents/skills`, поэтому `SKILL.md` в проекте у
+них общий: в нём указаны `--agent` и MCP-конфиг для каждого из двух агентов. Глобальные
+skills у них разные: `~/.agents/skills` agy не читает. В `/skills` agy 1.4.0 предлагает для
+глобальных skills `~/.gemini/antigravity-cli/skills`, но загружает их только из
+`~/.gemini/config/skills` — поэтому `--user` пишет туда.
 
 В проект или глобально:
 
@@ -123,6 +130,7 @@ Gateway ставится в проект и **отдельно для каждо
 | Qwen Code | `.qwen/settings.json` | перезапустить или выполнить `/mcp refresh` |
 | GigaCode CLI | `.gigacode/settings.json` | перезапустить или выполнить `/mcp refresh` |
 | Strands harness | `.agent/mcp.json` | передать `create_harness(mcp_servers=".agent/mcp.json")` и пересоздать агента |
+| Antigravity CLI | `.agents/mcp_config.json` | перезапустить `agy` |
 
 Проверка: в агенте должны появиться инструменты `harness_tools` и `harness_call`. В Claude Code
 они могут прийти отложенными — их находит поиск инструментов.
@@ -166,7 +174,8 @@ autoharness --agent codex  gateway install
 
 Задачи и gateway у агентов общие (`.autoharness/`), а конфиги у каждого свои. Внутри сессии
 агент определяется сам — по переменным окружения, которые он ставит своим командам
-(`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, …). Порядок выбора: `--agent`, затем
+(`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, `ANTIGRAVITY_AGENT`, …). `ANTIGRAVITY_AGENT`
+проверяется первым: agy, запущенный из Claude Code, наследует его `CLAUDECODE`. Порядок выбора: `--agent`, затем
 `$AUTOHARNESS_AGENT`, затем автоопределение, иначе `claude`; агент запоминается в задаче при
 `init`. Если определение не сработало, задайте `AUTOHARNESS_AGENT=<агент>` в окружении, из
 которого запускаете агента.
@@ -181,12 +190,16 @@ autoharness --agent codex  gateway install
 | `qwen` (Qwen Code) | `.qwen/settings.json` | `.qwen/skills` |
 | `gigacode` (GigaCode CLI) | `.gigacode/settings.json` | `.gigacode/skills` |
 | `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
+| `agy` (Antigravity CLI) | `.agents/mcp_config.json` | `.agents/skills` |
 
 Lockfiles и recipes хранят конфиг в одном каноническом виде (формат `.mcp.json`,
 секреты как `${VAR}`), адаптер переводит его при записи: для Gemini-семейства
 remote-серверы становятся `httpUrl`/`url`, для Codex секреты уходят в `env_vars`,
 `bearer_token_env_var`, `env_http_headers`. Codex не раскрывает `${VAR}` в `args`;
-в этом случае `add` возвращает `warnings`. Проектный `.codex/config.toml` Codex читает
+в этом случае `add` возвращает `warnings`. Antigravity CLI тоже не раскрывает `${VAR}`, но
+передаёт серверам своё окружение: `"K": "${K}"` просто не записывается, remote-серверы
+становятся `serverUrl`, а для `${VAR}` в заголовках, `args` и переименованных переменных
+`add` возвращает `warnings`. Проектный `.codex/config.toml` Codex читает
 только для trusted-проектов. Правки в TOML обёрнуты маркерами `# >>> autoharness:<name>`,
 так что комментарии и остальной конфиг пользователя не трогаются.
 
