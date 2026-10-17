@@ -141,7 +141,7 @@ Gateway ставится в проект и **отдельно для каждо
 пока этот Python на месте: после `uv tool uninstall` или переустановки выполните
 `gateway install` заново, уже с `autoharness` в `PATH`.
 
-## 4. Хук для Claude Code (по желанию)
+## 4. Хук для Claude Code и Antigravity CLI (по желанию)
 
 Без хука агент идёт через autoharness, когда сам решит, что skill подходит. Хук делает это
 обязательным: на первый содержательный запрос сессии он напоминает агенту вызвать skill и до
@@ -156,6 +156,25 @@ autoharness install-hook --remove   # убрать
 
 Действует в новых сессиях (или откройте `/hooks` в текущей). Пропустить autoharness в одной
 сессии, если пользователь так сказал: `autoharness waive <session id> --reason "<его слова>"`.
+
+### Antigravity CLI (agy)
+
+```bash
+autoharness --agent agy install-hook          # в .agents/hooks.json проекта
+autoharness --agent agy install-hook --user   # в ~/.gemini/config/hooks.json, для всех проектов
+autoharness --agent agy install-hook --remove
+```
+
+Своего события на запрос пользователя у agy нет, поэтому напоминание приходит из `PreInvocation`
+на первом вызове модели в ходе (`invocationNum` 0): текст запроса хук берёт из transcript, а
+ответ отдаёт как `ephemeralMessage`. `PreToolUse` закрывает `write_to_file`,
+`replace_file_content`, `run_command`, `call_mcp_tool` и т. п. ответом `{"decision": "deny"}`.
+Сессия — это `conversationId`, `waive` принимает его. agy запускает хук через `cmd /c` в папке
+`hooks.json`, проект берётся из `workspacePaths`. Важно: если хук не запустился (нет
+`autoharness` в `PATH`, ошибка запуска), agy запрещает вызов инструмента, а пустой `{}` от хука
+тоже считает запретом. Если инструменты agy вдруг все отклоняются с `pre-tool hook`, проверьте
+`autoharness hook` в той же консоли или снимите хук через `--remove`. Действует после
+перезапуска agy; проектный `hooks.json` загружается, когда папке доверяют.
 
 ## Проверка целиком
 

@@ -1338,6 +1338,78 @@ def test_gate_blocks_work_until_a_brief_is_recorded(project, capsys, monkeypatch
     assert tool(capsys, monkeypatch, project, "Edit") is None
 
 
+def agy_event(capsys, monkeypatch, tmp_path, project, **payload):
+    """Antigravity CLI runs the hook in the folder of hooks.json and names the project in workspacePaths."""
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"conversationId": "c1",
+                                                             "workspacePaths": [str(project.root)], **payload})))
+    hooks_dir = tmp_path / "agy-config"
+    hooks_dir.mkdir(exist_ok=True)
+    assert cli.main(["--project", str(hooks_dir), "hook"]) == 0
+    assert not (hooks_dir / ".autoharness").exists()
+    raw = capsys.readouterr().out
+    return json.loads(raw) if raw.strip() else None
+
+
+def agy_tool(capsys, monkeypatch, tmp_path, project, name, **args):
+    res = agy_event(capsys, monkeypatch, tmp_path, project, stepIdx=2, toolCall={"name": name, "args": args})
+    return res and res["decision"]
+
+
+def test_agy_gate_reads_the_prompt_from_the_transcript_and_blocks_work_until_a_brief(project, capsys, monkeypatch,
+                                                                                       tmp_path):
+    transcript = tmp_path / "transcript_full.jsonl"
+    transcript.write_text(json.dumps({"step_index": 0, "type": "USER_INPUT", "content":
+                                      f"<USER_REQUEST>\n{BLADE_RUNNER}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\n"
+                                      "The current local time is: now.\n</ADDITIONAL_METADATA>"}) + "\n", "utf-8")
+    res = agy_event(capsys, monkeypatch, tmp_path, project, invocationNum=0, transcriptPath=str(transcript))
+    ctx = res["injectSteps"][0]["ephemeralMessage"]
+    assert "autoharness waive c1" in ctx and "visual-reference" in ctx
+    # later model calls of the same turn add nothing
+    assert agy_event(capsys, monkeypatch, tmp_path, project, invocationNum=1, transcriptPath=str(transcript)) is None
+    shell = "run_command"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file", TargetFile="x") == "deny"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "replace_file_content") == "deny"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, shell, CommandLine="ls") == "deny"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "call_mcp_tool", ServerName="fetch", ToolName="get") == "deny"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "view_file", AbsolutePath="x") is None
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, shell, CommandLine="autoharness --agent agy init x") is None
+    cli_json(capsys, "--project", str(project.root), "init", "draw the scene")
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file") == "deny"
+    brief(capsys, project)
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file") is None
+
+
+def test_agy_hook_stays_silent_for_short_replies_and_a_missing_transcript(project, capsys, monkeypatch, tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"type": "USER_INPUT", "content": "<USER_REQUEST>\nда\n</USER_REQUEST>"}) + "\n",
+                          "utf-8")
+    assert agy_event(capsys, monkeypatch, tmp_path, project, invocationNum=0, transcriptPath=str(transcript)) is None
+    assert agy_event(capsys, monkeypatch, tmp_path, project, invocationNum=0,
+                     transcriptPath=str(tmp_path / "missing.jsonl")) is None
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file") is None
+
+
+def test_install_hook_for_agy_writes_its_hooks_json(project, capsys):
+    hooks_file = project.root / ".agents" / "hooks.json"
+    hooks_file.parent.mkdir(parents=True)
+    mine = {"lint": {"PostToolUse": [{"matcher": "run_command", "hooks": [{"command": "./lint.sh"}]}]}}
+    hooks_file.write_text("﻿" + json.dumps(mine), "utf-8")   # agy accepts a BOM, so must we
+    root = str(project.root)
+    code, res = cli_json(capsys, "--project", root, "--agent", "agy", "install-hook")
+    assert code == 0 and res["status"] == "installed" and res["settings"] == str(hooks_file)
+    assert cli_json(capsys, "--project", root, "--agent", "agy", "install-hook")[1]["status"] == "already_installed"
+    data = json.loads(hooks_file.read_text("utf-8"))
+    assert data["lint"] == mine["lint"]
+    ours = data["autoharness"]
+    assert ours["PreInvocation"][0]["command"] == "autoharness hook"
+    assert ours["PreToolUse"][0]["matcher"] == cli.AGY_PRE_TOOL_MATCHER
+    assert {"write_to_file", "run_command", "call_mcp_tool"} <= set(cli.AGY_PRE_TOOL_MATCHER.split("|"))
+    assert not (project.root / ".claude").exists()
+    code, res = cli_json(capsys, "--project", root, "--agent", "agy", "install-hook", "--remove")
+    assert res["status"] == "removed" and json.loads(hooks_file.read_text("utf-8")) == mine
+
+
 def test_other_skills_are_not_blocked(project, capsys, monkeypatch):
     prompt(capsys, monkeypatch, project, "draw a logo for the new product page")
     assert tool(capsys, monkeypatch, project, "Skill", skill="superpowers:brainstorming") is None

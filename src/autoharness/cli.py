@@ -1099,6 +1099,11 @@ HOOK_MIN_WORDS = 4
 # tools that do work; reading and tool discovery stay open so the agent can look around
 GATED_TOOLS = re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|mcp__.*)$")
 PRE_TOOL_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Skill|mcp__.*"
+# Antigravity CLI tools that do work, as the Claude Code tool each stands for (shell and MCP are mapped in _agy_event)
+AGY_TOOLS = {"write_to_file": "Write", "replace_file_content": "Edit", "multi_replace_file_content": "Edit",
+             "edit_notebook": "NotebookEdit", "run_command": "", "send_command_input": "", "call_mcp_tool": ""}
+AGY_PRE_TOOL_MATCHER = "|".join(AGY_TOOLS)
+AGY_USER_REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 
 
 def session_file(session_id: str) -> Path:
@@ -1246,15 +1251,59 @@ def _read_stdin_utf8() -> str:
     return buffer.read().decode("utf-8-sig", "replace") if buffer else sys.stdin.read()
 
 
+def _agy_prompt(transcript: str | None) -> str:
+    """The user's latest request in an Antigravity CLI transcript (JSON lines, the request wrapped in tags)."""
+    request = ""
+    try:
+        with open(transcript or "", encoding="utf-8") as f:
+            for line in f:
+                step = json.loads(line)
+                if step.get("type") == "USER_INPUT":
+                    m = AGY_USER_REQUEST.search(step.get("content", ""))
+                    request = m.group(1) if m else step.get("content", "")
+    except (OSError, ValueError):
+        pass
+    return request
+
+
+def _agy_event(data: dict) -> dict | None:
+    """An Antigravity CLI hook payload in the shape Claude Code sends, or None when there is nothing to do.
+    agy has no prompt event: the first model call of a turn (PreInvocation, invocationNum 0) stands for it,
+    with the prompt read from the transcript. Its shell runs PowerShell on Windows."""
+    common = {"session_id": data.get("conversationId", ""), "cwd": (data.get("workspacePaths") or [""])[0]}
+    if "toolCall" in data:
+        call = data["toolCall"] or {}
+        name, call_args = call.get("name", ""), call.get("args") or {}
+        if name in ("run_command", "send_command_input"):
+            tool = "PowerShell" if os.name == "nt" else "Bash"
+            tool_input = {"command": call_args.get("CommandLine", "")} if name == "run_command" else {}
+        elif name == "call_mcp_tool":
+            tool, tool_input = f"mcp__{call_args.get('ServerName', '')}__{call_args.get('ToolName', '')}", {}
+        else:
+            tool, tool_input = AGY_TOOLS.get(name) or name, call_args
+        return {**common, "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+    if data.get("invocationNum") != 0:
+        return None
+    return {**common, "hook_event_name": "UserPromptSubmit", "prompt": _agy_prompt(data.get("transcriptPath"))}
+
+
 def cmd_hook(args, project, catalog):
     """Claude Code hook for UserPromptSubmit and PreToolUse: make every real task go through autoharness.
+    Antigravity CLI calls it for PreInvocation and PreToolUse, translated by `_agy_event`.
 
     The first substantial prompt of a session puts it in `pending`; tools that do work are denied until the
     agent invokes the skill, starts a task, or the user waives it. Must never break the session, so any
-    internal failure lets the call through.
+    internal failure lets the call through (for agy too: it reads empty output as no decision, `{}` as deny).
     """
     try:
         data = json.loads(_read_stdin_utf8() or "{}")
+        agy = "toolCall" in data or "invocationNum" in data
+        if agy:
+            data = _agy_event(data)
+            if data is None:
+                return 0
+            if data["cwd"]:   # agy runs hooks in the folder of hooks.json, not the project
+                project = Project(Path(data["cwd"]).resolve(), project.agent_name)
         event = data.get("hook_event_name", "UserPromptSubmit")
         sid = str(data.get("session_id") or "")
         saved_state = session_state(sid) if sid else {}
@@ -1277,25 +1326,27 @@ def cmd_hook(args, project, catalog):
                 return 0
             if sid:
                 set_session_state(sid, state="pending", prompt=data.get("prompt", "")[:300])
-            out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+            out({"injectSteps": [{"ephemeralMessage": ctx}]} if agy else
+                {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
             return 0
         if event == "PreToolUse":
             tool, tool_input = data.get("tool_name", ""), data.get("tool_input") or {}
             if _is_autoharness_call(tool, tool_input):
                 return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
             if state == "pending" and GATED_TOOLS.match(tool):
-                out({"hookSpecificOutput": {
-                    "hookEventName": "PreToolUse", "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
-                        "MCP servers it discovers, and record `autoharness brief ...` before using " + tool + ". "
-                        "An autoharness command passes only on its own: `cd <dir> &&` (or `;`) before it is fine, "
-                        "and at the end `2>&1` and read-only filters (`| head`, `| tail`, `| jq`, `| grep`, "
-                        "`| Select-Object -First N`, `| Out-String`, `| ConvertFrom-Json`); outside quotes no other "
-                        "`;`, `|`, `&&`, `#`, redirection or brackets; `$(...)` and backticks only inside single "
-                        "quotes; `\\\"` only in Bash. "
-                        "Reading files is still allowed. If the user explicitly said not to use it, run "
-                        f"`autoharness waive {sid} --reason \"<their words>\"` and tell the user.")}})
+                reason = (
+                    "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
+                    "MCP servers it discovers, and record `autoharness brief ...` before using " + tool + ". "
+                    "An autoharness command passes only on its own: `cd <dir> &&` (or `;`) before it is fine, "
+                    "and at the end `2>&1` and read-only filters (`| head`, `| tail`, `| jq`, `| grep`, "
+                    "`| Select-Object -First N`, `| Out-String`, `| ConvertFrom-Json`); outside quotes no other "
+                    "`;`, `|`, `&&`, `#`, redirection or brackets; `$(...)` and backticks only inside single "
+                    "quotes; `\\\"` only in Bash. "
+                    "Reading files is still allowed. If the user explicitly said not to use it, run "
+                    f"`autoharness waive {sid} --reason \"<their words>\"` and tell the user.")
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
         return 0
     except Exception:  # noqa: BLE001 - a hook must not break the session
         return 0
@@ -1344,7 +1395,35 @@ def install_hook(settings: Path, remove: bool = False) -> str:
     return "removed" if remove else "installed"
 
 
+def install_agy_hook(hooks_file: Path, remove: bool = False) -> str:
+    """Add or remove the `autoharness` entry of an Antigravity CLI hooks.json, keeping everything else."""
+    data = json.loads(hooks_file.read_text("utf-8-sig")) if hooks_file.exists() else {}
+    handler = {"type": "command", "command": HOOK_COMMAND, "timeout": 10}
+    wanted = {"PreInvocation": [handler], "PreToolUse": [{"matcher": AGY_PRE_TOOL_MATCHER, "hooks": [handler]}]}
+    if remove:
+        if data.pop("autoharness", None) is None:
+            return "not_installed"
+    elif data.get("autoharness") == wanted:
+        return "already_installed"
+    else:
+        data["autoharness"] = wanted
+    hooks_file.parent.mkdir(parents=True, exist_ok=True)
+    hooks_file.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", "utf-8")
+    return "removed" if remove else "installed"
+
+
 def cmd_install_hook(args, project, catalog):
+    if project.agent.name == "agy":
+        if args.settings:
+            settings = Path(args.settings)
+        elif args.user:
+            settings = Path.home() / ".gemini" / "config" / "hooks.json"
+        else:
+            settings = project.root / ".agents" / "hooks.json"
+        status = install_agy_hook(settings, remove=args.remove)
+        out({"status": status, "settings": str(settings), "command": HOOK_COMMAND,
+             "next": "Takes effect in new agy sessions: restart agy (a project hooks.json loads once the folder is trusted)."})
+        return 0
     if args.settings:
         settings = Path(args.settings)
     elif args.user:
@@ -1556,7 +1635,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("install-skill", help="install the autoharness bootstrap skill")
     s.add_argument("--user", action="store_true", help="install to the agent's user skills dir instead of the project")
     s.add_argument("--all", action="store_true", help="install for every supported agent")
-    sub.add_parser("hook", help="Claude Code UserPromptSubmit hook: reads the hook JSON on stdin")
+    sub.add_parser("hook", help="Claude Code / Antigravity CLI hook: reads the hook JSON on stdin")
     s = sub.add_parser("evidence", help="record a file you checked: a reference, or what a round produced")
     s.add_argument("action", choices=["add", "list", "diff"])
     s.add_argument("file", nargs="?")
@@ -1609,9 +1688,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
     s.add_argument("session_id")
     s.add_argument("--reason", required=True, help="the user's words")
-    s = sub.add_parser("install-hook", help="add the prompt hook to Claude Code settings (project, or --user)")
-    s.add_argument("--user", action="store_true", help="~/.claude/settings.json instead of the project")
-    s.add_argument("--settings", help="explicit settings file")
+    s = sub.add_parser("install-hook", help="add the prompt hook to Claude Code settings, or with --agent agy to agy hooks.json (project, or --user)")
+    s.add_argument("--user", action="store_true", help="~/.claude/settings.json (agy: ~/.gemini/config/hooks.json) instead of the project")
+    s.add_argument("--settings", help="explicit settings file (agy: hooks.json)")
     s.add_argument("--remove", action="store_true", help="take the hook out again")
     s = sub.add_parser("agents", help="supported agents and where they keep MCP servers and skills")
     return p
@@ -1635,7 +1714,9 @@ def main(argv: list[str] | None = None) -> int:
     before = project.active_id()
     exit_code = 1
     try:
-        if (args.cmd == "gateway" and args.action == "serve") or (args.cmd == "eval" and args.action == "batch"):
+        # the hook writes only session state in ~/.autoharness, and agy runs it outside the project
+        if (args.cmd == "gateway" and args.action == "serve") or (args.cmd == "eval" and args.action == "batch") \
+                or args.cmd == "hook":
             exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
             return exit_code
         from autoharness import transactions

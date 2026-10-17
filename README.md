@@ -326,6 +326,7 @@ cd /path/to/your/project
 autoharness --agent claude install-skill                    # skill для агента
 autoharness --agent claude gateway install                  # по желанию: MCP без перезапусков
 autoharness install-hook                                    # по желанию, Claude Code: обязательный brief
+autoharness --agent agy install-hook                        # то же для Antigravity CLI
 ```
 
 Репозиторий приватный: до `uv tool install` войдите в GitHub (`gh auth login`). Если после
