@@ -9,6 +9,7 @@ waits for its answer, the autoharness hook neither gates nor prompts them.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -45,6 +46,12 @@ def command(agent: str, root: Path, prompt_file: Path, answer_file: Path) -> tup
     raise HarnessError(f"reviewer must be one of {', '.join(AGENTS)}")
 
 
+# what a reviewer CLI says when it has no credentials: a session logged in by a token in its environment (a CI
+# job, a container) need not hand it to the programs it starts
+NOT_LOGGED_IN = re.compile(r"not logged in|/login|invalid api key|authentication|unauthorized|oauth token",
+                           re.IGNORECASE)
+
+
 def run(agent: str, root: Path, prompt_file: Path, answer_file: Path, timeout: float = DEFAULT_TIMEOUT,
         answer_id: str = "") -> str:
     """Run the reviewer and return its answer, also written to `answer_file`."""
@@ -59,7 +66,11 @@ def run(agent: str, root: Path, prompt_file: Path, answer_file: Path, timeout: f
     if agent == "codex" and answer_file.is_file():
         stdout = answer_file.read_text("utf-8", errors="replace").strip() or stdout
     if proc.returncode != 0 or not stdout:
-        err = proc.stderr.decode("utf-8", "replace").strip()[-600:]
-        raise HarnessError(f"the {agent} reviewer failed (exit {proc.returncode}): {err or stdout[-600:] or 'no output'}")
+        err = proc.stderr.decode("utf-8", "replace").strip()[-600:] or stdout[-600:] or "no output"
+        if NOT_LOGGED_IN.search(err):
+            raise HarnessError(f"the {agent} reviewer is not logged in here ({err}): the session's own login did not "
+                               f"reach the `{agent}` it started, as happens when a token in the environment is not "
+                               "passed on to child processes")
+        raise HarnessError(f"the {agent} reviewer failed (exit {proc.returncode}): {err}")
     answer_file.write_text(stdout + "\n", "utf-8")
     return stdout

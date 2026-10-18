@@ -285,6 +285,26 @@ def test_reviewer_run_strips_the_authors_session(tmp_path, monkeypatch):
     assert seen[reviewers.ENV_FLAG] == "1" and "CLAUDECODE" not in seen and "CLAUDE_CODE_SESSION_ID" not in seen
 
 
+def test_a_reviewer_without_a_login_is_named_as_such(tmp_path, monkeypatch):
+    monkeypatch.setattr(reviewers.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(reviewers.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 1, b"Not logged in - Please run /login\n", b""))
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("judge it", "utf-8")
+    with pytest.raises(Exception, match="not logged in here.*child processes"):
+        reviewers.run("claude", tmp_path, prompt, tmp_path / "a.txt")
+
+
+def test_critic_run_that_cannot_start_points_to_a_subagent(project, capsys, monkeypatch):
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    (project.root / "out.txt").write_text("result\n", "utf-8")
+    ah(capsys, project, "evidence", "add", str(project.root / "out.txt"), "--kind", "result")
+    monkeypatch.setattr(reviewers, "run", lambda *a, **k: (_ for _ in ()).throw(reviewers.HarnessError("no login")))
+    code, res = ah(capsys, project, "critic", "--run", "claude")
+    assert code == 1 and res["error"] == "no login" and "fresh subagent" in res["next"]
+
+
 # --- the task belongs to the session that started it -------------------------------------
 
 def test_another_session_can_neither_change_nor_end_the_task_until_it_claims_it(project, capsys, monkeypatch):
