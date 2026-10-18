@@ -418,3 +418,15 @@ def test_many_blocking_critic_rounds_stop_to_ask_the_user(project, capsys):
         if n < evidence.ROUND_BUDGET - 1:
             assert res["status"] != "ask_user", res
     assert code == cli.EXIT_APPROVAL and res["status"] == "ask_user" and len(res["trend"]) == evidence.ROUND_BUDGET
+
+
+def test_a_run_in_a_repository_without_commits_is_tied_to_the_code(tmp_path):
+    root = tmp_path / "fresh"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "flag.py").write_text("x = 1\n", "utf-8")
+    seen = runs.fingerprint(root)
+    assert seen and seen["base_sha"] == runs.EMPTY_TREE
+    assert runs.is_fresh({"fingerprint": seen}, root) is True
+    (root / "flag.py").write_text("x = 2\n", "utf-8")
+    assert runs.is_fresh({"fingerprint": seen}, root) is False
