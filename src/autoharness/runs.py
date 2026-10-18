@@ -28,6 +28,28 @@ VERDICTS = ("met", "partial", "missing", "contradicts")
 ITEM_START = re.compile(r"(^\s*|[;:]\s*|\s)(\d+)([.)]?)\s")
 
 
+# a command that exits 0 whatever the code does: a run of it shows nothing, so it does not count as a check
+_TRIVIAL_PART = re.compile(r"\s*(true|:|exit(\s+0)?|cd\s+\S+|(echo|printf|Write-Output|Write-Host)(\s.*)?"
+                           r"|cmd(\.exe)?\s+/c\s+exit\s+0)\s*", re.I)
+# python -c with nothing in it that could fail: `pass`, `print("ok")`, `sys.exit(0)`
+_TRIVIAL_PYTHON = re.compile(r"""\s*(python3?|py)(\.exe)?\s+(-\w+\s+)*-c\s+(["'])(\s*(pass|print\(\s*('[^']*'|"[^"]*"|\d*)\s*\)|import sys"""
+                             r"""|(sys\.)?exit\(0?\))\s*;?)+\4\s*""", re.I)
+_SEPARATORS = re.compile(r"&&|\|\||;")
+
+
+def is_trivial(command: str) -> bool:
+    """`true`, `exit 0`, `echo ok`, `python -c "pass"` and chains of them: a command that cannot fail."""
+    if _TRIVIAL_PYTHON.fullmatch(command):
+        return True
+    if "|" in command.replace("||", ""):
+        return False   # piped into something: that something may check
+    return all(_TRIVIAL_PART.fullmatch(part) for part in _SEPARATORS.split(command))
+
+
+NOT_A_CHECK = ("`{command}` exits 0 whatever the code does, so it checks nothing and does not count as a check: "
+               "run the command that tests the behavior")
+
+
 # git's empty tree: the base for a repository with no commit yet, where every file counts as changed
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
@@ -94,7 +116,7 @@ def _record(task: Task, items: list, n: int, command: str, name: str, purpose: s
     # taken after the run: a check that writes tracked files (formatters, snapshots) is judged on what it left
     item = {"n": n, "name": name, "command": command, "for": purpose, "exit": code, "passed": code == 0,
             "seconds": seconds, "log": str(log), "fingerprint": fingerprint(root),
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S")} | ({"timed_out": True} if timed_out else {})
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S")} | ({"timed_out": True} if timed_out else {})         | ({"trivial": True} if is_trivial(command) else {})
     task._update_info(runs=items + [item])
     task.log(f"run #{n} `{command}`" + (f" for {purpose}" if purpose else "")
              + f": {'passed' if item['passed'] else 'failed'} (exit {code})")
@@ -145,6 +167,8 @@ def problems(task: Task) -> list[str]:
            f"(the brief says to preserve: {brief[PRESERVE]})")
     if not last:
         return [f"nothing shows that what the brief preserves still works: {how}"]
+    if last.get("trivial"):
+        return [NOT_A_CHECK.format(command=last["command"]) + f" (run #{last['n']}): {how}"]
     if not last["passed"]:
         return [f"the regression check failed (run #{last['n']}, exit {last['exit']}, output in {last['log']}): "
                 f"fix it and {how}"]
@@ -153,14 +177,34 @@ def problems(task: Task) -> list[str]:
     return []
 
 
+def changed_after_failing(items: list) -> dict[int, str]:
+    """Passing runs whose check is not the one that failed before for the same brief item: the check may have
+    been changed until it passed instead of the code. Run number -> what changed."""
+    found, failed = {}, {}
+    for r in items:
+        purpose = r.get("for")
+        if not purpose:
+            continue
+        if not r["passed"]:
+            failed.setdefault(purpose, [])
+            if r["command"] not in failed[purpose]:
+                failed[purpose].append(r["command"])
+        elif failed.get(purpose) and r["command"] not in failed[purpose]:
+            found[r["n"]] = f"changed after it failed: was `{failed[purpose][-1]}`, now `{r['command']}`"
+    return found
+
+
 def summary(task: Task) -> dict:
     """What was actually checked, kept apart from what was only reported."""
     info, root = task.info(), task.project.root
     ran = []
+    changed = changed_after_failing(info.get("runs", []))
     for r in info.get("runs", []):
         fresh = is_fresh(r, root)
         ran.append({"n": r["n"], "command": r["command"], "for": r.get("for", ""),
-                    "passed": r["passed"], "code": {True: "current", False: "stale", None: "unknown"}[fresh]})
+                    "passed": r["passed"], "code": {True: "current", False: "stale", None: "unknown"}[fresh]}
+                   | ({"not_a_check": True} if r.get("trivial") else {})
+                   | ({"check_changed": changed[r["n"]]} if r["n"] in changed else {}))
     critics = [{"round": r["round"], "worst": r["worst"],
                 "answer": ("run by autoharness: " + r["ran"]) if r.get("ran") else
                           "from the critic's answer file" if r.get("answer_id") else "retold by the agent"}
@@ -183,13 +227,17 @@ def summary(task: Task) -> dict:
     items = []
     for item in brief_items(info.get("brief", {})):
         runs = [r for r in ran if r["for"] in (item["id"], PRESERVE if item["id"].startswith("P") else None)]
-        good = [r for r in runs if r["passed"] and r["code"] != "stale"]
+        good = [r for r in runs if r["passed"] and r["code"] != "stale" and not r.get("not_a_check")]
         items.append({"id": item["id"], "text": item["text"],
                       "run": f"run #{good[-1]['n']} passed" if good else
-                             f"run #{runs[-1]['n']} {'failed' if not runs[-1]['passed'] else 'stale'}" if runs else "",
+                             f"run #{runs[-1]['n']} {_why_not(runs[-1])}" if runs else "",
                       "critic": coverage.get(item["id"], "")})
     unchecked = [i["id"] for i in items if not i["run"].endswith("passed") and i["critic"] != "met"]
     return {"ran": ran, "critic": critics, "reported_only": reported, "brief_items": items,
             "unchecked_items": unchecked,
             "unrequested": next((r["unrequested"] for r in reversed(info.get("reviews", []))
                                  if r.get("unrequested")), "")}
+
+
+def _why_not(r: dict) -> str:
+    return "not a check" if r.get("not_a_check") else "failed" if not r["passed"] else "stale"

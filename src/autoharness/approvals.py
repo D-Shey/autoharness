@@ -8,7 +8,9 @@ pull request can change them. Neither is proof of anything done here:
 - `remove` and `prune` uninstall a kept skill or server only when a task on this machine kept it (or the
   user says yes), so a pulled `kept.json` naming the user's own skill or server cannot make them delete it;
 - a task uninstalls what its lockfiles name only when it was started on this machine: `.autoharness/tasks/`
-  is ignored by git, but a commit can still add it.
+  is ignored by git, but a commit can still add it;
+- every `task.json` autoharness writes is sealed with a key kept here (`integrity.key`), so an edit made
+  around autoharness (by the agent, with a write tool or a script) shows at teardown.
 
 The records live in the user's autoharness home, outside every repository.
 """
@@ -16,8 +18,10 @@ The records live in the user's autoharness home, outside every repository.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,7 +37,36 @@ def _file(name: str) -> Path:
 
 
 GATEWAY = "gateway-approved.json"
+INTEGRITY_KEY = "integrity.key"
 KEPT = "kept-here.json"
+
+
+def _integrity_key(create: bool) -> bytes | None:
+    path = _file(INTEGRITY_KEY)
+    try:
+        return bytes.fromhex(path.read_text("ascii").strip())
+    except (OSError, ValueError):
+        if not create:
+            return None   # no key: nothing was sealed here, so nothing can be checked
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="ascii") as f:
+            f.write(secrets.token_hex(32) + "\n")
+    except FileExistsError:
+        pass   # another process made it first: use theirs
+    return bytes.fromhex(path.read_text("ascii").strip())
+
+
+def seal(data: bytes) -> str:
+    return hmac.new(_integrity_key(create=True), data, hashlib.sha256).hexdigest()
+
+
+def sealed(data: bytes, signature: str) -> bool | None:
+    """Whether `data` is what autoharness sealed; None when this machine holds no key to tell."""
+    key = _integrity_key(create=False)
+    if key is None:
+        return None
+    return hmac.compare_digest(hmac.new(key, data, hashlib.sha256).hexdigest(), signature.strip())
 
 
 def _key(root: Path) -> str:
