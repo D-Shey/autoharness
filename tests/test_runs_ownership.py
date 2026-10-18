@@ -10,7 +10,7 @@ from autoharness import answers, cli, reviewers, runs
 from autoharness.env import Project
 
 PY = f'"{sys.executable}"'
-OK = f'{PY} -c "print(42)"'
+OK = f'{PY} -c "import json; print(42)"'
 FAIL = f'{PY} -c "import sys; print(7); sys.exit(3)"'
 BRIEF = ["brief", "--goal", "1 totals row added; 2 title fixed", "--inputs", "the report", "--constraints", "none",
          "--verify", "run the tests", "--candidates", "none", "--gaps", "none: tools at hand"]
@@ -368,7 +368,7 @@ def test_tasks_without_an_owner_keep_the_old_gate(project, capsys, monkeypatch):
 def test_verify_run_takes_the_command_from_an_args_file(project, capsys, tmp_path):
     briefed(capsys, project)
     spec = tmp_path / "cmd.json"
-    spec.write_text(json.dumps({"command": 'python -c "print(1)"'}), "utf-8")
+    spec.write_text(json.dumps({"command": 'python -c "import json; print(1)"'}), "utf-8")
     code, res = ah(capsys, project, "verify", "run", "--args-file", str(spec))
     assert code == 0 and res["run"]["passed"]
 
@@ -471,3 +471,144 @@ def test_saved_skills_and_recipes_keep_a_record_of_what_became_of_them(project, 
         lessons.bump("skill", "svg-scenes", "used", "removed", "friction")   # two later tasks dropped it
     assert "removed in most tasks" in lessons.record("skill", "svg-scenes")["note"]
     assert lessons.record("recipe", "never-used") == {}
+
+
+# --- the task records: only autoharness writes them -------------------------------------
+
+def test_teardown_refuses_a_task_record_changed_around_autoharness(project, capsys):
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    task = project.task()
+    assert (task.dir / "task.sig").exists() and not task.tampered()
+    record = task.dir / "task.json"
+    info = json.loads(record.read_text("utf-8"))
+    info["runs"][0]["command"] = "pytest -q"                 # an edit made with a write tool, not autoharness
+    record.write_text(json.dumps(info, indent=2), "utf-8")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 1 and res["status"] == "tampered" and "changed outside autoharness" in res["problems"][0]
+    assert "--force" in res["next"]
+    assert ah(capsys, project, "teardown", "--force")[0] == 0
+
+
+def test_an_evidence_copy_changed_after_it_was_recorded_shows(project, capsys, tmp_path):
+    briefed(capsys, project)
+    (tmp_path / "r.md").write_text("# Q3\n", "utf-8")
+    ah(capsys, project, "evidence", "add", str(tmp_path / "r.md"), "--kind", "result")
+    task = project.task()
+    Path(task.info()["evidence"][0]["file"]).write_text("# better\n", "utf-8")
+    assert "evidence #1 changed" in task.tampered()[0]
+
+
+def test_a_task_record_without_a_seal_or_key_is_not_judged(project, capsys, monkeypatch, tmp_path):
+    briefed(capsys, project)
+    task = project.task()
+    (task.dir / "task.sig").unlink()                       # a task from before the seal
+    assert task.tampered() == []
+    task._update_info(note="x")
+    monkeypatch.setenv("AUTOHARNESS_HOME", str(tmp_path / "elsewhere"))   # another machine: no key here
+    assert task.tampered() == []
+
+
+@pytest.mark.parametrize("tool,tool_input,blocked", [
+    ("Write", {"file_path": ".autoharness/tasks/x/task.json"}, True),
+    ("Edit", {"file_path": "{root}/.autoharness/kept.json"}, True),
+    ("Write", {"file_path": "{root}/.autoharness/config.json"}, False),   # the user's settings
+    ("Write", {"file_path": "{root}/a.py"}, False),
+    ("Write", {"TargetFile": "{root}/.autoharness/tasks/x/task.sig"}, True),   # agy names it TargetFile
+    ("Bash", {"command": "echo '{}' > .autoharness/tasks/x/task.json"}, True),
+    ("Bash", {"command": "sed -i 's/false/true/' .autoharness/tasks/x/task.json"}, True),
+    ("Bash", {"command": "rm -rf .autoharness"}, True),
+    ("PowerShell", {"command": r"Set-Content .autoharness\tasks\x\task.json '{}'"}, True),
+    ("Bash", {"command": "python -c \"open('.autoharness/tasks/x/task.json','w').write('{}')\""}, True),
+    ("Bash", {"command": "cat ~/.autoharness/integrity.key"}, True),
+    ("Bash", {"command": "cat .autoharness/tasks/x/task.json 2>&1 | head"}, False),
+    ("PowerShell", {"command": r"Get-Content .autoharness\tasks\x\task.json | ConvertFrom-Json"}, False),
+    ("Bash", {"command": "python -c \"import json; print(open('.autoharness/x/task.json').read())\""}, False),
+    ("Bash", {"command": "grep -r totals .autoharness > found.txt"}, False),
+    ("Bash", {"command": "echo '.autoharness/' >> .gitignore"}, False),
+    ("Bash", {"command": "git commit -q -F - <<'EOF'\nfix: a copy changed in .autoharness/; rm it\nEOF\ngit log"},
+     False),                                                        # a message about the records is no write
+    ("Bash", {"command": 'git commit -m "x; rm .autoharness/tasks too"'}, False),
+    ("Bash", {"command": "python - <<'EOF'\nimport pathlib\npathlib.Path('.autoharness/t/task.json')"
+                         ".write_text('{}')\nEOF"}, True),         # a heredoc an interpreter runs is code
+    ("Bash", {"command": "cd x && rm .autoharness/tasks/t/task.sig"}, True),
+])
+def test_the_hook_denies_writes_to_the_task_records(project, capsys, monkeypatch, tool, tool_input, blocked):
+    briefed(capsys, project)
+    tool_input = {k: v.replace("{root}", str(project.root)) for k, v in tool_input.items()}
+    call = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": tool, "tool_input": tool_input}
+    res = hook(capsys, monkeypatch, project, call)
+    assert bool(denied(res)) is blocked, (tool, tool_input, res)
+
+
+# --- Stop: the agent's own open task sends it back once ----------------------------------
+
+def test_stop_sends_the_owner_back_once_per_state_of_its_task(project, capsys, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    briefed(capsys, project)
+    stop = {"hook_event_name": "Stop", "session_id": "owner-1", "stop_hook_active": False}
+    res = hook(capsys, monkeypatch, project, stop)
+    assert res["decision"] == "block" and "autoharness teardown" in res["reason"] and "verify run" in res["reason"]
+    assert hook(capsys, monkeypatch, project, stop) is None              # nothing changed: the turn may end
+    assert hook(capsys, monkeypatch, project, dict(stop, session_id="other-2")) is None   # not its task
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    assert hook(capsys, monkeypatch, project, dict(stop, stop_hook_active=True)) is None
+    res = hook(capsys, monkeypatch, project, stop)                        # the task moved on: once more
+    assert res["decision"] == "block" and "verify run" not in res["reason"]
+    assert ah(capsys, project, "teardown")[0] == 0
+    assert hook(capsys, monkeypatch, project, stop) is None              # torn down
+
+
+def test_install_hook_adds_the_stop_event(tmp_path):
+    settings = tmp_path / "settings.json"
+    assert cli.install_hook(settings) == "installed"
+    hooks = json.loads(settings.read_text("utf-8"))["hooks"]
+    assert set(hooks) == {"UserPromptSubmit", "PreToolUse", "Stop"} and "matcher" not in hooks["Stop"][0]
+    assert cli.install_hook(settings) == "already_installed"
+    assert cli.install_hook(settings, remove=True) == "removed"
+    assert not json.loads(settings.read_text("utf-8")).get("hooks")
+
+
+# --- checks that cannot fail, and checks changed until they passed -----------------------
+
+@pytest.mark.parametrize("command,trivial", [
+    ("true", True), (":", True), ("exit 0", True), ("echo ok", True), ("Write-Output done", True),
+    ('python -c "pass"', True), ('python -c "import sys; sys.exit(0)"', True), ("python3 -c \"print('ok')\"", True),
+    ("cd tests && true", True), ("pytest -q", False), ("echo x | grep x", False), ("npm test", False),
+    ('python -c "import app; app.check()"', False), ("python -c \"print(open('x').read())\"", False),
+    ('python -c "pass" && pytest', False), ("exit 1", False),
+])
+def test_trivial_commands(command, trivial):
+    assert runs.is_trivial(command) is trivial
+
+
+def test_a_check_that_cannot_fail_does_not_count(project, capsys):
+    briefed(capsys, project)
+    code, res = ah(capsys, project, "verify", "run", "echo all good", "--for", "B1")
+    assert code == 1 and res["status"] == "not_a_check" and "checks nothing" in res["next"]
+    task = project.task()
+    task._update_info(arbitrations=[{"n": 1, "verdict": "fix", "after_round": 0, "part": "totals", "check": "c"}])
+    code, res = ah(capsys, project, "check", "--run", "true")
+    assert code == 1 and "checks nothing" in res["error"]
+    task._update_info(arbitrations=[])
+    code, res = ah(capsys, project, "teardown")
+    assert code == 0 and "B1" in res["checked"]["unchecked_items"]
+    assert res["checked"]["brief_items"][0]["run"] == "run #1 not a check"
+    assert any("checks nothing" in w for w in res["warnings"])
+
+
+def test_a_check_changed_after_it_failed_is_flagged(project, capsys):
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", FAIL, "--for", "B1")
+    other = f'{PY} -c "import json; print(1)"'
+    code, res = ah(capsys, project, "verify", "run", other, "--for", "B1")
+    assert code == 0 and "changed after it failed" in res["run"]["check_changed"]
+    assert "tell the user why the check changed" in res["next"]
+    ah(capsys, project, "verify", "run", FAIL, "--for", "B2")
+    ah(capsys, project, "verify", "run", FAIL.replace("sys.exit(3)", "sys.exit(0)"), "--for", "B2")
+    code, res = ah(capsys, project, "teardown")
+    if res["status"] == "lessons":
+        code, res = ah(capsys, project, "teardown")
+    flagged = [r for r in res["checked"]["ran"] if r.get("check_changed")]
+    assert [r["n"] for r in flagged] == [2, 4]
+    assert sum("changed after it failed" in w for w in res["warnings"]) == 2

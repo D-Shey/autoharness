@@ -16,7 +16,10 @@ stdin: `autoharness brief --args-file - <<'EOF'` ... `EOF` (Bash) or `@'` ... `'
 brief --args-file -` (PowerShell).
 
 If the hook is installed, tools that do work stay blocked until `init` (light) or `init` and `brief`
-(full). Reading files stays open. Skip the harness only when the user explicitly said so:
+(full). Reading files stays open. `.autoharness/` holds the task's records: only autoharness
+commands write there (the records are sealed, and teardown refuses an edited one). If the hook
+stops the end of your turn while your task is open, finish it, or say you are waiting on the
+user and end the turn again. Skip the harness only when the user explicitly said so:
 `autoharness waive <session id> --reason "<their words>"`, then tell them.
 
 A task belongs to the agent session that started it. If another session's task is active, you are
@@ -153,6 +156,9 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    A check that is a command goes through `verify run`, never "I ran it and it passed": the run is
    tied to the code it saw and goes stale when the code changes, so run it again after your last
    edit. With `--preserve` in the brief, teardown needs a passing `--for preserve` run. A command
+   that cannot fail (`true`, `echo ok`, `python -c "pass"`) is not a check and does not count.
+   When a check fails, fix the code, not the check. If the check itself was wrong, teardown shows
+   that it changed after it failed, so tell the user why. A command
    with quotes (PowerShell mangles them) goes in a JSON file: `{"command": "..."}`, then
    `autoharness verify run --args-file <file> --for B1`. No subagents at hand (or the critic must
    be another model)? `critic --run <agent>` starts the reviewer itself.

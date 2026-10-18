@@ -7,6 +7,7 @@ only after the user has said yes).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -579,6 +580,8 @@ def cmd_check(args, project, catalog):
             raise HarnessError("with --run the exit code decides: drop --result and --pass")
         if not evidence.pending_check(task):
             raise HarnessError("no arbiter check is waiting to be run")
+        if runs.is_trivial(args.run):
+            raise HarnessError(runs.NOT_A_CHECK.format(command=args.run) + ", the one the arbiter asked for")
         ran = runs.run(task, args.run, "arbiter-check", "arbiter", args.timeout)
         args.passed = "yes" if ran["passed"] else "no"
         args.result = f"`{args.run}` exited {ran['exit']}; output in {ran['log']}:\n{ran['tail']}"
@@ -929,6 +932,12 @@ def cmd_teardown(args, project, catalog):
                     for v in task.skills_lock().values()
                     if v["spec"].startswith("local:") and not library.exists(parse_skill_spec(v["spec"])[1])]
     info = task.info()
+    if (tampered := task.tampered()) and not args.force:
+        out({"status": "tampered", "task_id": task.id, "problems": tampered,
+             "next": "The task's records were changed around autoharness, so what they say about this task cannot "
+                     "be trusted. Tell the user exactly this, and what you changed there if it was you. Only they "
+                     "decide: `autoharness teardown --force` ends the task anyway."})
+        return 1
     blocking, skill_warnings = task.planned_skill_problems()
     if info.get("mode", "full") == "full" or info.get("brief", {}).get("review") == "critic" or info.get("profile") == "reviewed":
         blocking += evidence.problems(catalog, task)
@@ -977,6 +986,10 @@ def cmd_teardown(args, project, catalog):
         warnings.append("recorded from your retelling, not from the reviewer's answer file: " + ", ".join(retold)
                         + "; tell the user these verdicts are unconfirmed")
     checked = runs.summary(task)
+    warnings += [f"run #{r['n']} for {r['for']}: the check {r['check_changed']}: tell the user why the check changed"
+                 for r in checked["ran"] if r.get("check_changed")]
+    warnings += [f"run #{r['n']}: {runs.NOT_A_CHECK.format(command=r['command'])}"
+                 for r in checked["ran"] if r.get("not_a_check")]
     policy, source = config.teardown_policy(project.root, args.policy)
     result = task.teardown(policy)
     lessons.settle(task, result["kept"]["skills"], learned)
@@ -1461,6 +1474,82 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
             and last[:1] == ["autoharness"])
 
 
+# The task records under .autoharness/ are written by autoharness only (config.json is the user's to edit).
+# A write tool aimed there, or a shell command that plainly writes there, is denied; the seal on task.json
+# catches what gets past this at teardown. A guard against shortcuts, not a sandbox.
+RECORDS = re.compile(r"\.autoharness(?![\w.-])")
+KEY_FILE = re.compile(r"integrity\.key", re.I)
+_AT_COMMAND = r"(?:^|[;&|({\n]|&&|\|\|)\s*(?:sudo\s+)?"   # where a command word starts
+SHELL_WRITES = [
+    re.compile(r">>?\s*['\"]?[^\s'\";|&]*\.autoharness(?![\w.-])"),           # > .autoharness/x
+    re.compile(_AT_COMMAND + r"tee\b[^|;&\n]*\.autoharness(?![\w.-])"),
+    re.compile(_AT_COMMAND + r"sed\b[^|;&\n]*\s-i[^|;&\n]*\.autoharness(?![\w.-])"),
+    re.compile(_AT_COMMAND + r"(cp|mv|rm|rmdir|ln|touch|truncate|install|rsync|dd|del|erase|copy|move|ren|rename)\b"
+               r"[^|;&\n]*\.autoharness(?![\w.-])", re.I),
+    re.compile(_AT_COMMAND + r"(Set-Content|Add-Content|Clear-Content|Out-File|New-Item|Remove-Item|Copy-Item|"
+               r"Move-Item|Rename-Item|sc|ac|ni|ri|cpi|mi|rni)\b[^|;\n]*\.autoharness(?![\w.-])", re.I),
+    re.compile(r"\|\s*(Set-Content|Add-Content|Out-File)\b[^|;\n]*\.autoharness(?![\w.-])", re.I),
+    re.compile(r"open\([^)]*\.autoharness[^)]*['\"][wax]"),
+    re.compile(r"(write_text|write_bytes|WriteAllText|WriteAllBytes|unlink|rmtree|os\.remove|json\.dump)"
+               r"[\s\S]*\.autoharness(?![\w.-])|\.autoharness(?![\w.-])[\s\S]*"
+               r"(write_text|write_bytes|WriteAllText|WriteAllBytes|unlink|rmtree|os\.remove|json\.dump)"),
+]
+# text a command only carries, not runs: a commit message, a heredoc fed to something other than an interpreter
+_MESSAGE = re.compile(r"""(\s(?:-m|--message)[= ]?\s*)("(?:[^"\\]|\\.)*"|'[^']*')""")
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n([\s\S]*?)^\s*\2\s*$", re.M)
+_INTERPRETER = re.compile(r"\b(python[\d.]*|py|node|bash|sh|zsh|pwsh|powershell|ruby|perl|php|deno|bun|uv run)\b")
+
+
+def _shell_code(command: str) -> str:
+    """The command without the text it only carries, so a commit message about `.autoharness/` is not a write."""
+    command = _MESSAGE.sub(r"\1''", command)
+
+    def body(m: re.Match) -> str:
+        line = command[command.rfind("\n", 0, m.start()) + 1:m.start()]
+        return m.group(0) if _INTERPRETER.search(line) else m.group(0).replace(m.group(3), "")
+    return _HEREDOC.sub(body, command)
+
+
+RECORDS_DENIED = ("`.autoharness/` holds this task's records, and only autoharness writes them: record through its "
+                  "commands (`evidence add`, `review`, `verify run`, `check`, `brief`, ...). Reading them is fine. "
+                  "Teardown also checks the records against a seal, so an edit made around autoharness shows there. "
+                  "If the user asked you to change a setting, `.autoharness/config.json` is theirs to edit.")
+KEY_DENIED = "autoharness's integrity key seals the task records: it is not for tools to read or change."
+
+
+def _path_values(tool_input: dict) -> list[str]:
+    """The paths a write tool is aimed at: Claude Code's `file_path`/`notebook_path`, agy's `TargetFile` and the
+    like (any argument whose name says path or file)."""
+    return [v for k, v in tool_input.items()
+            if isinstance(v, str) and v and re.search(r"path|file", k, re.I) and "\n" not in v]
+
+
+def _writes_records(tool: str, tool_input: dict, root: Path) -> str | None:
+    """Why this call is denied when it would write the task records or touch the integrity key, else None."""
+    if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        state = (root / ".autoharness").resolve()
+        for value in _path_values(tool_input):
+            if KEY_FILE.search(value):
+                return KEY_DENIED
+            target = Path(value) if Path(value).is_absolute() else root / value
+            try:
+                target = target.resolve()
+            except OSError:
+                continue
+            if (target == state or state in target.parents) and target != state / "config.json":
+                return RECORDS_DENIED
+        return None
+    if tool not in ("Bash", "PowerShell"):
+        return None
+    command = str(tool_input.get("command", ""))
+    if KEY_FILE.search(command):
+        return KEY_DENIED
+    command = re.sub(r"\.autoharness[\\/]config\.json", "", _shell_code(command))
+    if RECORDS.search(command) and any(w.search(command) for w in SHELL_WRITES):
+        return RECORDS_DENIED
+    return None
+
+
 def _autoharness_subcommand(tool: str, tool_input: dict) -> str | None:
     """The subcommand of an `autoharness ...` call that `_is_autoharness_call` let through (`init`, `teardown`)."""
     if tool not in ("Bash", "PowerShell"):
@@ -1524,11 +1613,13 @@ def _agy_event(data: dict) -> dict | None:
 
 
 def cmd_hook(args, project, catalog):
-    """Claude Code hook for UserPromptSubmit and PreToolUse: make every real task go through autoharness.
+    """Claude Code hook for UserPromptSubmit, PreToolUse and Stop: make every real task go through autoharness.
     Antigravity CLI calls it for PreInvocation and PreToolUse, translated by `_agy_event`.
 
     The first substantial prompt of a session puts it in `pending`; tools that do work are denied until the
-    agent invokes the skill, starts a task, or the user waives it. Must never break the session, so any
+    agent invokes the skill, starts a task, or the user waives it. Writes to the task records are denied
+    always (`_writes_records`), and ending a turn with the session's task still open is sent back once
+    (`_stop_gate`). Must never break the session, so any
     internal failure lets the call through (for agy too: it reads empty output as no decision, `{}` as deny).
     """
     try:
@@ -1558,8 +1649,11 @@ def cmd_hook(args, project, catalog):
             via = ("other session" if foreign else "light" if task_info.get("mode") == "light" else
                    "brief" if ready else "waiting")
             if state != wanted or saved_state.get("task_id") != active or saved_state.get("via", via) != via:
-                set_session_state(sid, state=wanted, task_id=active, via=via, told=saved_state.get("told"))
+                set_session_state(sid, state=wanted, task_id=active, via=via, told=saved_state.get("told"),
+                                  stop_seen=saved_state.get("stop_seen"))
                 state = wanted
+        if event == "Stop":
+            return _stop_gate(data, sid, state, active, task_info)
         if event == "UserPromptSubmit":
             if foreign and state != "waived" and saved_state.get("told") != active:
                 ctx = handoff(Task(project, active), sid)
@@ -1591,6 +1685,11 @@ def cmd_hook(args, project, catalog):
                         {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                 "permissionDecisionReason": reason}})
                 return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
+            if reason := _writes_records(tool, tool_input, project.root):
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
             if state == "pending" and GATED_TOOLS.match(tool):
                 reason = handoff(Task(project, active), sid) if foreign else (
                     "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
@@ -1612,6 +1711,33 @@ def cmd_hook(args, project, catalog):
         return 0
 
 
+def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task_info: dict) -> int:
+    """Claude Code's Stop event: the agent is ending its turn while its own task is still open. Once per state
+    of the task it is sent back to finish (verify, critic, teardown) or to say it is waiting on the user; a
+    second stop with nothing changed goes through, so a turn that must end (a question, an approval) still can."""
+    if data.get("stop_hook_active") or not (active and sid) or state == "waived":
+        return 0
+    if task_info.get("status") != "active" or task_info.get("owner") != sid:
+        return 0
+    mark = hashlib.sha256(json.dumps(task_info, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    saved = session_state(sid)
+    if saved.get("stop_seen") == mark:
+        return 0
+    set_session_state(sid, **(saved | {"stop_seen": mark}))
+    left = []
+    if task_info.get("mode") != "light" and not task_info.get("brief"):
+        left.append("record the brief")
+    if not task_info.get("runs") and not task_info.get("checks"):
+        left.append("check the result (`autoharness verify run \"<command>\"`)")
+    left.append("`autoharness teardown`")
+    out({"decision": "block",
+         "reason": f"autoharness task {active} is still open: {task_info.get('task', '')[:200]!r}. Before you end "
+                   f"the turn: {'; '.join(left)} (teardown says what else it owes, such as a critic). If you are "
+                   "stopping on purpose (a question for the user, an approval, an accepted result), say so in your "
+                   "reply and end the turn again: this reminder comes once per state of the task."})
+    return 0
+
+
 def cmd_waive(args, project, catalog):
     set_session_state(args.session_id, state="waived", reason=args.reason)
     log = recipes.home() / "waivers.log"
@@ -1629,7 +1755,7 @@ def install_hook(settings: Path, remove: bool = False) -> str:
     data = json.loads(settings.read_text("utf-8")) if settings.exists() else {}
     hooks = data.setdefault("hooks", {})
     ours = lambda h: h.get("command") == HOOK_COMMAND  # noqa: E731
-    wanted = {"UserPromptSubmit": None, "PreToolUse": PRE_TOOL_MATCHER}
+    wanted = {"UserPromptSubmit": None, "PreToolUse": PRE_TOOL_MATCHER, "Stop": None}
     changed = False
     for event, matcher in wanted.items():
         entries = hooks.setdefault(event, [])
@@ -1784,11 +1910,19 @@ def cmd_verify(args, project, catalog):
         item = runs.run(task, command, args.name or "", purpose, args.timeout)
         with write_lock(project):
             audit.append(task, "run", **{k: item[k] for k in ("n", "command", "for", "exit", "passed")})
+        if item.get("trivial"):
+            out({"status": "not_a_check", "run": item, "next": runs.NOT_A_CHECK.format(command=command) + "."})
+            return 1
+        changed = runs.changed_after_failing(task.info().get("runs", [])).get(item["n"])
+        if changed and item["passed"]:
+            item["check_changed"] = changed
         out({"status": "passed" if item["passed"] else "failed", "run": item,
-             "next": ("Recorded as checked on the current code. An edit to the code makes this run stale: run it "
-                      "again after your last change." if item["passed"] else
-                      f"The check failed (exit {item['exit']}); the whole output is in {item['log']}. Fix the cause "
-                      "and run it again.")})
+             "next": (f"The check {changed}: teardown shows this; tell the user why the check changed. "
+                      if changed and item["passed"] else "")
+                     + ("Recorded as checked on the current code. An edit to the code makes this run stale: run it "
+                        "again after your last change." if item["passed"] else
+                        f"The check failed (exit {item['exit']}); the whole output is in {item['log']}. Fix the "
+                        "cause and run it again.")})
         return 0 if item["passed"] else 1
     if args.command or len(args.kind) != 1 or args.kind[0] not in VERIFY_KINDS:
         raise HarnessError(f"verify {args.action} takes one kind: {', '.join(VERIFY_KINDS)}")

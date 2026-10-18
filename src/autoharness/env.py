@@ -58,9 +58,32 @@ def _read_json(path: Path, default):
 
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", "utf-8")
+    tmp.write_text(text, "utf-8")
     tmp.replace(path)
+    if path.name == TASK_RECORD:
+        _write_seal(path, text)
+
+
+# a task's record and its seal: autoharness signs every write, so an edit made around it shows at teardown
+TASK_RECORD, TASK_SEAL = "task.json", "task.sig"
+
+
+def _write_seal(path: Path, text: str) -> None:
+    sig = path.with_name(TASK_SEAL)
+    tmp = sig.with_suffix(".sig.tmp")
+    tmp.write_text(approvals.seal(text.encode("utf-8")) + "\n", "ascii")
+    tmp.replace(sig)
+
+
+def _seal_matches(path: Path) -> bool | None:
+    """Whether a task record is what autoharness wrote; None when there is no seal or no key to tell."""
+    sig = path.with_name(TASK_SEAL)
+    if not (path.exists() and sig.exists()):
+        return None
+    # written in text mode: on Windows the file holds CRLF where the sealed text had LF
+    return approvals.sealed(path.read_bytes().replace(b"\r\n", b"\n"), sig.read_text("ascii"))
 
 
 # Files a skill's own scripts or the OS create at runtime; they are not user edits.
@@ -418,6 +441,18 @@ class Task:
     def skills_dir(self) -> Path:
         return self.agent.skills_path(self.project.root)
 
+    def tampered(self) -> list[str]:
+        """What changed in this task's records outside autoharness: the record itself (when this machine sealed
+        it) and the evidence copies (each kept with its sha256)."""
+        record = self.dir / TASK_RECORD
+        found = [f"task record changed outside autoharness: {record} is not what autoharness wrote"
+                 ] if _seal_matches(record) is False else []
+        for e in self.info().get("evidence", []):
+            copy = Path(e.get("file", ""))
+            if e.get("sha256") and copy.is_file() and hashlib.sha256(copy.read_bytes()).hexdigest() != e["sha256"]:
+                found.append(f"evidence #{e['n']} changed after it was recorded: {copy}")
+        return found
+
     def _update_info(self, **fields) -> None:
         info = self.info()
         info.update(fields)
@@ -550,6 +585,7 @@ class Task:
         updates[info_path] = json.dumps(info, indent=2, ensure_ascii=False) + "\n"
         updates[self.dir / "mcp.lock.json"] = json.dumps(lock, indent=2, ensure_ascii=False) + "\n"
         updates[self.dir / "permissions.json"] = json.dumps(grants, indent=2, ensure_ascii=False) + "\n"
+        updates[self.dir / TASK_SEAL] = approvals.seal(updates[info_path].encode("utf-8")) + "\n"
         transactions.commit(self.project.root, updates)
 
     def _audit_install_mcp(self, name: str, config: dict, source: str) -> None:
