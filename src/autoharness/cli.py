@@ -1520,8 +1520,46 @@ def cmd_verify(args, project, catalog):
     return 0
 
 
+ARGS_FILE = "--args-file"
+
+
+def expand_args_files(argv: list[str]) -> list[str]:
+    """Replace `--args-file <file>` with the options in that JSON object, so long texts (a review, a brief, a
+    measurement) need no shell quoting: {"diff": "1 a; 2 b", "worst": "minor", "settled": ["x", "y"]}.
+    A list repeats the option, true is a bare flag, false or null leaves it out."""
+    out, i = [], 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg != ARGS_FILE and not arg.startswith(ARGS_FILE + "="):
+            out.append(arg)
+            i += 1
+            continue
+        if "=" in arg:
+            path, i = arg.split("=", 1)[1], i + 1
+        elif i + 1 < len(argv):
+            path, i = argv[i + 1], i + 2
+        else:
+            raise HarnessError(f"{ARGS_FILE} needs a file")
+        try:
+            data = json.loads(Path(path).read_text("utf-8-sig"))
+        except (OSError, ValueError) as e:
+            raise HarnessError(f"{ARGS_FILE} {path}: {e}") from e
+        if not isinstance(data, dict):
+            raise HarnessError(f"{ARGS_FILE} {path}: expected a JSON object of option names and values")
+        for key, value in data.items():
+            flag = key if key.startswith("-") else "--" + key.replace("_", "-")
+            for v in value if isinstance(value, list) else [value]:
+                if v is True:
+                    out.append(flag)
+                elif v is not None and v is not False:
+                    out.append(f"{flag}={v}")   # `=`: a text starting with `-` stays a value
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="autoharness", description=__doc__.split("\n")[0])
+    p = argparse.ArgumentParser(prog="autoharness", description=__doc__.split("\n")[0],
+                                epilog=f"Long texts without shell quoting: {ARGS_FILE} <file.json> anywhere in the "
+                                       'command, a JSON object of options, e.g. {"diff": "...", "worst": "minor"}.')
     p.add_argument("--project", default=".", help="project root (default: cwd)")
     p.add_argument("--agent", choices=list(agents.AGENTS),
                    help="target coding agent (default: the task's agent, else $AUTOHARNESS_AGENT, else auto-detect, else claude)")
@@ -1708,6 +1746,11 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        argv = expand_args_files(sys.argv[1:] if argv is None else list(argv))
+    except HarnessError as e:
+        out({"status": "error", "error": str(e)})
+        return 1
     args = build_parser().parse_args(argv)
     project = Project(Path(args.project).resolve(), args.agent)
     started = time.monotonic()

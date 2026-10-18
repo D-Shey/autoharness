@@ -9,7 +9,9 @@ You start almost bare and build the harness this task needs: references, docs, t
 check the result. The `autoharness` CLI does the bookkeeping (lockfiles, trust checks, teardown); you
 do the thinking. Every command prints JSON with a `next` field: **follow `next`**, it carries the
 detailed procedure for the step you are in, so never cut a command's output short. Exit code `3`
-means **stop and ask the user**.
+means **stop and ask the user**. Long texts with quotes, brackets or `;` (a brief, a review, a
+measurement) go in a JSON file instead of the command line: `--args-file <file.json>` with
+`{"diff": "...", "worst": "minor"}`.
 
 If the hook is installed, tools that do work stay blocked until `init` (light) or `init` and `brief`
 (full). Reading files stays open. Skip the harness only when the user explicitly said so:

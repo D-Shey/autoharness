@@ -164,24 +164,32 @@ def top_issue(diff: str) -> str:
 
 
 def same_issue(a: str, b: str) -> bool:
+    """Half the words of the shorter text are in the other, and more than one word unless it has only one:
+    a two-word name sharing just "hand" with a long point is another problem."""
     sa, sb = text.stems(a), text.stems(b)
-    return bool(sa and sb) and len(sa & sb) / min(len(sa), len(sb)) >= 0.5
+    shared = len(sa & sb)
+    return bool(sa and sb) and shared / min(len(sa), len(sb)) >= 0.5 and (shared >= 2 or min(len(sa), len(sb)) == 1)
+
+
+LEADING_TAGS = re.compile(r"^(?:\s*(?:\[[^\]]*\]|\([^)]*\)|\*\*|__))+")
 
 
 def headline(item: str) -> str:
-    """The name of a listed problem, without the details a critic adds after a colon, comma or bracket."""
-    return re.split(r"[:,(;]|\s[-–—]\s", item, maxsplit=1)[0].strip()
+    """The name of a listed problem, without the tags a critic puts in front (`[severity: major, ...]`) and the
+    details it adds after a colon, comma or bracket."""
+    return re.split(r"[:,(\[;]|\s[-–—]\s", LEADING_TAGS.sub("", item), maxsplit=1)[0].strip(" *_")
 
 
 def same_problem(a: str, b: str) -> bool:
     """Two listed items name the same problem: critics describe it in new words each round, so the
     details differ while the headline stays."""
-    return same_issue(headline(a), headline(b)) or same_issue(a, b)
+    return same_issue(headline(a), headline(b)) or same_issue(LEADING_TAGS.sub("", a), LEADING_TAGS.sub("", b))
 
 
 def issues(diff: str) -> list[str]:
     """The differences of a review that still block: every listed item except those tagged minor only."""
-    items = re.split(r";|\n|\s(?=\d+[.)]\s)", diff.strip())
+    # `1 a; 2 b` or one point per line; a `;` inside a point (`too round; fringe wrong`) does not split it
+    items = re.split(r";\s*(?=\d+[.)]?\s)|\n|\s(?=\d+[.)]\s)", diff.strip())
     out = []
     for raw in items:
         item = re.sub(r"^\s*\d+[.)]?\s*", "", raw).strip()

@@ -2114,6 +2114,52 @@ def test_issues_split_a_critic_list():
     assert evidence.issues("1 face flat (major); 2 props (minor)\n3. hand stiff") == ["face flat (major)",
                                                                                        "hand stiff"]
     assert evidence.issues("1. K turned 24 degrees 2. hair") == ["K turned 24 degrees", "hair"]
+    # a `;` inside a point is part of it, not an untagged point of its own
+    assert evidence.issues("1. [severity: major] hair: too round; fringe wrong\n2. [severity: minor] sky") == [
+        "[severity: major] hair: too round; fringe wrong"]
+
+
+def test_args_file_carries_long_texts_without_shell_quoting(project, capsys, tmp_path):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    texts = {"goal": 'matches the "frame"; (no) $(rm -rf x) `tick`', "inputs": "-stills first",
+             "constraints": "none", "verify": "side by side", "candidates": "none: x",
+             "gaps": "none: tools at hand", "review": "critic", "fidelity": None}
+    f = tmp_path / "brief.json"
+    f.write_text("﻿" + json.dumps(texts), "utf-8")
+    code, res = cli_json(capsys, "--project", root, "brief", "--args-file", str(f))
+    assert code == 0, res
+    brief_ = project.task().info()["brief"]
+    assert brief_["goal"] == texts["goal"] and brief_["inputs"] == "-stills first"
+    assert cli.expand_args_files(["x", "--args-file=" + str(f)])[:2] == ["x", "--goal=" + texts["goal"]]
+    lists = tmp_path / "l.json"
+    lists.write_text(json.dumps({"settled": ["a", "b"], "force": True, "keep": False}), "utf-8")
+    assert cli.expand_args_files(["--args-file", str(lists)]) == ["--settled=a", "--settled=b", "--force"]
+    for bad in (tmp_path / "missing.json", lists.with_name("arr.json")):
+        if bad.name == "arr.json":
+            bad.write_text("[1]", "utf-8")
+        code, res = cli_json(capsys, "--project", root, "brief", "--args-file", str(bad))
+        assert code == 1 and "--args-file" in res["error"]
+
+
+def test_critic_tags_in_front_do_not_make_every_problem_the_same():
+    from autoharness import evidence
+    hair = "[severity: major, fixable: yes] Joi's hairstyle and bangs: the reference has a blunt fringe"
+    rail = "[severity: major, fixable: yes] Bridge railing: too thin compared to the reference"
+    assert evidence.headline(hair) == "Joi's hairstyle and bangs"
+    assert evidence.headline("**Bridge railing** (major): thin") == "Bridge railing"
+    assert not evidence.same_problem(hair, rail)
+    assert evidence.same_problem(hair, "[severity: major, fixable: yes] Joi's hairstyle and bangs: still rounded")
+    assert evidence.same_problem("Joi's hairstyle and bangs", hair)
+
+
+@pytest.mark.parametrize("part, item", [
+    ("Joi's hand", "Bridge railing is too thin and K's hand is hidden behind it"),
+    ("catwalk deck", "The sky gradient is too flat and the deck lights are missing"),
+])
+def test_one_shared_word_does_not_make_a_named_part_the_same_problem(part, item):
+    from autoharness import evidence
+    assert not evidence.same_problem(part, item)
 
 
 def test_disagreeing_is_not_dropping(project, capsys, tmp_path):
