@@ -33,10 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
+import tomllib
 
 
 class AgentError(Exception):
