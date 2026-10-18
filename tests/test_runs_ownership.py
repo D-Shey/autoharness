@@ -450,6 +450,27 @@ def test_the_hook_notes_what_the_user_writes_during_their_own_task(project, caps
     assert any("stepped in 1 time(s)" in line and "title must be bold" in line for line in lessons.friction(task))
 
 
+def test_the_agent_cannot_accept_its_own_result_until_the_user_has_spoken(project, capsys, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    briefed(capsys, project)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+
+    def call(command):
+        return hook(capsys, monkeypatch, project, {"hook_event_name": "PreToolUse", "session_id": "owner-1",
+                                                   "tool_name": "Bash", "tool_input": {"command": command}})
+
+    accepted = 'autoharness teardown --accepted "small fix, tests pass" 2>&1 | tail -15'
+    res = call(accepted)
+    assert denied(res) and "user has said nothing" in res["hookSpecificOutput"]["permissionDecisionReason"]
+    assert denied(call("autoharness teardown --force"))
+    assert denied(call("autoharness teardown --accepted=fine"))
+    assert not denied(call("autoharness teardown"))
+    assert not denied(call('autoharness review --by self --diff "1 x" --worst none'))
+    hook(capsys, monkeypatch, project, {"hook_event_name": "UserPromptSubmit", "session_id": "owner-1",
+                                        "prompt": "fine, take it as it is"})
+    assert not denied(call(accepted))
+
+
 def test_a_smooth_task_has_no_lessons_and_tears_down_at_once(project, capsys):
     briefed(capsys, project)
     ah(capsys, project, "verify", "run", OK, "--for", "B1")

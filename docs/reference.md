@@ -28,7 +28,7 @@
 | `evidence add <file> --kind reference\|result` / `evidence diff [--base REV]` | референс или результат раунда; для кода — весь diff |
 | `review` / `critic` | раунд проверки; промпт для независимого критика |
 | `approach` / `arbiter` / `arbitrate` / `check` | смена подхода к части, которая не проходит review; арбитр и его проверка |
-| `teardown [--keep\|--remove] [--save-recipe NAME --notes ... --query kind:q] [--accepted ...]` | завершает задачу |
+| `teardown [--keep\|--remove] [--save-recipe NAME --notes ... --query kind:q] [--accepted ...]` | завершает задачу; `--accepted`/`--force` — только словами пользователя, хук их отклоняет, пока пользователь не написал ничего с начала задачи |
 | `status [--full]` | текущий harness, что сохранено в проекте, журнал; по умолчанию сжато (поиск — строка на запрос, лог — последние 30 строк) |
 | `eval record --case NAME --variant baseline\|harness --passed yes\|no [--seconds N] [--task-id ID] [--tokens N] [--cost N] [--tool-calls N]` | сохраняет измерение прогона; завершённая задача задаёт время и статистику CLI |
 | `eval batch --dataset FILE --variant baseline\|harness -- RUNNER [ARGS]` | запускает внешний runner на каждом JSONL случае и записывает измерения |

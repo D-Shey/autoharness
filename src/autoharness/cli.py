@@ -1030,8 +1030,9 @@ def cmd_teardown(args, project, catalog):
         task.log(f"user accepted the result as it is: {args.accepted}")
     if blocking and not (args.force or args.accepted):
         out({"status": "incomplete", "task_id": task.id, "problems": blocking,
-             "next": "Fix these, then tear down again. If the user decides the result is good enough as it is, "
-                     "run `autoharness teardown --accepted \"<their words>\"`."})
+             "next": "Fix these, then tear down again. If the user, asked in this task, decides the result is "
+                     "good enough as it is, run `autoharness teardown --accepted \"<their words>\"`; never on "
+                     "your own judgment (with the hook installed it is refused until the user has spoken)."})
         return 1
     learned = lessons.friction(task)
     # the user ending the task (`--accepted`, or `--force` on their word) is not held up for lessons
@@ -1640,13 +1641,30 @@ def _writes_records(tool: str, tool_input: dict, root: Path) -> str | None:
     return None
 
 
+def _autoharness_words(tool: str, tool_input: dict) -> list[str]:
+    """The words after `autoharness` in a call that `_is_autoharness_call` let through."""
+    if tool not in ("Bash", "PowerShell"):
+        return []
+    command = TRAILING_OUTPUT.sub("", _without_stdin(tool, str(tool_input.get("command", "")).strip()))
+    words = (_plain_commands(command, bash=tool == "Bash") or [[]])[-1]
+    return words[words.index("autoharness") + 1:] if "autoharness" in words else []
+
+
+# Flags that end a task on the user's word: the agent may pass them only after the user said something in the task
+USER_FLAGS = ("--accepted", "--force")
+
+
+def _user_flags(tool: str, tool_input: dict) -> list[str]:
+    """The flags of USER_FLAGS a `teardown` call carries, `--accepted=...` included."""
+    return [flag for flag in USER_FLAGS
+            if any(w == flag or w.startswith(flag + "=") for w in _autoharness_words(tool, tool_input))]
+
+
 def _autoharness_subcommand(tool: str, tool_input: dict) -> str | None:
     """The subcommand of an `autoharness ...` call that `_is_autoharness_call` let through (`init`, `teardown`)."""
     if tool not in ("Bash", "PowerShell"):
         return None
-    command = TRAILING_OUTPUT.sub("", _without_stdin(tool, str(tool_input.get("command", "")).strip()))
-    words = (_plain_commands(command, bash=tool == "Bash") or [[]])[-1]
-    words = words[words.index("autoharness") + 1:] if "autoharness" in words else []
+    words = _autoharness_words(tool, tool_input)
     skip = False
     for word in words:
         if skip:
@@ -1780,6 +1798,17 @@ def cmd_hook(args, project, catalog):
             if _is_autoharness_call(tool, tool_input):
                 if foreign and state != "waived" and _autoharness_subcommand(tool, tool_input) in ("init", "teardown"):
                     reason = handoff(Task(project, active), sid)
+                    out({"decision": "deny", "reason": reason} if agy else
+                        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                "permissionDecisionReason": reason}})
+                if (active and not foreign and state != "waived"
+                        and _autoharness_subcommand(tool, tool_input) == "teardown"
+                        and (flags := _user_flags(tool, tool_input))
+                        and not lessons.user_messages(Task(project, active))):
+                    reason = (f"`teardown {' / '.join(flags)}` ends the task on the user's word, and the user has "
+                              "said nothing since this task started: you cannot accept your own result for them. "
+                              "Finish what teardown asks for (its `problems`), or stop and ask the user whether "
+                              "they accept the result as it is; pass their words only after they answer.")
                     out({"decision": "deny", "reason": reason} if agy else
                         {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                 "permissionDecisionReason": reason}})
