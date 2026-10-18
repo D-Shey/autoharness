@@ -465,8 +465,9 @@ def pending_check(task: Task) -> dict | None:
     return next((a for a in reversed(fixes) if not a.get("checked")), None)
 
 
-def record_check(task: Task, result: str, passed: bool) -> dict:
-    """Record what the arbiter's check measured on the new result."""
+def record_check(task: Task, result: str, passed: bool, run: int | None = None) -> dict:
+    """Record what the arbiter's check measured on the new result; `run`: the number of the run autoharness
+    made of it, when it ran the check itself."""
     arb = pending_check(task)
     if not arb:
         raise HarnessError("no arbiter check is waiting to be run")
@@ -475,7 +476,8 @@ def record_check(task: Task, result: str, passed: bool) -> dict:
     items = task.info().get("arbitrations", [])
     for a in items:
         if a["n"] == arb["n"]:
-            a["checked"] = {"result": result, "passed": passed, "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            a["checked"] = {"result": result, "passed": passed, "time": time.strftime("%Y-%m-%dT%H:%M:%S")} \
+                | ({"run": run} if run else {})
             arb = a
     task._update_info(arbitrations=items)
     task.log(f"check of arbiter fix {arb['n']}: {'passed' if passed else 'failed'}: {result}")
@@ -534,6 +536,7 @@ def latest_round(task: Task) -> list[dict]:
 
 def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
     """A self-contained prompt for a fresh reviewer that has not seen the author's reasoning."""
+    from autoharness import runs  # lazy: runs imports this module
     info = task.info()
     result = latest(task, "result")
     if not result:
@@ -606,6 +609,13 @@ Name what would fix it at the target fidelity. Then give your full list as below
             f"- check: {a['check']}\n  measured: {a['checked']['result']} "
             f"({'passed' if a['checked']['passed'] else 'failed'})" for a in checked) + \
             "\nVerify that measurement yourself in the files before you rely on it.\n"
+    ran = info.get("runs", [])[-6:]
+    if ran:
+        focused += ("\nautoharness itself ran these checks (the exit code decides; the whole output is in each log; "
+                    "\"stale\": the code changed after the run):\n" + "\n".join(
+                        f"- `{r['command']}`: {'passed' if r['passed'] else 'failed'}"
+                        f"{'' if runs.is_fresh(r, task.project.root) is not False else ', stale'}: {r['log']}"
+                        for r in ran) + "\n")
     settled_points = [p for r in critics for p in r.get("settled", [])]
     if settled_points:
         focused += ("\nEarlier critics settled these disputed points from measurements in the files. Do not raise "
@@ -626,6 +636,16 @@ Under the heading "Previous review", give one line per point: fixed, still wrong
 Where your fix for a point goes the opposite way from the previous review's (lighter vs darker,
 more vs less, bigger vs smaller), say so and settle it from what the reference shows, with a value
 or a measurement, so the author is not sent back and forth.
+"""
+    brief_items = runs.brief_items(brief)
+    coverage = "" if not brief_items else f"""
+After your list, check the work item by item against what the brief asked for:
+{chr(10).join(f"{i['id']}: {i['text']}" for i in brief_items)}
+(P items must keep working as before.) Under the heading "Brief coverage", give one line per item, in
+this form: `B1: met | partial | missing | contradicts - what in the files shows it`. An item that is
+missing, partial or contradicted is also a difference in your list, with the severity it has.
+Then under the heading "Unrequested", list as "- " bullets what the result adds or changes that
+neither the task nor the brief asked for, or write "none".
 """
     prompt = f"""You are an independent critic. You did not make this work and owe its author nothing.
 
@@ -656,7 +676,7 @@ Tag each one:
 {see}
 Give each difference the severity it has, without praise: the task may end once the worst fixable one is
 minor. Do not suggest changing the constraints.
-{previous}
+{coverage}{previous}
 End with exactly one line naming the worst severity among the FIXABLE differences:
 VERDICT: blocker | major | minor | none"""
     return {"prompt": prompt, "result": result["file"], "results": [e["file"] for e in results],
