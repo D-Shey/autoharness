@@ -7,6 +7,8 @@
 ends, `remove` takes it all down.
 `allowed_hosts`: comma-separated host patterns MCP servers may reach (see egress.py);
 empty, the default, means no restriction.
+`min_mode`: the lowest level `init` starts a task at: `any` (the default) leaves it to the agent, `full` or
+`reviewed` raise a lighter choice to that level.
 """
 
 from __future__ import annotations
@@ -19,7 +21,8 @@ from autoharness.env import HarnessError, ensure_state_dir
 from autoharness.recipes import home
 
 # first value is the default; None takes free text and defaults to ""
-SETTINGS: dict[str, tuple[str, ...] | None] = {"teardown": ("keep", "remove"), "allowed_hosts": None}
+SETTINGS: dict[str, tuple[str, ...] | None] = {"teardown": ("keep", "remove"), "allowed_hosts": None,
+                                               "min_mode": ("any", "full", "reviewed")}
 
 
 def global_path() -> Path:

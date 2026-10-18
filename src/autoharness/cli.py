@@ -196,6 +196,9 @@ def cmd_plan(args, project, catalog):
     return 0
 
 
+LEVELS = ("light", "full", "reviewed")
+
+
 def cmd_init(args, project, catalog):
     if args.profile and args.mode:
         raise HarnessError("use either --profile or --mode, not both")
@@ -205,6 +208,10 @@ def cmd_init(args, project, catalog):
                 else args.mode or "full")
     if selected == "auto":
         selected = "full" if classified else "light"
+    floor, floor_source = config.resolve(project.root, "min_mode")
+    raised = floor != "any" and LEVELS.index(selected) < LEVELS.index(floor)
+    if raised:
+        selected = floor   # the user's setting, not the agent's judgement, sets the lowest level
     mode = "light" if selected == "light" else "full"
     checked = [c.name for c, _ in classified if c.requires]
     # an image to match is the case agents skip most (drawing from memory): light mode has to be argued for
@@ -226,6 +233,9 @@ def cmd_init(args, project, catalog):
     if selected == "reviewed":
         task._update_info(profile="reviewed")
     result = {"status": "ok", "task_id": task.id, "dir": str(task.dir), "mode": selected}
+    if raised:
+        result["mode_raised"] = f"to {floor} by the min_mode setting ({floor_source})"
+        task.log(f"mode raised to {floor} by the min_mode setting ({floor_source})")
     if mode == "light":
         # everything else init prints serves discovery: light mode does none, so it would only fill the context
         if classified:

@@ -35,7 +35,7 @@
 | `eval compare` | сравнивает только случаи, у которых есть оба варианта прогона |
 | `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
 | `recipe list\|match\|show` | сохранённые наборы; `show` перезапускает запросы recipe и отдаёт новое в `fresh` |
-| `config get\|set [teardown keep\|remove \| allowed_hosts "<хосты>"] [--global]` | настройки |
+| `config get\|set [teardown keep\|remove \| allowed_hosts "<хосты>" \| min_mode any\|full\|reviewed] [--global]` | настройки |
 | `gateway install\|uninstall\|status\|serve\|approve` | MCP-сервер autoharness, через который новые серверы работают без перезапуска |
 | `install-skill` / `install-hook` / `waive` | установка skill и хука; пропуск autoharness в сессии по слову пользователя |
 | `agents` | поддерживаемые агенты и их пути |

@@ -764,3 +764,14 @@ def test_the_user_ending_the_task_is_not_held_up_for_lessons(project, capsys):
     code, res = ah(capsys, project, "teardown", "--accepted", "stop, that is enough")
     assert code == 0 and res["status"] == "ok" and res["lessons"]
     assert "offer once" in res["next"]
+
+
+def test_min_mode_raises_a_lighter_choice(project, capsys, monkeypatch):
+    monkeypatch.setenv("AUTOHARNESS_MIN_MODE", "full")
+    code, res = ah(capsys, project, "init", "fix the quarterly report", "--mode", "light")
+    assert code == 0 and res["mode"] == "full" and "min_mode" in res["mode_raised"]
+    assert project.task().info()["mode"] == "full"
+    ah(capsys, project, "teardown", "--force")
+    monkeypatch.setenv("AUTOHARNESS_MIN_MODE", "any")
+    code, res = ah(capsys, project, "init", "fix the yearly report", "--mode", "light")
+    assert res["mode"] == "light" and "mode_raised" not in res
