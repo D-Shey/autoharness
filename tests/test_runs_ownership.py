@@ -576,6 +576,10 @@ def test_a_task_record_without_a_seal_or_key_is_not_judged(project, capsys, monk
     ("PowerShell", {"command": r"Get-Content .autoharness\tasks\x\task.json | ConvertFrom-Json"}, False),
     ("Bash", {"command": "python -c \"import json; print(open('.autoharness/x/task.json').read())\""}, False),
     ("Bash", {"command": "grep -r totals .autoharness > found.txt"}, False),
+    ("Bash", {"command": "python -c \"import json; i=json.load(open('.autoharness/x/task.json')); "
+                         "print(json.dumps(i))\""}, False),          # json.dumps only builds a string
+    ("Bash", {"command": "python -c \"import json; json.dump({}, open('.autoharness/x/task.json','w'))\""},
+     True),
     ("Bash", {"command": "echo '.autoharness/' >> .gitignore"}, False),
     ("Bash", {"command": "git commit -q -F - <<'EOF'\nfix: a copy changed in .autoharness/; rm it\nEOF\ngit log"},
      False),                                                        # a message about the records is no write

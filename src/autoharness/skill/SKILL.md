@@ -87,7 +87,8 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get 
   --constraints "<verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; ...; searched: <queries>" \
   --gaps "create <skill-name>: <capability>; ..."   # or "none: <why tools at hand cover it>"
-  # optional: --fidelity "<level to judge at>"  --review critic|pair (pair: + a code-quality reviewer)
+  # --fidelity "<level to judge at>" (required for work judged by eye: "stylised poster, not photographic")
+  # optional: --review critic|pair (pair: + a code-quality reviewer)
   #           --preserve "<existing behaviour that must keep working>"
 ```
 

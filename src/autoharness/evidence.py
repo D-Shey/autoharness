@@ -351,7 +351,8 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
             # the harness settles a loop by itself, without the user: a different approach, then
             # independent arbiters who name a fix with a measurable check or rule the part out of
             # reach, then a final arbiter whose failed fix rules the part out of reach as agreed
-            if item["tried"] < MAX_APPROACHES:
+            backwards = item.get("compared", {}).get("closer") == "earlier"
+            if item["tried"] < MAX_APPROACHES and not backwards:
                 item["needs_approach"] = part
             elif item["arbitrated"] <= MAX_ARBITRATIONS:
                 item["needs_arbiter"] = part
@@ -364,8 +365,19 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
                 item["auto_limited"] = part
                 if not [i for i in issues(diff) if not is_limited(task, i)]:
                     item.update(worst="minor", fixable=False, worst_given=worst, limited=True)
+    if by == "critic" and item.get("compared", {}).get("closer") == "earlier" and "auto_limited" not in item:
+        since = _last_asked(reviews)
+        before = [r for r in reviews if r["by"] == "critic" and r["round"] > since]
+        if before and before[-1].get("compared", {}).get("closer") == "earlier":
+            # the fixes are making the work worse: more rounds would only go further down
+            for key in ("needs_approach", "needs_arbiter", "final_arbiter"):
+                item.pop(key, None)
+            item.update(loop_asked=True, revert_to=item["compared"]["earlier"])
+            item["trend"] = [f"{r['round']}: {r['worst']}" + (f", closer than #{r['compared']['earlier']}: "
+                                                              f"{r['compared']['closer']}" if r.get("compared") else "")
+                             for r in before + [item]]
     if by == "critic" and item["worst"] in BLOCKING and not any(
-            k in item for k in ("needs_approach", "needs_arbiter", "auto_limited")):
+            k in item for k in ("needs_approach", "needs_arbiter", "auto_limited", "revert_to")):
         since = _last_asked(reviews)
         rounds = [r for r in reviews if r["by"] == "critic" and r["round"] > since] + [item]
         if len(rounds) >= ROUND_BUDGET:
@@ -724,7 +736,10 @@ above; a newer version is not better for being newer):
 - A: {pair["files"]["A"]}
 - B: {pair["files"]["B"]}
 Under the heading "Comparison", give one line, `CLOSER: A`, `CLOSER: B` or `CLOSER: same`: which one is
-closer to the reference and the quality bar as a whole, weighing what matters most. Then one sentence why.
+the better work as a whole at the target fidelity, the one the user would rather keep. Judge the whole
+first: a part brought closer to the reference at the cost of the whole (broken proportions, lost style,
+a patched look) does not make a version better. Closeness to the reference decides only between two
+versions equally good as a whole. Then one sentence why.
 """
     beyond = ("for example photographic detail in a stylised drawing" if visual else
               "for example polish or cases the quality bar does not ask for")
@@ -763,7 +778,8 @@ Keep it only if the files show it is true. Then give your own full list as below
 These parts kept failing earlier reviews, and the author changed the approach for them:
 {chr(10).join(blocks)}
 Judge these parts first, in their close-ups: is each still wrong, and if so, how is it wrong now?
-Name what would fix it at the target fidelity. Then give your full list as below.
+Name what would fix it at the target fidelity. Then look at the whole again: if fixing these parts made
+the whole worse, that is a difference of its own. Then give your full list as below.
 """
     last_round = critics[-1]["round"] if critics else 0
     checked = [a for a in info.get("arbitrations", []) if a.get("checked") and a["after_round"] >= last_round]
@@ -842,6 +858,9 @@ Check the user's constraints there as well, not only in what the result shows.
 List the most important differences between the result and the reference / quality bar,
 most important first, at most 8, numbered 1., 2., ... with each point's tags on the same line. Look in particular at: {focus}.
 List only real differences, never what matches; if you find none, write "No differences." instead of a list.
+What the result adds beyond the task (an effect, a caption, a style choice, an extra) is not a difference
+by itself: it goes under "Unrequested" below, and into your list only where it breaks the quality bar or
+a constraint, or changes behaviour no one asked to change.
 Tag each one:
 - severity: blocker (the result fails its purpose), major (clearly wrong, noticeable at a glance),
   or minor (polish, or detail beyond the target fidelity);
