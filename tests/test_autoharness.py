@@ -2033,7 +2033,10 @@ def test_failed_arbiter_fixes_end_in_a_final_arbiter_then_a_limit_not_the_user(p
     code, res = critic_round(capsys, root, "1 face flat mask (major)", "major")
     assert res["review"]["worst"] == "minor"
     code, res = cli_json(capsys, "--project", root, "teardown")
-    assert code == 0
+    assert code == 1 and res["status"] == "lessons"   # once: a loop and an arbiter are worth a skill
+    assert any("out of reach" in line for line in res["lessons"])
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0 and res["lessons"]
 
 
 def test_a_part_ruled_out_of_reach_stops_blocking(project, capsys, tmp_path):
@@ -2046,6 +2049,8 @@ def test_a_part_ruled_out_of_reach_stops_blocking(project, capsys, tmp_path):
     assert "ruled these parts out of reach" in res["prompt"] and "crouched body unreadable" in res["prompt"]
     code, res = critic_round(capsys, root, "1 crouched body still unreadable, knee a ball (major)", "major")
     assert res["review"]["worst"] == "minor" and res["review"]["worst_given"] == "major"
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 1 and res["status"] == "lessons"
     code, res = cli_json(capsys, "--project", root, "teardown")
     assert code == 0  # nothing else blocks
 
