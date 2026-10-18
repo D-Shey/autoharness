@@ -18,13 +18,14 @@ from importlib import resources
 from pathlib import Path
 
 from autoharness import (agents, answers, approvals, config, egress, evidence, followups, history, library, recipes,
-                         registry, text, vet)
+                         registry, reviewers, runs, text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
                              npx_stage_skill, parse_skill_spec, skill_dir)
 from autoharness.trust import curated_report, score_registry_entry, score_skill
 
 EXIT_APPROVAL = 3
+VERIFY_KINDS = ("browser", "api", "api-client", "logs", "database")
 
 
 def out(data) -> None:
@@ -203,7 +204,10 @@ def cmd_init(args, project, catalog):
     if selected == "auto":
         selected = "full" if classified else "light"
     mode = "light" if selected == "light" else "full"
+    check_owner(project, project.active_id())
     task = project.init_task(args.task, mode=mode)
+    if owner := agents.session_id():
+        task._update_info(owner=owner)
     if selected == "reviewed":
         task._update_info(profile="reviewed")
     result = {"status": "ok", "task_id": task.id, "dir": str(task.dir), "mode": selected}
@@ -409,7 +413,9 @@ def cmd_review(args, project, catalog):
         diff, worst = args.diff, args.worst or ("major" if args.fixable == "yes" else "none")
         if args.by == "critic":
             warnings.append(RETOLD)
-    extra = {"answer_id": answer["id"]} | ({"previous_review": answer["previous"]} if answer["previous"] else {}) \
+    ran = getattr(args, "critic_run", None)
+    extra = {"answer_id": answer["id"]} | {k: answer[k] for k in ("coverage", "unrequested") if answer[k]} \
+        | ({"previous_review": answer["previous"]} if answer["previous"] else {}) | ({"ran": ran} if ran else {}) \
         if answer else {}
     item = evidence.review(task, diff, worst, args.by, args.settled, extra | ({"warnings": warnings} if warnings else {}))
     if answer:
@@ -458,6 +464,11 @@ def cmd_review(args, project, catalog):
     else:
         nxt = ("No blocker or major difference is fixable in this review."
                + ("" if item["by"] == "critic" else " Confirm with an independent critic: `autoharness critic`."))
+    if short := [f"{k} {v}" for k, v in item.get("coverage", {}).items() if v != "met"]:
+        nxt = f"The critic finds these brief items not met: {', '.join(short)}. " + nxt
+    if item.get("unrequested"):
+        nxt += (" The critic lists work the brief did not ask for (`unrequested`): drop it, or tell the user why "
+                "it belongs in this task.")
     out({"status": "ok", "review": item, "next": nxt})
     return 0
 
@@ -523,20 +534,48 @@ def cmd_arbitrate(args, project, catalog):
 
 
 def cmd_check(args, project, catalog):
-    item = evidence.record_check(project.task(), args.result, args.passed == "yes")
+    task = project.task()
+    ran = None
+    if args.run:
+        if args.result or args.passed:
+            raise HarnessError("with --run the exit code decides: drop --result and --pass")
+        if not evidence.pending_check(task):
+            raise HarnessError("no arbiter check is waiting to be run")
+        ran = runs.run(task, args.run, "arbiter-check", "arbiter", args.timeout)
+        args.passed = "yes" if ran["passed"] else "no"
+        args.result = f"`{args.run}` exited {ran['exit']}; output in {ran['log']}:\n{ran['tail']}"
+    elif not (args.result and args.passed):
+        raise HarnessError("run the check with --run \"<command>\" (the exit code decides), or record what you "
+                           "measured with --result \"<measured>\" --pass yes|no")
+    with write_lock(project):
+        item = evidence.record_check(task, args.result, args.passed == "yes", ran and ran["n"])
     nxt = ("The fix took effect by its own measure: run `autoharness critic`." if args.passed == "yes" else
            "The check failed: the fix has not taken effect. Keep working on it and record the check again when it "
            "passes; if it cannot pass, `autoharness critic` still runs, and the critic sees the failed measurement.")
-    out({"status": "ok", "arbitration": item, "next": nxt})
+    out({"status": "ok", "arbitration": item, "next": nxt} | ({"run": ran} if ran else {}))
     return 0
 
 
 def cmd_critic(args, project, catalog):
+    if args.run and args.dispute:
+        raise HarnessError("a dispute's ruling is recorded with your `--settled` summary of it: run that critic "
+                           "yourself (`autoharness critic --dispute ...` without --run)")
     task = project.task()
-    res = evidence.critic_prompt(catalog, task, args.dispute or "")
-    res["answer_id"] = answers.issue(task, "critic", critic_subject(evidence.latest(task, "result")))
-    res["prompt"] += answers.instruction(res["answer_id"])
-    res["prompt_file"] = evidence.save_prompt(task, "critic", res["prompt"])
+    with write_lock(project):
+        res = evidence.critic_prompt(catalog, task, args.dispute or "")
+        res["answer_id"] = answers.issue(task, "critic", critic_subject(evidence.latest(task, "result")))
+        res["prompt"] += answers.instruction(res["answer_id"])
+        res["prompt_file"] = evidence.save_prompt(task, "critic", res["prompt"])
+        if args.run:
+            task.log(f"critic run by {args.run} (answer {res['answer_id']})")
+    if args.run:
+        answer_file = task.dir / "answers" / f"run-critic-{res['answer_id']}.txt"
+        answer_file.parent.mkdir(exist_ok=True)
+        # unlocked while the reviewer works: it may take many minutes, and it may call autoharness itself
+        reviewers.run(args.run, project.root, Path(res["prompt_file"]), answer_file, args.timeout, res["answer_id"])
+        with write_lock(project):
+            return cmd_review(argparse.Namespace(answer_file=str(answer_file), by="critic", diff=None, worst=None,
+                                                 fixable=None, settled=[], critic_run=args.run), project, catalog)
     settle = (" It rules on your dispute: record that ruling with the review, `--settled \"<the point and the "
               "ruling>\"`, so later critics do not raise the point again." if args.dispute else "")
     out({"status": "ok"} | res | {
@@ -564,7 +603,8 @@ def cmd_brief(args, project, catalog):
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
-                      | ({"fidelity": args.fidelity} if args.fidelity else {}))
+                      | ({"fidelity": args.fidelity} if args.fidelity else {})
+                      | ({runs.PRESERVE: args.preserve} if args.preserve else {}))
     task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
         "no search ran for this task; run `autoharness search skill|mcp \"<query>\"` before deciding nothing fits"]
@@ -580,9 +620,16 @@ def cmd_brief(args, project, catalog):
             + (f" ({need['media']} files)" if need.get("media") else "") + "."
             + (" Get the reference first." if need.get("reference") else "")
             if owed else "")
+    if args.preserve:
+        owed += (" The brief preserves existing behaviour: before teardown, run the regression check with "
+                 f"`autoharness verify run \"<command>\" --for {runs.PRESERVE}` on the final code; it must pass.")
+    items = runs.brief_items(task.info()["brief"])
     out({"status": "ok", "task_id": task.id, "planned_skills": planned, "warnings": warnings,
+         "brief_items": [f"{i['id']}: {i['text']}" for i in items],
          "next": "Install what you decided to take and get the missing inputs first." + owed + create
-                 + " Then do the work and verify it the way the brief says. Teardown refuses while a planned "
+                 + " Then do the work and verify it the way the brief says: a check that is a command (tests, a "
+                   "build, a script) runs through `autoharness verify run \"<command>\" --for <brief item, e.g. B1>`, "
+                   "so it counts as checked, not as reported. Teardown refuses while a planned "
                    "skill is missing or unfilled."})
     return 0
 
@@ -817,7 +864,7 @@ def cmd_status(args, project, catalog):
                              *lines[-STATUS_LOG_LINES:]])
     out({"task": info, "mcp": task.mcp_lock(),
          "skills": {k: {"spec": v["spec"], "trust": v["trust"]} for k, v in task.skills_lock().items()},
-         "kept": kept_summary(project)} | unapproved | {"log": log})
+         "kept": kept_summary(project)} | unapproved | {"checked": runs.summary(task), "log": log})
     return 0
 
 
@@ -839,6 +886,7 @@ def cmd_teardown(args, project, catalog):
     blocking, skill_warnings = task.planned_skill_problems()
     if info.get("mode", "full") == "full" or info.get("brief", {}).get("review") == "critic" or info.get("profile") == "reviewed":
         blocking += evidence.problems(catalog, task)
+    blocking += runs.problems(task)
     if blocking and args.accepted:
         task._update_info(accepted_by_user=args.accepted)
         task.log(f"user accepted the result as it is: {args.accepted}")
@@ -863,6 +911,7 @@ def cmd_teardown(args, project, catalog):
     if retold:
         warnings.append("recorded from your retelling, not from the reviewer's answer file: " + ", ".join(retold)
                         + "; tell the user these verdicts are unconfirmed")
+    checked = runs.summary(task)
     policy, source = config.teardown_policy(project.root, args.policy)
     result = task.teardown(policy)
     kept = result["kept"]["mcp"] + result["kept"]["skills"]
@@ -877,7 +926,12 @@ def cmd_teardown(args, project, catalog):
     if found:
         nxt += (" Tell the user the follow-ups this task left for later: "
                 + "; ".join(f"#{i['id']} {i['text']}" for i in found) + ".")
-    out({"status": "ok", "policy": policy, "policy_source": source} | result
+    nxt += (" Report what was checked as `checked` has it, without upgrading it: `ran` are checks autoharness ran "
+            "itself (a stale one ran on older code), `critic` says where each verdict came from, `reported_only` "
+            "you only reported"
+            + (f", and these brief items were never checked: {', '.join(checked['unchecked_items'])}"
+               if checked["unchecked_items"] else "") + ".")
+    out({"status": "ok", "policy": policy, "policy_source": source} | result | {"checked": checked}
         | {"recipe_saved": saved} | ({"followups": found} if found else {}) | {"next": nxt}
         | ({"warnings": warnings} if warnings else {}))
     return 0
@@ -1124,6 +1178,70 @@ def set_session_state(session_id: str, **state) -> None:
     f.write_text(json.dumps(state, ensure_ascii=False), "utf-8")
 
 
+# commands that change the active task: only the agent session that started it (or claimed it) runs them
+OWNED = {"mode", "decision", "verify", "need", "add", "remove", "vet", "teardown", "evidence", "review", "critic",
+         "approach", "arbiter", "arbitrate", "check", "brief"}
+STALE_HOURS = 4   # a task nobody touched for this long is probably abandoned
+
+
+def idle_hours(task: Task) -> float:
+    """Hours since the task last changed (its log or its record)."""
+    times = [p.stat().st_mtime for p in (task.dir / "harness.md", task.dir / "task.json") if p.exists()]
+    return (time.time() - max(times)) / 3600 if times else 0.0
+
+
+def handoff(task: Task, session_id: str) -> str:
+    """What a session that does not own the active task is told instead of starting its own."""
+    info = task.info()
+    idle = idle_hours(task)
+    log = [line for line in (task.dir / "harness.md").read_text("utf-8").splitlines() if line.startswith("- ")]
+    stale = (f" Nothing happened in it for {idle:.0f} hours: it looks abandoned." if idle >= STALE_HOURS else
+             f" It last changed {idle * 60:.0f} minutes ago, so the other session may still be working on it.")
+    return (f"autoharness: task {task.id} is active in this project and belongs to another agent session "
+            f"({info.get('owner')}): \"{info.get('task', '')[:300]}\" (mode {info.get('mode', 'full')}"
+            f"{', brief recorded' if info.get('brief') else ', no brief yet'}).{stale} Last steps: "
+            + (" | ".join(log[-3:]) or "none") + ". Tools that do work stay blocked for this session, and it may "
+            "neither start nor tear down a task while that one is active. Tell the user. If they want this session "
+            f"to carry that task on (or its session is gone), run `autoharness claim {session_id} --reason "
+            "\"<their words>\"` and continue from `autoharness status`.")
+
+
+def check_owner(project: Project, task_id: str | None) -> None:
+    """Refuse when the task belongs to another agent session than the one running this command. A command
+    outside any agent session (the user's own terminal) or a task without an owner is not refused."""
+    if not task_id:
+        return
+    task = Task(project, task_id)
+    owner, me = task.info().get("owner"), agents.session_id()
+    if owner and me and owner != me and task.info().get("status") == "active":
+        raise HarnessError(handoff(task, me))
+
+
+def write_lock(project: Project):
+    """The project lock, for a long command's writes (main holds it for every other command already)."""
+    from autoharness import transactions
+    return transactions.locked(project.root)
+
+
+def cmd_claim(args, project, catalog):
+    task = project.task()
+    me = args.session_id or agents.session_id()
+    if not me:
+        raise HarnessError("no agent session id in the environment: pass it, `autoharness claim <session id>`")
+    info = task.info()
+    previous = info.get("owner")
+    if previous == me:
+        out({"status": "ok", "task_id": task.id, "owner": me, "next": "This session already owns the task."})
+        return 0
+    task._update_info(owner=me, claims=info.get("claims", []) + [
+        {"from": previous, "to": me, "reason": args.reason or "", "time": time.strftime("%Y-%m-%dT%H:%M:%S")}])
+    task.log(f"claimed by session {me} from {previous or 'no owner'}" + (f": {args.reason}" if args.reason else ""))
+    out({"status": "ok", "task_id": task.id, "owner": me, "previous_owner": previous,
+         "next": "This session owns the task now; the other session is refused if it goes on. Read "
+                 "`autoharness status` and carry on from where the log stops."})
+    return 0
+
+
 def hook_context(catalog: Catalog, prompt: str, session_id: str = "") -> str | None:
     """The reminder a prompt hook injects, or None for short replies."""
     if len(text.words(prompt)) < HOOK_MIN_WORDS:
@@ -1243,6 +1361,24 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
             and last[:1] == ["autoharness"])
 
 
+def _autoharness_subcommand(tool: str, tool_input: dict) -> str | None:
+    """The subcommand of an `autoharness ...` call that `_is_autoharness_call` let through (`init`, `teardown`)."""
+    if tool not in ("Bash", "PowerShell"):
+        return None
+    command = TRAILING_OUTPUT.sub("", str(tool_input.get("command", "")).strip())
+    words = (_plain_commands(command, bash=tool == "Bash") or [[]])[-1]
+    words = words[words.index("autoharness") + 1:] if "autoharness" in words else []
+    skip = False
+    for word in words:
+        if skip:
+            skip = False
+        elif word in ("--agent", "--project", ARGS_FILE):
+            skip = True
+        elif not word.startswith("-"):
+            return word
+    return None
+
+
 def _read_stdin_utf8() -> str:
     """Claude Code sends hook input as UTF-8. On Windows a piped stdin decodes with the ANSI code page
     (cp1251 and the like), which turns Cyrillic into mojibake holding `‚` or `„`: smart quotes that make
@@ -1310,15 +1446,27 @@ def cmd_hook(args, project, catalog):
         state = saved_state.get("state")
         active = project.active_id()
         task_info = Task(project, active).info() if active else {}
+        reviewer = task_info.get("answer_ids", {}).get(os.environ.get(reviewers.ENV_FLAG, ""), {})
+        if reviewer and not reviewer.get("used") and not reviewer.get("retired"):
+            return 0   # the reviewer `critic --run` started for its pending prompt: read-only, no task of its own
+        owner = task_info.get("owner")
+        # the task belongs to another session: this one is told about it and stays gated until it claims it
+        foreign = bool(active and sid and owner and owner != sid and task_info.get("status") == "active")
         if active and sid and state != "waived":
             ready = task_info.get("mode") == "light" or bool(task_info.get("brief"))
-            wanted = "done" if ready else "pending"
-            if state != wanted or saved_state.get("task_id") != active:
-                set_session_state(sid, state=wanted, task_id=active,
-                                  via=("light" if task_info.get("mode") == "light" else
-                                       "brief" if ready else "waiting"))
+            wanted = "pending" if foreign or not ready else "done"
+            via = ("other session" if foreign else "light" if task_info.get("mode") == "light" else
+                   "brief" if ready else "waiting")
+            if state != wanted or saved_state.get("task_id") != active or saved_state.get("via", via) != via:
+                set_session_state(sid, state=wanted, task_id=active, via=via, told=saved_state.get("told"))
                 state = wanted
         if event == "UserPromptSubmit":
+            if foreign and state != "waived" and saved_state.get("told") != active:
+                ctx = handoff(Task(project, active), sid)
+                set_session_state(sid, state="pending", task_id=active, via="other session", told=active)
+                out({"injectSteps": [{"ephemeralMessage": ctx}]} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
+                return 0
             if state in ("done", "waived") or active:
                 return 0
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
@@ -1332,9 +1480,14 @@ def cmd_hook(args, project, catalog):
         if event == "PreToolUse":
             tool, tool_input = data.get("tool_name", ""), data.get("tool_input") or {}
             if _is_autoharness_call(tool, tool_input):
+                if foreign and state != "waived" and _autoharness_subcommand(tool, tool_input) in ("init", "teardown"):
+                    reason = handoff(Task(project, active), sid)
+                    out({"decision": "deny", "reason": reason} if agy else
+                        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                "permissionDecisionReason": reason}})
                 return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
             if state == "pending" and GATED_TOOLS.match(tool):
-                reason = (
+                reason = handoff(Task(project, active), sid) if foreign else (
                     "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
                     "MCP servers it discovers, and record `autoharness brief ...` before using " + tool + ". "
                     "An autoharness command passes only on its own: `cd <dir> &&` (or `;`) before it is fine, "
@@ -1502,6 +1655,37 @@ def cmd_audit(args, project, catalog):
 
 def cmd_verify(args, project, catalog):
     from autoharness import audit, verification
+    if args.action == "run":
+        if len(args.kind) > 1 or (args.kind and args.command):
+            raise HarnessError(f"verify run got the command in pieces ({args.kind!r}): the shell split it at its "
+                               "quotes. Put it in a JSON file, {\"command\": \"<the command>\"}, and pass "
+                               "`autoharness verify run --args-file <file>`")
+        command = args.command or (args.kind[0] if args.kind else "")
+        task = project.task()
+        info = task.info()
+        if info.get("mode", "full") == "full" and not info.get("brief"):
+            raise HarnessError("record the brief first: a check verifies the work the brief describes")
+        if args.passed or args.evidence:
+            raise HarnessError("verify run decides by the exit code and keeps the output itself: drop --passed "
+                               "and --evidence")
+        items = [i["id"] for i in runs.brief_items(info.get("brief", {}))]
+        purpose = (args.purpose or "").strip()
+        purpose = purpose.upper() if purpose.upper() in items else purpose
+        if purpose and items and purpose not in items + [runs.PRESERVE]:
+            raise HarnessError(f"--for {purpose!r} is not a brief item: use one of {', '.join(items)} "
+                               f"or {runs.PRESERVE}")
+        item = runs.run(task, command, args.name or "", purpose, args.timeout)
+        with write_lock(project):
+            audit.append(task, "run", **{k: item[k] for k in ("n", "command", "for", "exit", "passed")})
+        out({"status": "passed" if item["passed"] else "failed", "run": item,
+             "next": ("Recorded as checked on the current code. An edit to the code makes this run stale: run it "
+                      "again after your last change." if item["passed"] else
+                      f"The check failed (exit {item['exit']}); the whole output is in {item['log']}. Fix the cause "
+                      "and run it again.")})
+        return 0 if item["passed"] else 1
+    if args.command or len(args.kind) != 1 or args.kind[0] not in VERIFY_KINDS:
+        raise HarnessError(f"verify {args.action} takes one kind: {', '.join(VERIFY_KINDS)}")
+    args.kind = args.kind[0]
     guide = verification.guide(args.kind)
     if args.action == "guide":
         out(guide | {"next": f"Use it with `autoharness brief --verify-template {args.kind} ...`; after running "
@@ -1600,11 +1784,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="list: include done items")
     s = sub.add_parser("audit", help="show structured decisions for a task")
     s.add_argument("task_id", nargs="?")
-    s = sub.add_parser("verify", help="use a verification guide and record its result")
-    s.add_argument("action", choices=["guide", "record"])
-    s.add_argument("kind", choices=["browser", "api", "api-client", "logs", "database"])
+    s = sub.add_parser("verify", help="run a check and record it by its exit code, or use a verification guide")
+    s.add_argument("action", choices=["guide", "record", "run"])
+    s.add_argument("kind", metavar="KIND|COMMAND", nargs="*",
+                   help=f"guide/record: {', '.join(VERIFY_KINDS)}; run: the command, run in the project root")
+    s.add_argument("--command", help="for run: the command, instead of the positional one (fits --args-file, "
+                                     "so it needs no shell quoting)")
     s.add_argument("--passed", choices=["yes", "no"])
     s.add_argument("--evidence")
+    s.add_argument("--name", help="for run: a short name for the check (default: the command's first word)")
+    s.add_argument("--for", dest="purpose", metavar="ITEM",
+                   help=f"for run: the brief item it checks (B1, P1, ...) or `{runs.PRESERVE}` for the regression check")
+    s.add_argument("--timeout", type=float, default=runs.DEFAULT_TIMEOUT, help="for run: seconds allowed")
     s = sub.add_parser("need", help="record a capability gap and get curated candidates")
     s.add_argument("capability")
     s.add_argument("--reason")
@@ -1692,8 +1883,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--settled", action="append", default=[], metavar="POINT",
                    help="a disputed point this critic settled from measurements in the files, and how; "
                         "later critics see it (repeatable)")
-    s = sub.add_parser("critic", help="a prompt for an independent reviewer of the latest result")
+    s = sub.add_parser("critic", help="a prompt for an independent reviewer of the latest result, or run one")
     s.add_argument("--dispute", help="a point of the last critic review you believe is wrong; a fresh critic decides")
+    s.add_argument("--run", choices=list(reviewers.AGENTS),
+                   help="start that agent headless and read-only as the critic, and record its answer")
+    s.add_argument("--timeout", type=float, default=reviewers.DEFAULT_TIMEOUT, help="with --run: seconds allowed")
     s = sub.add_parser("approach", help="record a change of approach for a part that keeps failing review")
     s.add_argument("--part", help="the part that loops (default: the one the last review named)")
     s.add_argument("--was", required=True, help="the method used so far")
@@ -1706,9 +1900,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--verdict", choices=["fix", "limit"])
     s.add_argument("--text", help="the arbiter's answer: the technique, or why it is out of reach")
     s.add_argument("--check", help="for a fix: the arbiter's measurable CHECK line")
-    s = sub.add_parser("check", help="record what the arbiter's check measured on the new result")
-    s.add_argument("--result", required=True, help="what the check measured")
-    s.add_argument("--pass", dest="passed", required=True, choices=["yes", "no"])
+    s = sub.add_parser("check", help="run the arbiter's check on the new result, or record what it measured")
+    s.add_argument("--run", metavar="COMMAND", help="run the check in the project root: the exit code decides")
+    s.add_argument("--timeout", type=float, default=runs.DEFAULT_TIMEOUT, help="with --run: seconds allowed")
+    s.add_argument("--result", help="what the check measured (when it is not a command)")
+    s.add_argument("--pass", dest="passed", choices=["yes", "no"])
     s = sub.add_parser("brief", help="record what a good result is, what is missing, and the verdict on candidates")
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
@@ -1721,8 +1917,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fidelity", help="the level to judge the result at, e.g. `stylised poster, not photographic`")
     s.add_argument("--review", choices=["critic"],
                    help="require an independent critic for this task even if its capabilities do not")
+    s.add_argument("--preserve", help="existing behaviour that must keep working; teardown then requires a passing "
+                                      f"`verify run ... --for {runs.PRESERVE}` on the final code")
     s.add_argument("--verify-template", choices=["browser", "api", "api-client", "logs", "database"],
                    help="use a built-in verification guide instead of --verify")
+    s = sub.add_parser("claim", help="take over the active task from the agent session that started it")
+    s.add_argument("session_id", nargs="?", help="this session's id (default: the one the agent sets)")
+    s.add_argument("--reason", help="why: the user's words, or that the other session is gone")
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
     s.add_argument("session_id")
     s.add_argument("--reason", required=True, help="the user's words")
@@ -1740,7 +1941,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
             "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief,
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
-            "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check}
+            "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1751,7 +1952,12 @@ def main(argv: list[str] | None = None) -> int:
     except HarnessError as e:
         out({"status": "error", "error": str(e)})
         return 1
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    if extra and args.cmd == "verify" and args.action == "run":
+        args.kind += extra   # a command the shell split at its quotes: verify run explains instead of argparse
+    elif extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     project = Project(Path(args.project).resolve(), args.agent)
     started = time.monotonic()
     before = project.active_id()
@@ -1763,10 +1969,17 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
             return exit_code
         from autoharness import transactions
+        # a check or a reviewer may run for many minutes: those commands lock only while they write
+        long = (args.cmd == "verify" and args.action == "run") or (args.cmd in ("critic", "check") and args.run)
         with transactions.locked(project.root):
             transactions.recover(project.root)
-            exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
-            return exit_code
+            if args.cmd in OWNED:
+                check_owner(project, getattr(args, "task_id", None) or project.active_id())
+            if not long:
+                exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
+                return exit_code
+        exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
+        return exit_code
     except (HarnessError, agents.AgentError) as e:
         out({"status": "error", "error": str(e)})
         return 1

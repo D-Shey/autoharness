@@ -17,6 +17,10 @@ If the hook is installed, tools that do work stay blocked until `init` (light) o
 (full). Reading files stays open. Skip the harness only when the user explicitly said so:
 `autoharness waive <session id> --reason "<their words>"`, then tell them.
 
+A task belongs to the agent session that started it. If another session's task is active, you are
+told about it and stay blocked: tell the user; only if they want you to carry it on (or that
+session is gone), `autoharness claim <your session id> --reason "<their words>"`.
+
 ## 1. Start at the right level
 
 ```bash
@@ -71,7 +75,11 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get 
   --candidates "<name>: take|skip, why; ...; searched: <queries>" \
   --gaps "create <skill-name>: <capability>; ..."   # or "none: <why tools at hand cover it>"
   # optional: --fidelity "<level to judge at>"  --review critic
+  #           --preserve "<existing behaviour that must keep working>"
 ```
+
+Number the goal's parts (`1 ...; 2 ...`): they become brief items B1, B2, ... (and P1, ... for
+`--preserve`), which checks and the critic report on one by one.
 
 Give a verdict for every plausible candidate. Show the user the brief in a few lines.
 For browser, API (your own, or a third-party one: `api-client`), logs or database checks, `autoharness verify guide <kind>` has a template:
@@ -128,11 +136,20 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 
    ```bash
    autoharness evidence add <file> --kind reference|result   # the thing itself; the whole result, then close-ups
+   autoharness verify run "<test command>" --for B1|preserve   # autoharness runs it: exit code decides
    autoharness evidence diff                                 # code: the whole working-tree diff
    autoharness review --by self --diff "1 <most important>; 2 ..." --worst blocker|major|minor|none
    autoharness critic                                        # prompt for an independent reviewer
    autoharness review --by critic --answer-file <file>
+   autoharness critic --run claude|codex|agy                 # or: autoharness starts a read-only critic itself
    ```
+
+   A check that is a command goes through `verify run`, never "I ran it and it passed": the run is
+   tied to the code it saw and goes stale when the code changes, so run it again after your last
+   edit. With `--preserve` in the brief, teardown needs a passing `--for preserve` run. A command
+   with quotes (PowerShell mangles them) goes in a JSON file: `{"command": "..."}`, then
+   `autoharness verify run --args-file <file> --for B1`. No subagents at hand (or the critic must
+   be another model)? `critic --run <agent>` starts the reviewer itself.
 
    Work in rounds: produce, add the result, compare it side by side with the reference, fix the most important
    differences, repeat. `--worst` is the worst still-fixable difference: blocker (fails its
@@ -151,7 +168,9 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    (`--query "skill|mcp:<query>"` to re-run a search next time) when the setup was useful. Pass `--keep`/`--remove` only when the user asked.
 4. **Tell the user** what was installed, kept and removed, any part ruled out of reach, any
    teardown warning (skipped discovery or brief), follow-ups left for later, and what is left for
-   them (env vars, restart).
+   them (env vars, restart). Report what was checked as teardown's `checked` says, without
+   upgrading it: runs (current or stale), where each critic verdict came from, checks you only
+   reported, and brief items nothing checked.
 
 `autoharness status` shows the harness and log (`--full` for everything), `audit` the decisions,
 `remove`/`prune` take kept items off, `eval record|compare` measures runs with and without the

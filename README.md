@@ -50,7 +50,22 @@ autoharness verify record api --passed yes --evidence api-test-output.txt
 ```
 
 Есть шаблоны `browser`, `api`, `logs`, `database`. Они задают шаги и ожидаемое
-доказательство, но сами не запускают приложение. `decision mcp|skill NAME
+доказательство, но сами не запускают приложение. Проверку-команду autoharness запускает сам:
+
+```bash
+autoharness verify run "uv run pytest -q" --for B1      # pass/fail по коду выхода, вывод в лог
+autoharness brief ... --preserve "старые экспорты работают"   # тогда teardown ждёт --for preserve
+```
+
+Команду с кавычками (PowerShell их ломает) удобнее положить в JSON-файл
+`{"command": "python -c \"...\""}` и запустить `autoharness verify run --args-file cmd.json --for B1`.
+Если shell всё же разбил команду на куски, `verify run` скажет об этом прямо.
+
+Запуск привязан к версии кода (коммит + отпечаток изменённых файлов): после правки он
+устаревает (`stale`), и teardown это видит. В конце teardown выдаёт честную сводку `checked`:
+какие проверки autoharness запускал сам (свежие или устаревшие), откуда вердикты критика,
+что агент только сообщил (`verify record`, `check --pass`), и какие пункты brief никто не
+проверил. `decision mcp|skill NAME
 select|skip --reason "..."` фиксирует выбор кандидата; `audit` показывает
 структурированный журнал решений, установок, проверок и удалений. Для установки
 журнал хранит источник и отпечаток содержимого, а версию — когда она известна.
@@ -207,7 +222,17 @@ autoharness evidence diff                           # для кода: весь 
 autoharness review --by self --diff "1 ...; 2 ..." --worst major
 autoharness critic                                  # промпт для независимого критика
 autoharness review --by critic --answer-file answer.txt
+autoharness critic --run claude|codex|agy           # или autoharness сам запускает критика read-only
 ```
+
+`critic --run` стартует свежий процесс агента без права правок (claude: только Read/Grep/Glob;
+codex: `--sandbox read-only`; agy: `--mode plan --sandbox`) и сам записывает его ответ.
+Критик выносит вердикт по каждому пункту brief (`B1: met | partial | missing | contradicts`)
+и перечисляет сделанное сверх просьбы (`Unrequested`).
+
+Задача принадлежит сессии агента, которая её начала. Другая сессия получает от хука
+сводку чужой задачи вместо молчания, остаётся заблокированной и не может сделать `init` или
+`teardown`; забрать задачу — `autoharness claim <id сессии>`, только если так решил пользователь.
 
 - Работа идёт раундами: результат → сравнение с референсом → исправление главного → снова.
 - **Судит не автор.** `critic` выдаёт промпт для свежего субагента, который работу не делал.

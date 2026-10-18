@@ -354,6 +354,16 @@ def detect(environ: dict | None = None) -> str | None:
     return next((name for name in AGENTS if ai_agent.startswith(name)), None)
 
 
+# The id of the agent session a shell command runs in, the same id its hooks receive as session_id
+_SESSION = ("CLAUDE_CODE_SESSION_ID", "ANTIGRAVITY_CONVERSATION_ID", "CODEX_THREAD_ID")
+
+
+def session_id(environ: dict | None = None) -> str:
+    """The agent session running this command, or "" outside one (the user's own terminal)."""
+    environ = os.environ if environ is None else environ
+    return next((environ[v] for v in _SESSION if environ.get(v)), "")
+
+
 def get(name: str | None) -> Agent:
     name = name or detect() or DEFAULT_AGENT
     if name not in AGENTS:

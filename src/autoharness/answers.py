@@ -25,8 +25,12 @@ REASON_LINE = re.compile(r"^\W*REASON:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
 # the critic's account of the previous review is a section of its own after its list: a heading line
 # (a line at the margin that names it, such as "Previous review" or "## Check of the previous review";
 # never an indented detail line, a bullet or a numbered point)
-PREVIOUS = re.compile(r"^(?![ \t])(?![-*+][ \t])(?!(?:#+[ \t]*)?(?:\*\*)?\d+[.)])[^\n]{0,40}?\bprevious review\b.*$",
-                      re.MULTILINE | re.IGNORECASE)
+HEADING = r"^(?![ \t])(?![-*+][ \t])(?!(?:#+[ \t]*)?(?:\*\*)?\d+[.)])[^\n]{0,40}?\b%s\b.*$"
+PREVIOUS = re.compile(HEADING % "previous review", re.MULTILINE | re.IGNORECASE)
+# the critic's verdict per brief item and the work nobody asked for, each a section after its list
+COVERAGE = re.compile(HEADING % "brief coverage", re.MULTILINE | re.IGNORECASE)
+UNREQUESTED = re.compile(HEADING % "unrequested", re.MULTILINE | re.IGNORECASE)
+COVERAGE_LINE = re.compile(r"^\W*([BP]\d+)\W+(met|partial|missing|contradicts)\b", re.MULTILINE | re.IGNORECASE)
 # "1. x", "1) x", "### 1. x", "**1.** x", "**1. x**"
 ITEM = re.compile(r"^\s{0,3}(?:#+\s*)?(?:\*\*)?(\d+)[.)](?:\*\*)?\s+(.*)$")
 
@@ -53,7 +57,8 @@ def instruction(nonce: str) -> str:
 
 def read(task: Task, path: Path, kind: str, subject: str) -> dict:
     """Check the answer file's id and take it apart:
-    {"id", "kind", "text", "body", "items", "previous", "verdict", "check", "reason", "source"}.
+    {"id", "kind", "text", "body", "items", "previous", "coverage", "unrequested", "verdict", "check", "reason",
+    "source"}.
 
     The id must have been issued for the latest prompt of this kind about this subject, and not used."""
     if not path.is_file():
@@ -84,11 +89,19 @@ def read(task: Task, path: Path, kind: str, subject: str) -> dict:
         raise HarnessError(f"the VERDICT line must name exactly one value, not {verdicts[-1].strip()!r}")
     body = text[m.end():]
     body = body[:VERDICT_LINE.search(body).start()] if VERDICT_LINE.search(body) else body
-    prev = PREVIOUS.search(body)
-    body, previous = (body[:prev.start()], body[prev.end():].strip()) if prev else (body, "")
+    found = sorted((m.start(), m.end(), name) for name, rx in
+                   (("previous", PREVIOUS), ("coverage", COVERAGE), ("unrequested", UNREQUESTED))
+                   if (m := rx.search(body)))
+    sections = {name: body[end:(found[i + 1][0] if i + 1 < len(found) else len(body))].strip()
+                for i, (_, end, name) in enumerate(found)}
+    body = body[:found[0][0]] if found else body
+    unrequested = sections.get("unrequested", "")
     check, reason = CHECK_LINE.findall(text), REASON_LINE.findall(text)
     return {"id": nonce, "kind": kind, "text": text, "body": body.strip(), "items": items(body),
-            "previous": previous, "verdict": words[0].lower(),
+            "previous": sections.get("previous", ""),
+            "coverage": {k.upper(): v.lower() for k, v in COVERAGE_LINE.findall(sections.get("coverage", ""))},
+            "unrequested": "" if re.fullmatch(r"\W*none\W*", unrequested, re.IGNORECASE) else unrequested,
+            "verdict": words[0].lower(),
             "check": check[-1].strip() if check else "", "reason": reason[-1].strip() if reason else "",
             "source": str(path)}
 
