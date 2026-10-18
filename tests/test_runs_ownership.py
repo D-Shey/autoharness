@@ -285,6 +285,13 @@ def test_reviewer_run_strips_the_authors_session(tmp_path, monkeypatch):
     assert seen[reviewers.ENV_FLAG] == "1" and "CLAUDECODE" not in seen and "CLAUDE_CODE_SESSION_ID" not in seen
 
 
+def test_version_prints_the_package_version(capsys):
+    from autoharness import __version__
+    with pytest.raises(SystemExit) as done:
+        cli.main(["--version"])
+    assert done.value.code == 0 and capsys.readouterr().out.strip() == f"autoharness {__version__}"
+
+
 def test_a_reviewer_without_a_login_is_named_as_such(tmp_path, monkeypatch):
     monkeypatch.setattr(reviewers.shutil, "which", lambda name: f"/bin/{name}")
     monkeypatch.setattr(reviewers.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(

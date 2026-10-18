@@ -18,8 +18,8 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import (agents, answers, approvals, config, egress, evidence, followups, history, lessons, library, recipes,
-                         registry, reviewers, rulings, runs, text, vet)
+from autoharness import (__version__, agents, answers, approvals, config, egress, evidence, followups, history, lessons,
+                         library, recipes, registry, reviewers, rulings, runs, text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
                              npx_stage_skill, parse_skill_spec, skill_dir)
@@ -2207,6 +2207,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="autoharness", description=__doc__.split("\n")[0],
                                 epilog=f"Long texts without shell quoting: {ARGS_FILE} <file.json> anywhere in the "
                                        'command, a JSON object of options, e.g. {"diff": "...", "worst": "minor"}.')
+    p.add_argument("--version", action="version", version=f"autoharness {__version__}")
     p.add_argument("--project", default=".", help="project root (default: cwd)")
     p.add_argument("--agent", choices=list(agents.AGENTS),
                    help="target coding agent (default: the task's agent, else $AUTOHARNESS_AGENT, else auto-detect, else claude)")
