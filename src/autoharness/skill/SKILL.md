@@ -182,7 +182,8 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    its `trend` and ask whether to go on or accept. Code edited after a review needs a new `evidence diff` and review.
    Run an arbiter's check with `check --run "<script>"`; where you had to check differently from
    its words, say so with `--deviation "<what and why>"` rather than adjusting it quietly.
-   If the user accepts the result as it is: `autoharness teardown --accepted "<their words>"`.
+   If the user accepts the result as it is or tells you to stop: `autoharness teardown --accepted
+   "<their words>"` (it does not hold the end up for lessons; offer them once instead).
 2. **Save what you learned**: update each skill you created, then `autoharness skill save <name>`
    (exit 3: show name, description, warnings; `--approve` after a yes). Reusable know-how no
    skill covers goes into a new one the same way. When the task had friction (a check that failed

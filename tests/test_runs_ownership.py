@@ -755,3 +755,12 @@ def test_an_insight_reached_again_is_merged_and_shown_to_related_tasks(project, 
     assert res["insight"]["skill"] == "report-totals" and lessons.ripe() == []
     code, res = ah(capsys, project, "init", "the quarterly report totals are wrong again")
     assert "insights" not in res or all(i["id"] != 1 for i in res["insights"])
+
+
+def test_the_user_ending_the_task_is_not_held_up_for_lessons(project, capsys):
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", FAIL, "--for", "B1")
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")       # friction: failed, then passed
+    code, res = ah(capsys, project, "teardown", "--accepted", "stop, that is enough")
+    assert code == 0 and res["status"] == "ok" and res["lessons"]
+    assert "offer once" in res["next"]
