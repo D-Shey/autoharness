@@ -693,7 +693,11 @@ def cmd_critic(args, project, catalog):
         for t in threads:
             t.join()
         if errors:
-            raise errors[0] if isinstance(errors[0], HarnessError) else HarnessError(str(errors[0]))
+            out({"status": "error", "error": str(errors[0]),
+                 "next": "The reviewer could not be started from here, so run it yourself: `autoharness critic` "
+                         "(without --run) gives the prompt; hand it unchanged to a fresh subagent and record its "
+                         "answer with `autoharness review --by critic --answer-file <file>`."})
+            return 1
         with write_lock(project):
             return cmd_review(argparse.Namespace(answer_file=str(answer_file), by="critic", diff=None, worst=None,
                                                  fixable=None, settled=[], critic_run=args.run,
