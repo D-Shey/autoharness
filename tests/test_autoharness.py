@@ -1613,6 +1613,7 @@ def test_critic_prompt_points_at_the_files_the_bar_and_the_focus(project, capsys
     assert code == 0 and res["result"] in p and res["references"][0] in p
     assert "matches the film frame" in p and "no generators" in p and "VERDICT" in p
     assert "signature details" in p  # focus from the visual-review capability
+    assert "the author's own guess" not in p  # interfaces are for code, not for a drawing
     assert "fresh subagent" in res["next"]
 
 
