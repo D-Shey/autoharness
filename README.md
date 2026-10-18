@@ -342,6 +342,10 @@ autoharness teardown --save-recipe landing-from-figma --notes "лендинг п
   autoharness config set teardown remove --global   # для всех проектов
   autoharness config get                            # текущее значение и откуда оно
   ```
+- **Минимальный режим** — настройка `min_mode`. По умолчанию (`any`) режим выбирает агент.
+  `full` или `reviewed` поднимают выбранный агентом более лёгкий режим до этого уровня, и `init`
+  сообщает об этом в `mode_raised`. Пригодится, если нужен полный процесс на каждой задаче:
+  `autoharness config set min_mode full` или `$AUTOHARNESS_MIN_MODE=full`.
 
 ## Пример
 
