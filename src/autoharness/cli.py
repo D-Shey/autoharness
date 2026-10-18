@@ -19,7 +19,7 @@ from importlib import resources
 from pathlib import Path
 
 from autoharness import (agents, answers, approvals, config, egress, evidence, followups, history, lessons, library, recipes,
-                         registry, reviewers, runs, text, vet)
+                         registry, reviewers, rulings, runs, text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
                              npx_stage_skill, parse_skill_spec, skill_dir)
@@ -273,6 +273,11 @@ def cmd_init(args, project, catalog):
             result["next"] = REJECTED_NEXT + result["next"]
     if mode == "full" and not result["suggested"]:
         result["next"] = "No keyword hints: pick capabilities from all_capabilities yourself. " + result["next"]
+    if known := lessons.relevant(args.task):
+        result["insights"] = known
+        result["next"] = ("`insights` are conclusions earlier tasks reached (`confirmed`: by how many): apply the ones "
+                          "that bear on this task, and if this task confirms one, `autoharness lesson add` it again. "
+                          + result["next"])
     if pending := followups.listing(project):
         result["followups"] = pending[-followups.SHOWN:]
         result["next"] = (f"`followups` lists {len(pending)} open item(s) earlier tasks found outside their scope: "
@@ -408,6 +413,24 @@ def read_answer(task: Task, path: str, kind: str, allowed, subject: str) -> dict
     return answer
 
 
+def read_quality(task: Task, answer: dict, path: str | None) -> dict | None:
+    """The code-quality reviewer's answer for the critic prompt `answer` answers, when that round had one."""
+    wanted = task.info().get("quality_pairs", {}).get(answer["id"])
+    if not wanted:
+        if path:
+            raise HarnessError("no code-quality reviewer was asked in this round (`brief --review pair` asks for "
+                               "one): drop --quality-file")
+        return None
+    if not path:
+        raise HarnessError("this round has two reviewers: record the code-quality reviewer's answer as well, "
+                           "`--quality-file <file>` (its prompt came with the critic's, under `quality`)")
+    quality = read_answer(task, path, "quality", evidence.SEVERITIES, critic_subject(evidence.latest(task, "result")))
+    if quality["id"] != wanted:
+        raise HarnessError(f"the code-quality answer {quality['id']} belongs to another round than the critic's: "
+                           f"record the answer to {wanted}")
+    return quality
+
+
 def MATCHED(item: dict) -> str:
     """How a loop was detected, so a wrong match shows: the previous round's point it was taken for."""
     return (f" (Counted as the previous round's point \"{item['matched_previous']}\": if these are different "
@@ -432,7 +455,15 @@ def cmd_review(args, project, catalog):
         if args.diff or given:
             warnings.append("--diff/--worst/--fixable were not used: the list and the verdict are the critic's own, "
                             "from the answer file")
-    else:
+    quality = None
+    if answer:
+        quality = read_quality(task, answer, getattr(args, "quality_file", None))
+        if quality:
+            diff = answers.merged_diff(answer, quality)
+            worst = max(worst, quality["verdict"], key=evidence.SEVERITIES.index)
+    elif getattr(args, "quality_file", None):
+        raise HarnessError("--quality-file goes with the critic's --answer-file")
+    if not answer:
         if not args.diff or not (args.worst or args.fixable):
             raise HarnessError("record a review with --diff and --worst, or a critic's answer with "
                                "--by critic --answer-file <file>")
@@ -443,12 +474,19 @@ def cmd_review(args, project, catalog):
     extra = {"answer_id": answer["id"]} | {k: answer[k] for k in ("coverage", "unrequested") if answer[k]} \
         | ({"previous_review": answer["previous"]} if answer["previous"] else {}) | ({"ran": ran} if ran else {}) \
         if answer else {}
+    if quality:
+        extra["quality"] = {"answer_id": quality["id"], "verdict": quality["verdict"],
+                            "diff": answers.as_diff(quality)}
     pair = task.info().get("comparisons", {}).get(answer["id"]) if answer else None
     if pair and (cmp := evidence.compared(pair, answer["closer"])):
         extra["compared"] = cmp
     item = evidence.review(task, diff, worst, args.by, args.settled, extra | ({"warnings": warnings} if warnings else {}))
+    for point in item.get("settled", []):
+        rulings.add(project, point, "critic", task.id)   # later tasks in the project are told as well
     if answer:
         item["answer_file"] = answers.consume(task, answer)
+    if quality:
+        item["quality"]["answer_file"] = answers.consume(task, quality)
     if item.get("auto_limited"):
         out({"status": "limited", "review": item,
              "next": f"\"{item['auto_limited']}\" is ruled out of reach: the final arbiter's fix failed as well, on "
@@ -613,24 +651,55 @@ def cmd_critic(args, project, catalog):
             task._update_info(comparisons=task.info().get("comparisons", {}) | {res["answer_id"]: pair})
         res["prompt"] += answers.instruction(res["answer_id"])
         res["prompt_file"] = evidence.save_prompt(task, "critic", res["prompt"])
+        if evidence.pair_review(task) and not args.dispute:
+            quality = evidence.quality_prompt(task)
+            quality_id = answers.issue(task, "quality", critic_subject(evidence.latest(task, "result")))
+            quality["prompt"] += answers.instruction(quality_id)
+            res["quality"] = {"prompt": quality["prompt"], "answer_id": quality_id,
+                              "prompt_file": evidence.save_prompt(task, "quality", quality["prompt"])}
+            task._update_info(quality_pairs=task.info().get("quality_pairs", {}) | {res["answer_id"]: quality_id})
         if args.run:
             task.log(f"critic run by {args.run} (answer {res['answer_id']})")
     if args.run:
         answer_file = task.dir / "answers" / f"run-critic-{res['answer_id']}.txt"
         answer_file.parent.mkdir(exist_ok=True)
-        # unlocked while the reviewer works: it may take many minutes, and it may call autoharness itself
-        reviewers.run(args.run, project.root, Path(res["prompt_file"]), answer_file, args.timeout, res["answer_id"])
+        jobs = [(res["prompt_file"], answer_file, res["answer_id"])]
+        quality_file = None
+        if "quality" in res:
+            quality_file = task.dir / "answers" / f"run-quality-{res['quality']['answer_id']}.txt"
+            jobs.append((res["quality"]["prompt_file"], quality_file, res["quality"]["answer_id"]))
+        # unlocked while the reviewers work: they may take many minutes, and they may call autoharness themselves;
+        # the two of a pair work side by side, each on its own
+        errors: list[Exception] = []
+
+        def review_with(prompt_file, dest, answer_id):
+            try:
+                reviewers.run(args.run, project.root, Path(prompt_file), dest, args.timeout, answer_id)
+            except Exception as e:  # noqa: BLE001 - reported below, after both finish
+                errors.append(e)
+        threads = [threading.Thread(target=review_with, args=job) for job in jobs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if errors:
+            raise errors[0] if isinstance(errors[0], HarnessError) else HarnessError(str(errors[0]))
         with write_lock(project):
             return cmd_review(argparse.Namespace(answer_file=str(answer_file), by="critic", diff=None, worst=None,
-                                                 fixable=None, settled=[], critic_run=args.run), project, catalog)
+                                                 fixable=None, settled=[], critic_run=args.run,
+                                                 quality_file=quality_file and str(quality_file)), project, catalog)
     settle = (" It rules on your dispute: record that ruling with the review, `--settled \"<the point and the "
               "ruling>\"`, so later critics do not raise the point again." if args.dispute else "")
+    two = ("" if "quality" not in res else
+           " This task has two reviewers: give `quality.prompt` (or `quality.prompt_file`) the same way to a second "
+           "fresh subagent, in parallel, save its answer unedited too, and record both in one round: "
+           "`autoharness review --by critic --answer-file <critic's> --quality-file <quality reviewer's>`.")
     out({"status": "ok"} | res | {
         "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
                 "elsewhere a new session), unchanged: paste it, or tell the subagent to read `prompt_file` and "
                 "follow it. Do not add your own opinion to it. Save its answer unedited to a file and record it: "
                 "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT."
-                + settle})
+                + two + settle})
     return 0
 
 
@@ -939,7 +1008,8 @@ def cmd_teardown(args, project, catalog):
                      "decide: `autoharness teardown --force` ends the task anyway."})
         return 1
     blocking, skill_warnings = task.planned_skill_problems()
-    if info.get("mode", "full") == "full" or info.get("brief", {}).get("review") == "critic" or info.get("profile") == "reviewed":
+    if info.get("mode", "full") == "full" or info.get("brief", {}).get("review") in evidence.REVIEWS \
+            or info.get("profile") == "reviewed":
         blocking += evidence.problems(catalog, task)
     blocking += runs.problems(task)
     if blocking and args.accepted:
@@ -953,13 +1023,16 @@ def cmd_teardown(args, project, catalog):
     learned = lessons.friction(task)
     if learned and not info.get("lessons_seen"):
         task._update_info(lessons_seen=True)
-        out({"status": "lessons", "task_id": task.id, "lessons": learned,
-             "next": "Before you finish: this task taught something the next one would pay for again (`lessons`). "
-                     "Write what failed and what fixed it, as steps and checks, into a skill: the one you created or "
-                     "used for this task, or `autoharness skill new <name> --description \"<when to use>\"` (values "
-                     "measured here go under \"Facts found here\"). Then `autoharness skill save <name>` (it asks the "
-                     "user), and run `autoharness teardown` again. If none of it is reusable, run teardown again and "
-                     "say why to the user."})
+        ripe = lessons.ripe()
+        out({"status": "lessons", "task_id": task.id, "lessons": learned} | ({"ripe_insights": ripe} if ripe else {})
+            | {"next": "Before you finish: this task taught something the next one would pay for again (`lessons`). "
+                       "Write what failed and what fixed it, as steps and checks, into a skill: the one you created "
+                       "or used for this task, or `autoharness skill new <name> --description \"<when to use>\"` "
+                       "(values measured here go under \"Facts found here\"). Then `autoharness skill save <name>` (it "
+                       "asks the user). A conclusion too small for a skill is an insight: `autoharness lesson add "
+                       "\"<when X, do Y, because Z>\"` (one an earlier task reached is merged, and its confidence "
+                       "grows). " + RIPE_NEXT * bool(ripe) + "Then run `autoharness teardown` again. If none of it "
+                       "is reusable, run teardown again and say why to the user."})
         return 1
     warnings += blocking + skill_warnings
     if not task.discovery_ran():
@@ -1678,6 +1751,15 @@ def cmd_hook(args, project, catalog):
             return 0
         if event == "PreToolUse":
             tool, tool_input = data.get("tool_name", ""), data.get("tool_input") or {}
+            if sid and state != "waived" and (times := _repeated(sid, tool, tool_input)) > REPEAT_LIMIT:
+                reason = (f"This is the same {tool} call, unchanged, for the {times}th time in a row: repeating it "
+                          "will not give a different result. Change what you call (the command, its input, the "
+                          "approach); if a tool, input or know-how is missing, `autoharness need <capability> "
+                          "--reason \"<what blocks you>\"`; or stop and ask the user.")
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
             if _is_autoharness_call(tool, tool_input):
                 if foreign and state != "waived" and _autoharness_subcommand(tool, tool_input) in ("init", "teardown"):
                     reason = handoff(Task(project, active), sid)
@@ -1709,6 +1791,27 @@ def cmd_hook(args, project, catalog):
         return 0
     except Exception:  # noqa: BLE001 - a hook must not break the session
         return 0
+
+
+REPEAT_LIMIT = 5   # the same call this many times in a row may pass; one more is a loop, not progress
+
+
+def _repeated(sid: str, tool: str, tool_input: dict) -> int:
+    """How many times in a row this session has now made exactly this call (this one included)."""
+    key = hashlib.sha256(json.dumps([tool, tool_input], sort_keys=True, ensure_ascii=False, default=str)
+                         .encode("utf-8")).hexdigest()[:16]
+    calls = session_file(sid).with_suffix(".calls.json")
+    try:
+        last = json.loads(calls.read_text("utf-8"))
+    except (OSError, ValueError):
+        last = {}
+    count = last.get("count", 0) + 1 if last.get("key") == key else 1
+    try:
+        calls.parent.mkdir(parents=True, exist_ok=True)
+        calls.write_text(json.dumps({"key": key, "count": count}), "utf-8")
+    except OSError:
+        pass
+    return count
 
 
 def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task_info: dict) -> int:
@@ -1880,6 +1983,55 @@ def cmd_followup(args, project, catalog):
     return 0
 
 
+RIPE_NEXT = (f"`ripe_insights` were confirmed by {lessons.RIPE} or more tasks: fold each into the skill it belongs "
+             "to (or a new one), then `autoharness lesson fold <id> --skill <name>`. ")
+
+
+def cmd_lesson(args, project, catalog):
+    if args.action == "list":
+        out({"status": "ok", "insights": lessons.insights()})
+        return 0
+    if args.action == "fold":
+        if not (args.value or "").lstrip("#").isdigit() or not args.skill:
+            raise HarnessError("usage: autoharness lesson fold <id> --skill <name>")
+        out({"status": "ok", "insight": lessons.fold(int(args.value.lstrip("#")), args.skill)})
+        return 0
+    task_id = project.active_id()
+    item, merged = lessons.add_insight(args.value or "", task_id, project.root.name)
+    if task_id:
+        project.task().log(f"insight #{item['id']} ({'confirmed' if merged else 'new'}): {item['text']}")
+    nxt = (f"Merged into insight #{item['id']}, now confirmed by {item['confirmed']} task(s)." if merged else
+           f"Recorded as insight #{item['id']}; later tasks whose text shares its words are shown it.")
+    if item["confirmed"] >= lessons.RIPE and not item.get("skill"):
+        nxt += " " + RIPE_NEXT
+    out({"status": "ok", "insight": item, "merged": merged, "next": nxt})
+    return 0
+
+
+def cmd_ruling(args, project, catalog):
+    if args.action == "list":
+        out({"status": "ok", "rulings": rulings.load(project)})
+        return 0
+    task_id = project.active_id()
+    if args.action == "remove":
+        if not (args.value or "").lstrip("#").isdigit():
+            raise HarnessError("ruling remove takes the ruling's number, e.g. `autoharness ruling remove 3`")
+        item = rulings.remove(project, int(args.value.lstrip("#")))
+        out({"status": "ok", "removed": item, "next": "Later critics no longer see this ruling."})
+        return 0
+    if not args.value or not args.reason:
+        raise HarnessError("usage: autoharness ruling add \"<the critic's point>\" --reason \"<the user's words>\"")
+    item = rulings.add(project, args.value, "user", task_id, args.reason)
+    if task_id:
+        project.task().log(f"the user rejected a critic's point (ruling #{item['id']}): {item['point']}: "
+                           f"{item['reason']}")
+    out({"status": "ok", "ruling": item,
+         "next": "Every later critic in this project is told the user rejected this point. If it was what kept the "
+                 "last review blocking, run `autoharness critic` again, or finish with `autoharness teardown "
+                 "--accepted \"<the user's words>\"`."})
+    return 0
+
+
 def cmd_audit(args, project, catalog):
     from autoharness import audit
     out({"status": "ok", "events": audit.read(project.task(args.task_id))})
@@ -2026,6 +2178,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("value", nargs="?", help="add: what is left to do and where; done: its number")
     s.add_argument("--note", help="done: what settled it")
     s.add_argument("--all", action="store_true", help="list: include done items")
+    s = sub.add_parser("lesson", help="small conclusions kept across tasks, each with how many tasks confirmed it: "
+                                      "add, list, fold (into a skill)")
+    s.add_argument("action", choices=["add", "list", "fold"])
+    s.add_argument("value", nargs="?", help="add: the conclusion (when X, do Y, because Z); fold: its number")
+    s.add_argument("--skill", help="fold: the skill it now lives in")
+    s = sub.add_parser("ruling", help="critic points settled for the project, which later critics are told: "
+                                      "add (the user rejected one), list, remove")
+    s.add_argument("action", choices=["add", "list", "remove"])
+    s.add_argument("value", nargs="?", help="add: the critic's point; remove: its number")
+    s.add_argument("--reason", help="add: why, in the user's words")
     s = sub.add_parser("audit", help="show structured decisions for a task")
     s.add_argument("task_id", nargs="?")
     s = sub.add_parser("verify", help="run a check and record it by its exit code, or use a verification guide")
@@ -2127,6 +2289,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--settled", action="append", default=[], metavar="POINT",
                    help="a disputed point this critic settled from measurements in the files, and how; "
                         "later critics see it (repeatable)")
+    s.add_argument("--quality-file", help="with --answer-file, when the brief asks for two reviewers: the "
+                                          "code-quality reviewer's answer, saved unedited")
     s = sub.add_parser("critic", help="a prompt for an independent reviewer of the latest result, or run one")
     s.add_argument("--dispute", help="a point of the last critic review you believe is wrong; a fresh critic decides")
     s.add_argument("--run", choices=list(reviewers.AGENTS),
@@ -2161,8 +2325,9 @@ def build_parser() -> argparse.ArgumentParser:
                        ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:
         s.add_argument(flag, required=flag != "--verify", help=what)
     s.add_argument("--fidelity", help="the level to judge the result at, e.g. `stylised poster, not photographic`")
-    s.add_argument("--review", choices=["critic"],
-                   help="require an independent critic for this task even if its capabilities do not")
+    s.add_argument("--review", choices=list(evidence.REVIEWS),
+                   help="require an independent critic for this task even if its capabilities do not; pair: "
+                        "each round also a code-quality reviewer, both run again after every fix")
     s.add_argument("--preserve", help="existing behaviour that must keep working; teardown then requires a passing "
                                       f"`verify run ... --for {runs.PRESERVE}` on the final code")
     s.add_argument("--verify-template", choices=["browser", "api", "api-client", "logs", "database"],
@@ -2181,7 +2346,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_eval, "decision": cmd_decision, "followup": cmd_followup, "audit": cmd_audit, "verify": cmd_verify, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
+COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_eval, "decision": cmd_decision, "followup": cmd_followup, "lesson": cmd_lesson, "ruling": cmd_ruling, "audit": cmd_audit, "verify": cmd_verify, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,

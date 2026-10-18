@@ -103,14 +103,15 @@ def _hash_dir(root: Path) -> str:
     return h.hexdigest()
 
 
-STATE_GITIGNORE = "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n"
+STATE_GITIGNORE = "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n!rulings.json\n"
 _OLD_GITIGNORES = {"*\n", "*\n!.gitignore\n!config.json\n!kept.json\n",   # written by older versions
-                   "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n"}
+                   "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n",
+                   "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n"}
 GATEWAY_NAME = "autoharness"
 
 
 def ensure_state_dir(state: Path) -> None:
-    """Create .autoharness/; its .gitignore keeps task state out of git but lets settings, kept.json, gateway.json and followups.json in."""
+    """Create .autoharness/; its .gitignore keeps task state out of git but lets settings, kept.json, gateway.json, followups.json and rulings.json in."""
     state.mkdir(parents=True, exist_ok=True)
     gitignore = state / ".gitignore"
     if not gitignore.exists() or gitignore.read_text("utf-8") in _OLD_GITIGNORES:

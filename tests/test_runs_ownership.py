@@ -612,3 +612,146 @@ def test_a_check_changed_after_it_failed_is_flagged(project, capsys):
     flagged = [r for r in res["checked"]["ran"] if r.get("check_changed")]
     assert [r["n"] for r in flagged] == [2, 4]
     assert sum("changed after it failed" in w for w in res["warnings"]) == 2
+
+
+# --- the same call over and over is a loop -----------------------------------------------
+
+def test_the_hook_stops_the_same_call_made_over_and_over(project, capsys, monkeypatch):
+    briefed(capsys, project)
+    call = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
+            "tool_input": {"command": "curl -s http://localhost:8000/health"}}
+    for _ in range(cli.REPEAT_LIMIT):
+        assert hook(capsys, monkeypatch, project, call) is None
+    res = hook(capsys, monkeypatch, project, call)
+    assert denied(res) and "same Bash call" in res["hookSpecificOutput"]["permissionDecisionReason"]
+    other = dict(call, tool_input={"command": "cat server.log"})
+    assert hook(capsys, monkeypatch, project, other) is None           # something else breaks the streak
+    assert hook(capsys, monkeypatch, project, call) is None
+    assert hook(capsys, monkeypatch, project, dict(call, session_id="s2")) is None   # per session
+
+
+# --- rulings: settled points travel to later tasks of the project ------------------------
+
+def test_settled_points_and_the_users_rulings_reach_later_critics(project, capsys, tmp_path):
+    critic_ready(capsys, project, tmp_path)
+    code, res = ah(capsys, project, "critic")
+    f = tmp_path / "a.txt"
+    f.write_text(f"ANSWER-ID: {res['answer_id']}\n1. title spacing (minor)\nVERDICT: minor\n", "utf-8")
+    code, res = ah(capsys, project, "review", "--answer-file", str(f),
+                   "--settled", "the header font matches the reference: measured 14px in both")
+    assert code == 0
+    code, res = ah(capsys, project, "ruling", "add", "totals should be bold", "--reason", "the user: keep them plain")
+    assert code == 0 and res["ruling"]["by"] == "user"
+    code, res = ah(capsys, project, "ruling", "list")
+    assert [r["by"] for r in res["rulings"]] == ["critic", "user"]
+    assert "!rulings.json" in (project.state / ".gitignore").read_text("utf-8")
+    ah(capsys, project, "teardown", "--force")
+    ah(capsys, project, "init", "fix the yearly report too")
+    ah(capsys, project, *BRIEF, "--review", "critic")
+    (tmp_path / "r2.md").write_text("# Y\n", "utf-8")
+    ah(capsys, project, "evidence", "add", str(tmp_path / "r2.md"), "--kind", "result")
+    code, res = ah(capsys, project, "critic")
+    assert "header font matches the reference" in res["prompt"] and "a critic settled it" in res["prompt"]
+    assert "totals should be bold (the user rejected this point: the user: keep them plain)" in res["prompt"]
+    code, res = ah(capsys, project, "ruling", "add", "totals must be bold", "--reason", "fine, bold")
+    assert res["ruling"]["replaces"] == [2]                           # the same point ruled again
+    code, res = ah(capsys, project, "ruling", "remove", "3")
+    assert code == 0 and ah(capsys, project, "ruling", "list")[1]["rulings"][0]["by"] == "critic"
+
+
+# --- a pair of reviewers: what was asked, and how it is done ------------------------------
+
+def pair_round(capsys, project, tmp_path, critic_text, quality_text):
+    code, res = ah(capsys, project, "critic")
+    assert code == 0 and "quality" in res and "--quality-file" in res["next"]
+    a, q = tmp_path / "a.txt", tmp_path / "q.txt"
+    a.write_text(f"ANSWER-ID: {res['answer_id']}\n{critic_text}", "utf-8")
+    q.write_text(f"ANSWER-ID: {res['quality']['answer_id']}\n{quality_text}", "utf-8")
+    return res, a, q
+
+
+def test_a_pair_review_needs_both_answers_and_takes_the_worse_verdict(project, capsys, tmp_path):
+    briefed(capsys, project, "--review", "pair")
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    ah(capsys, project, "evidence", "diff")
+    res, a, q = pair_round(capsys, project, tmp_path, "No differences.\nVERDICT: none\n",
+                           "1. a.py:1 crashes on empty input (major, fixable)\nVERDICT: major\n")
+    assert "code reviewer" in res["quality"]["prompt"] and "Not your job" in res["quality"]["prompt"]
+    code, err = ah(capsys, project, "review", "--answer-file", str(a))
+    assert code == 1 and "--quality-file" in err["error"]
+    code, err = ah(capsys, project, "review", "--answer-file", str(q))
+    assert code == 1                                                  # the quality answer is not a critic's
+    code, res = ah(capsys, project, "review", "--answer-file", str(a), "--quality-file", str(q))
+    review = res["review"]
+    assert code == 0 and review["worst"] == "major" and review["quality"]["verdict"] == "major"
+    assert review["diff"] == "1. [code quality] a.py:1 crashes on empty input (major, fixable)"
+    code, res = ah(capsys, project, "teardown")
+    assert code == 1 and any("major" in p for p in res["problems"])
+    # after the fix both run again; the next quality prompt sees the previous quality review
+    (project.root / "a.py").write_text("x = 3\n", "utf-8")
+    ah(capsys, project, "evidence", "diff")
+    res, a, q = pair_round(capsys, project, tmp_path, "No differences.\nVERDICT: none\n",
+                           "No differences.\nVERDICT: none\n")
+    assert "crashes on empty input" in res["quality"]["prompt"]
+    code, res = ah(capsys, project, "review", "--answer-file", str(a), "--quality-file", str(q))
+    assert code == 0 and res["review"]["worst"] == "none"
+    code, res = ah(capsys, project, "teardown")
+    if res["status"] == "lessons":
+        code, res = ah(capsys, project, "teardown")
+    assert code == 0, res
+
+
+def test_a_single_critic_round_does_not_satisfy_a_pair_brief(project, capsys, tmp_path):
+    briefed(capsys, project, "--review", "pair")
+    (tmp_path / "r.md").write_text("# Q3\n", "utf-8")
+    ah(capsys, project, "evidence", "add", str(tmp_path / "r.md"), "--kind", "result")
+    ah(capsys, project, "critic")
+    ah(capsys, project, "review", "--by", "critic", "--diff", "none", "--worst", "none")   # retold, no pair
+    code, res = ah(capsys, project, "teardown")
+    assert code == 1 and any("no code-quality reviewer" in p for p in res["problems"])
+
+
+def test_critic_run_runs_both_reviewers_of_a_pair(project, capsys, tmp_path, monkeypatch):
+    briefed(capsys, project, "--review", "pair")
+    (tmp_path / "r.md").write_text("# Q3\n", "utf-8")
+    ah(capsys, project, "evidence", "add", str(tmp_path / "r.md"), "--kind", "result")
+    started = []
+
+    def fake(agent, root, prompt_file, answer_file, timeout, answer_id):
+        started.append(Path(prompt_file).name)
+        verdict = "1. leaks a file handle (minor)\nVERDICT: minor" if "quality" in Path(prompt_file).name else \
+            "No differences.\nVERDICT: none"
+        answer_file.write_text(f"ANSWER-ID: {answer_id}\n{verdict}\n", "utf-8")
+        return answer_file.read_text("utf-8")
+
+    monkeypatch.setattr(reviewers, "run", fake)
+    code, res = ah(capsys, project, "critic", "--run", "claude")
+    assert code == 0 and sorted(started) == ["critic-01.txt", "quality-01.txt"]
+    assert res["review"]["worst"] == "minor" and "leaks a file handle" in res["review"]["diff"]
+
+
+# --- insights: small conclusions whose confidence grows -----------------------------------
+
+def test_an_insight_reached_again_is_merged_and_shown_to_related_tasks(project, capsys):
+    from autoharness import lessons
+    briefed(capsys, project)
+    code, res = ah(capsys, project, "lesson", "add", "When the quarterly report totals look wrong, check the "
+                                                   "currency rounding in the export first")
+    assert code == 0 and not res["merged"] and res["insight"]["confirmed"] == 1
+    code, res = ah(capsys, project, "lesson", "add", "check the export currency rounding first when report totals "
+                                                   "are wrong")
+    assert res["merged"] and res["insight"]["confirmed"] == 1         # one task confirms it once
+    for n in (2, 3):
+        assert ah(capsys, project, "teardown", "--force")[0] == 0
+        code, res = ah(capsys, project, "init", f"the quarterly report totals are wrong again, take {n}")
+        assert res["insights"][0]["confirmed"] == n - 1 and "insights" in res["next"]
+        ah(capsys, project, *BRIEF)
+        code, res = ah(capsys, project, "lesson", "add", "report totals wrong: check currency rounding in the export")
+        assert res["merged"] and res["insight"]["confirmed"] == n
+    assert "lesson fold" in res["next"] and lessons.ripe()[0]["confirmed"] == 3
+    code, res = ah(capsys, project, "lesson", "add", "a different conclusion about svg gradients and filters")
+    assert not res["merged"]
+    code, res = ah(capsys, project, "lesson", "fold", "1", "--skill", "report-totals")
+    assert res["insight"]["skill"] == "report-totals" and lessons.ripe() == []
+    code, res = ah(capsys, project, "init", "the quarterly report totals are wrong again")
+    assert "insights" not in res or all(i["id"] != 1 for i in res["insights"])
