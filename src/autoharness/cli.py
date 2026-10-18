@@ -260,7 +260,8 @@ def cmd_init(args, project, catalog):
         "the brief is recorded.")
         if result.get("local"):
             result["next"] = ("`local` lists skills you saved earlier that fit this task: prefer them "
-                              "(`autoharness add skill local:<name>`). " + result["next"])
+                              "(`autoharness add skill local:<name>`); their \"Facts found here\" were measured "
+                              "on another project: re-check them before relying on them. " + result["next"])
         if rejected:
             result["next"] = REJECTED_NEXT + result["next"]
     if mode == "full" and not result["suggested"]:
@@ -435,6 +436,9 @@ def cmd_review(args, project, catalog):
     extra = {"answer_id": answer["id"]} | {k: answer[k] for k in ("coverage", "unrequested") if answer[k]} \
         | ({"previous_review": answer["previous"]} if answer["previous"] else {}) | ({"ran": ran} if ran else {}) \
         if answer else {}
+    pair = task.info().get("comparisons", {}).get(answer["id"]) if answer else None
+    if pair and (cmp := evidence.compared(pair, answer["closer"])):
+        extra["compared"] = cmp
     item = evidence.review(task, diff, worst, args.by, args.settled, extra | ({"warnings": warnings} if warnings else {}))
     if answer:
         item["answer_file"] = answers.consume(task, answer)
@@ -489,6 +493,9 @@ def cmd_review(args, project, catalog):
     else:
         nxt = ("No blocker or major difference is fixable in this review."
                + ("" if item["by"] == "critic" else " Confirm with an independent critic: `autoharness critic`."))
+    if item.get("compared", {}).get("closer") == "earlier":
+        nxt = (f"Went backwards: compared blind, the earlier result #{item['compared']['earlier']} is closer to the "
+               "reference than this one. Find what got worse since then and restore it before fixing more. " + nxt)
     if short := [f"{k} {v}" for k, v in item.get("coverage", {}).items() if v != "met"]:
         nxt = f"The critic finds these brief items not met: {', '.join(short)}. " + nxt
     if item.get("unrequested"):
@@ -592,6 +599,9 @@ def cmd_critic(args, project, catalog):
     with write_lock(project):
         res = evidence.critic_prompt(catalog, task, args.dispute or "")
         res["answer_id"] = answers.issue(task, "critic", critic_subject(evidence.latest(task, "result")))
+        if pair := res.pop("compare", None):
+            # which copy is which stays with autoharness: the author does not see it either
+            task._update_info(comparisons=task.info().get("comparisons", {}) | {res["answer_id"]: pair})
         res["prompt"] += answers.instruction(res["answer_id"])
         res["prompt_file"] = evidence.save_prompt(task, "critic", res["prompt"])
         if args.run:
@@ -931,6 +941,11 @@ def cmd_teardown(args, project, catalog):
     if info.get("light_reason") and info.get("mode") == "light":
         warnings.append(f"light mode on a task that mentions a reference or a visual check, because: "
                         f"{info['light_reason']}; no reference was required")
+    best, last = info.get("best_result"), evidence.latest(task, "result")
+    critics_done = [r for r in info.get("reviews", []) if r["by"] == "critic"]
+    if best and critics_done and critics_done[-1].get("compared", {}).get("closer") == "earlier":
+        warnings.append(f"compared blind, the earlier result #{best} is closer to the reference than the final one "
+                        f"(#{last['n'] if last else '?'}): tell the user")
     if drift := evidence.changed_since_review(task, project.root):
         warnings.append(drift)
     critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
