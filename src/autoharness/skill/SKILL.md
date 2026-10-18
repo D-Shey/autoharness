@@ -11,7 +11,9 @@ do the thinking. Every command prints JSON with a `next` field: **follow `next`*
 detailed procedure for the step you are in, so never cut a command's output short. Exit code `3`
 means **stop and ask the user**. Long texts with quotes, brackets or `;` (a brief, a review, a
 measurement) go in a JSON file instead of the command line: `--args-file <file.json>` with
-`{"diff": "...", "worst": "minor"}`.
+`{"diff": "...", "worst": "minor"}`. Before the brief no file can be written, so pass the JSON on
+stdin: `autoharness brief --args-file - <<'EOF'` ... `EOF` (Bash) or `@'` ... `'@ | autoharness
+brief --args-file -` (PowerShell).
 
 If the hook is installed, tools that do work stay blocked until `init` (light) or `init` and `brief`
 (full). Reading files stays open. Skip the harness only when the user explicitly said so:
@@ -28,7 +30,9 @@ autoharness --agent {{AGENT}} init "<the user's task, verbatim>" --mode light|fu
 ```
 
 - `light`: the inputs and the way to verify are already at hand (a small fix, a git chore). No
-  search, no brief: do the work, verify it, `teardown`.
+  search, no brief: do the work, verify it, `teardown`. A task that has to match an image (a
+  scene, a design) is not light: `init` refuses it unless you say why nothing real is to be
+  matched (`--light-reason "..."`). Drawing from memory what can be looked up is the gap.
 - `full` (default): something the result must match or a way to check it is missing. Search,
   brief, vet, install.
 - `reviewed`: full, and an independent critic must pass the result before teardown.
@@ -159,7 +163,10 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    file yourself. The task may stop when the latest critic verdict is `minor` or `none`.
    Disagreeing is not dropping: `autoharness critic --dispute "<point>"` lets a fresh critic
    rule; record its ruling with the review, `--settled "<point and ruling>"`. When `review` answers `change_approach`, `arbitrate` or `limited`, its `next` says
-   exactly what to do. Code edited after a review needs a new `evidence diff` and review.
+   exactly what to do; `ask_user` (exit 3, after many rounds that still block): stop, show the user
+   its `trend` and ask whether to go on or accept. Code edited after a review needs a new `evidence diff` and review.
+   Run an arbiter's check with `check --run "<script>"`; where you had to check differently from
+   its words, say so with `--deviation "<what and why>"` rather than adjusting it quietly.
    If the user accepts the result as it is: `autoharness teardown --accepted "<their words>"`.
 2. **Save what you learned**: update each skill you created, then `autoharness skill save <name>`
    (exit 3: show name, description, warnings; `--approve` after a yes). Reusable know-how no

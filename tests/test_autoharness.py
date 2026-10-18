@@ -2007,7 +2007,7 @@ def test_an_arbiter_fix_needs_a_measurable_check_before_the_critic(project, caps
     code, res = run_check(capsys, root, "no")
     assert code == 0 and "has not taken effect" in res["next"]
     code, res = cli_json(capsys, "--project", root, "critic")
-    assert code == 0 and "knee dome at least 15 L* darker" in res["prompt"] and "(failed)" in res["prompt"]
+    assert code == 0 and "knee dome at least 15 L* darker" in res["prompt"] and "(failed; reported by the author" in res["prompt"]
 
 
 def test_failed_arbiter_fixes_end_in_a_final_arbiter_then_a_limit_not_the_user(project, capsys, tmp_path):
@@ -3056,6 +3056,16 @@ BRIEF_AS_DOCUMENTED = ('autoharness brief --goal "report matches the ledger" --i
     ("Bash", "cd x && rm -rf y && autoharness init", False),
     ("Bash", 'autoharness init "unbalanced', False),
     ("Bash", "echo autoharness", False),
+    ("Bash", "autoharness brief --args-file - <<'EOF'\n{\"goal\": \"x\"}\nEOF", True),   # data on stdin
+    ("Bash", "cd d && autoharness brief --args-file - <<'EOF'\n{}\nEOF\n", True),
+    ("Bash", "autoharness brief --args-file - <<'EOF'\n{}\nEOF\nrm -rf x\nEOF", False),   # bash ends it at the first EOF
+    ("Bash", "autoharness brief --args-file - <<'EOF'\n{}\nEOF\nrm -rf x", False),
+    ("Bash", "autoharness brief --args-file - <<'EOF' && rm x\n{}\nEOF", False),
+    ("Bash", "autoharness brief --args-file - <<EOF\n$(rm x)\nEOF", False),                # unquoted: expanded
+    ("PowerShell", "@'\n{}\n'@ | autoharness brief --args-file -", True),
+    ("PowerShell", "@'\nx\n'@; rm y\n'@ | autoharness status", False),
+    ("PowerShell", "@'\n{}\n'@ | autoharness brief --args-file -; rm x", False),
+    ("PowerShell", '@"\n$(rm x)\n"@ | autoharness brief --args-file -', False),
 ])
 def test_hook_recognises_only_a_plain_autoharness_command(tool, command, ok):
     assert cli._is_autoharness_call(tool, {"command": command}) is ok

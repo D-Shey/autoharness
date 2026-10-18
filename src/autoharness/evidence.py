@@ -34,6 +34,7 @@ BLOCKING = ("major", "blocker")
 LOOP_ROUNDS = 3  # critic reviews in a row that still list the same blocking problem
 MAX_APPROACHES = 3  # different approaches to a looping part before an arbiter is called
 MAX_ARBITRATIONS = 2  # arbiter fixes that may fail before the final arbiter is called
+ROUND_BUDGET = 8  # critic rounds since the user was last asked before the harness stops to ask again
 ARBITER_ROUNDS = 8  # latest critic descriptions of the part shown to the arbiter
 SAME_APPROACH = 0.75  # word overlap at which a "new" approach is the old one reworded
 MEDIA = {"image": {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}}
@@ -163,10 +164,19 @@ def top_issue(diff: str) -> str:
     return re.sub(r"^\s*1[.)]?\s*", "", first).strip()
 
 
+# the labels a critic puts on almost every point: two points sharing only these are not the same problem
+TAG_WORDS = {"severity", "major", "minor", "blocker", "fixable", "unfixable", "yes", "none", "critical",
+             "priority", "high", "medium", "low", "still", "issue", "problem"}
+
+
+def _content_stems(item: str) -> set[str]:
+    return text.stems(" ".join(w for w in text.words(item) if w not in TAG_WORDS))
+
+
 def same_issue(a: str, b: str) -> bool:
     """Half the words of the shorter text are in the other, and more than one word unless it has only one:
-    a two-word name sharing just "hand" with a long point is another problem."""
-    sa, sb = text.stems(a), text.stems(b)
+    a two-word name sharing just "hand" with a long point is another problem. Severity labels do not count."""
+    sa, sb = _content_stems(a), _content_stems(b)
     shared = len(sa & sb)
     return bool(sa and sb) and shared / min(len(sa), len(sb)) >= 0.5 and (shared >= 2 or min(len(sa), len(sb)) == 1)
 
@@ -201,26 +211,29 @@ def issues(diff: str) -> list[str]:
     return out
 
 
-def recurring(reviews: list[dict], diff: str, skip=lambda issue: False) -> tuple[int, str]:
+def recurring(reviews: list[dict], diff: str, skip=lambda issue: False) -> tuple[int, str, str]:
     """How many critic rounds in a row, this one included, still list the same blocking problem.
 
     A critic may reorder its list from round to round, so a problem counts wherever it sits in
     each list, not only at the top. The count stops at the round where the user was last asked.
-    `skip` leaves out problems that no longer block (ruled out of reach by an arbiter).
+    `skip` leaves out problems that no longer block (ruled out of reach by an arbiter). The third value is
+    the previous round's point it was matched with, so a wrong match can be seen.
     """
     critics = [r for r in reviews if r["by"] == "critic"]
-    best, which = 1, top_issue(diff)
+    best, which, matched = 1, top_issue(diff), ""
     for issue in issues(diff):
         if skip(issue):
             continue
-        count = 1
+        count, first = 1, ""
         for prev in reversed(critics):
-            if prev.get("loop_asked") or not any(same_problem(issue, p) for p in issues(prev["diff"])):
+            same = next((p for p in issues(prev["diff"]) if same_problem(issue, p)), None)
+            if prev.get("loop_asked") or same is None:
                 break
+            first = first or same
             count += 1
         if count > best:
-            best, which = count, issue
-    return best, which
+            best, which, matched = count, issue, first
+    return best, which, matched
 
 
 def _last_asked(reviews: list[dict]) -> int:
@@ -315,8 +328,10 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
         if not open_items:
             item.update(worst="minor", fixable=False, worst_given=worst, limited=True)
     if by == "critic":
-        item["repeats"], item["recurring"] = (recurring(reviews, diff, lambda i: is_limited(task, i))
-                                              if item["worst"] in BLOCKING else (1, item["top"]))
+        item["repeats"], item["recurring"], matched = (recurring(reviews, diff, lambda i: is_limited(task, i))
+                                                       if item["worst"] in BLOCKING else (1, item["top"], ""))
+        if matched:
+            item["matched_previous"] = matched
         if item["repeats"] >= LOOP_ROUNDS:
             part = item["recurring"]
             item["tried"] = len(tried_approaches(task, part))
@@ -337,6 +352,14 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
                 item["auto_limited"] = part
                 if not [i for i in issues(diff) if not is_limited(task, i)]:
                     item.update(worst="minor", fixable=False, worst_given=worst, limited=True)
+    if by == "critic" and item["worst"] in BLOCKING and not any(
+            k in item for k in ("needs_approach", "needs_arbiter", "auto_limited")):
+        since = _last_asked(reviews)
+        rounds = [r for r in reviews if r["by"] == "critic" and r["round"] > since] + [item]
+        if len(rounds) >= ROUND_BUDGET:
+            # many rounds and still a blocking verdict: whether more rounds are worth it is the user's call
+            item["loop_asked"] = True
+            item["trend"] = [f"{r['round']}: {r['worst']}, {len(issues(r['diff']))} blocking" for r in rounds]
     task._update_info(reviews=reviews + [item])
     task.log(f"review {item['round']} by {by} of result #{result['n']}: worst fixable {item['worst']}: {diff}")
     return item
@@ -420,7 +443,10 @@ Decide one of two:
   effect is caught. The check must cover every aspect the critics named for this part above, not
   only the easiest one to measure: a part can pass one number and still fail the others. Measure
   the reference yourself and make sure it passes your own check: give the reference's value for
-  each condition, so the author is not sent after a target the reference does not have.
+  each condition, so the author is not sent after a target the reference does not have. Write the
+  check so it can run as a script that exits 0 on pass (thresholds from values you measured in the
+  reference and the result, such as their actual colours, not generic ones); where a condition
+  cannot be measured, say so in the check instead of leaving it to the author to reinterpret.
 - LIMIT: the part cannot reach the bar at this fidelity within the constraints, whatever the
   technique. Say why in one or two sentences.
 Do not suggest changing the constraints. End with exactly one line:
@@ -465,9 +491,10 @@ def pending_check(task: Task) -> dict | None:
     return next((a for a in reversed(fixes) if not a.get("checked")), None)
 
 
-def record_check(task: Task, result: str, passed: bool, run: int | None = None) -> dict:
+def record_check(task: Task, result: str, passed: bool, run: int | None = None,
+                 deviations: list[str] | None = None) -> dict:
     """Record what the arbiter's check measured on the new result; `run`: the number of the run autoharness
-    made of it, when it ran the check itself."""
+    made of it, when it ran the check itself; `deviations`: where the author checked differently, and why."""
     arb = pending_check(task)
     if not arb:
         raise HarnessError("no arbiter check is waiting to be run")
@@ -477,7 +504,7 @@ def record_check(task: Task, result: str, passed: bool, run: int | None = None) 
     for a in items:
         if a["n"] == arb["n"]:
             a["checked"] = {"result": result, "passed": passed, "time": time.strftime("%Y-%m-%dT%H:%M:%S")} \
-                | ({"run": run} if run else {})
+                | ({"run": run} if run else {}) | ({"deviations": deviations} if deviations else {})
             arb = a
     task._update_info(arbitrations=items)
     task.log(f"check of arbiter fix {arb['n']}: {'passed' if passed else 'failed'}: {result}")
@@ -605,9 +632,12 @@ Name what would fix it at the target fidelity. Then give your full list as below
     last_round = critics[-1]["round"] if critics else 0
     checked = [a for a in info.get("arbitrations", []) if a.get("checked") and a["after_round"] >= last_round]
     if checked:
-        focused += "\nThe arbiter's fix came with a measurable check, and the author ran it:\n" + "\n".join(
+        focused += "\nThe arbiter's fix came with a measurable check:\n" + "\n".join(
             f"- check: {a['check']}\n  measured: {a['checked']['result']} "
-            f"({'passed' if a['checked']['passed'] else 'failed'})" for a in checked) + \
+            f"({'passed' if a['checked']['passed'] else 'failed'}; "
+            f"{'run by autoharness' if a['checked'].get('run') else 'reported by the author, not run by autoharness'})"
+            + "".join(f"\n  the author deviated from the check: {d}" for d in a["checked"].get("deviations", []))
+            for a in checked) + \
             "\nVerify that measurement yourself in the files before you rely on it.\n"
     ran = info.get("runs", [])[-6:]
     if ran:
@@ -635,7 +665,8 @@ Under the heading "Previous review", give one line per point: fixed, still wrong
 (what the reference actually shows, from the files). Do not change your own list because of it.
 Where your fix for a point goes the opposite way from the previous review's (lighter vs darker,
 more vs less, bigger vs smaller), say so and settle it from what the reference shows, with a value
-or a measurement, so the author is not sent back and forth.
+or a measurement, so the author is not sent back and forth. A point still wrong keeps the
+previous review's severity unless that part changed: say what changed when you raise or lower it.
 """
     brief_items = runs.brief_items(brief)
     coverage = "" if not brief_items else f"""

@@ -162,6 +162,8 @@ def summary(task: Task) -> dict:
     reported += [f"arbiter check on `{a['part']}`: {'passed' if a['checked']['passed'] else 'failed'}: "
                  f"{a['checked']['result']}" for a in info.get("arbitrations", [])
                  if a.get("checked") and "run" not in a["checked"]]
+    reported += [f"deviation from the arbiter check on `{a['part']}`: {d}" for a in info.get("arbitrations", [])
+                 for d in (a.get("checked") or {}).get("deviations", [])]
     reported += [f"self review round {r['round']}: worst {r['worst']}"
                  for r in info.get("reviews", []) if r["by"] == "self"]
     covered = next((r for r in reversed(info.get("reviews", [])) if r.get("coverage")), None)

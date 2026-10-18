@@ -374,3 +374,47 @@ def test_verify_run_explains_a_command_the_shell_split(project, capsys):
     briefed(capsys, project)
     code, res = ah(capsys, project, "verify", "run", "python", "-c", "print(1)")
     assert code == 1 and "in pieces" in res["error"] and "--args-file" in res["error"]
+
+
+# --- fixes from a long visual task's report ------------------------------------------------
+
+def test_severity_labels_alone_do_not_make_two_points_the_same():
+    from autoharness import evidence
+    assert not evidence.same_problem("hair too dark - severity: major, fixable: yes",
+                                     "sky gradient banding - severity: major, fixable: yes")
+    assert evidence.same_problem("hair too dark - severity: major, fixable: yes",
+                                 "hair still too dark at the crown (major, fixable)")
+
+
+def test_light_mode_on_a_visual_task_needs_a_reason(project, capsys):
+    task = "draw an SVG of the film scene matching the reference image"
+    code, res = ah(capsys, project, "init", task, "--mode", "light")
+    assert code == 1 and "--light-reason" in res["error"]
+    code, res = ah(capsys, project, "init", task, "--mode", "light", "--light-reason", "a placeholder, no likeness")
+    assert code == 0
+    assert project.task().info()["light_reason"] == "a placeholder, no likeness"
+
+
+def test_args_file_from_stdin(project, capsys, monkeypatch):
+    ah(capsys, project, "init", "fix the quarterly report")
+    data = {"goal": "1 totals row added", "inputs": "the report", "constraints": "none", "verify": "tests",
+            "candidates": "none", "gaps": "none: tools at hand"}
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(data).encode("utf-8"))))
+    code, res = ah(capsys, project, "brief", "--args-file", "-")
+    assert code == 0, res
+    assert project.task().info()["brief"]["goal"] == "1 totals row added"
+
+
+def test_many_blocking_critic_rounds_stop_to_ask_the_user(project, capsys):
+    from autoharness import evidence
+    briefed(capsys, project)
+    words = ["sky", "rain", "neon", "bridge", "coat", "hair", "glow", "fog", "car", "sign"]
+    for n in range(evidence.ROUND_BUDGET):
+        f = project.root / f"r{n}.txt"
+        f.write_text(str(n), "utf-8")
+        ah(capsys, project, "evidence", "add", str(f), "--kind", "result")
+        code, res = ah(capsys, project, "review", "--by", "critic", "--worst", "major",
+                       "--diff", f"1 {words[n]} {words[n + 1]} wrong - major")
+        if n < evidence.ROUND_BUDGET - 1:
+            assert res["status"] != "ask_user", res
+    assert code == cli.EXIT_APPROVAL and res["status"] == "ask_user" and len(res["trend"]) == evidence.ROUND_BUDGET

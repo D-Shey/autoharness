@@ -204,8 +204,21 @@ def cmd_init(args, project, catalog):
     if selected == "auto":
         selected = "full" if classified else "light"
     mode = "light" if selected == "light" else "full"
+    checked = [c.name for c, _ in classified if c.requires]
+    # an image to match is the case agents skip most (drawing from memory): light mode has to be argued for
+    visual = [c.name for c, _ in classified if c.requires.get("media") == "image"]
+    light_reason = (args.light_reason or "").strip()
+    if mode == "light" and visual and not light_reason:
+        raise HarnessError(
+            f"the task text mentions {', '.join(visual)}: such a result has to match something real (a reference "
+            "to look at, results to compare, a critic), and light mode skips all of that. Start with `--mode full` "
+            "or `--mode reviewed`; if nothing real is to be matched here, say why: `--mode light --light-reason "
+            "\"<why no reference is needed>\"`")
     check_owner(project, project.active_id())
     task = project.init_task(args.task, mode=mode)
+    if mode == "light" and visual:
+        task._update_info(light_reason=light_reason)
+        task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
     if owner := agents.session_id():
         task._update_info(owner=owner)
     if selected == "reviewed":
@@ -216,7 +229,6 @@ def cmd_init(args, project, catalog):
         if classified:
             result["hint"] = ("the task text mentions " + ", ".join(c.name for c, _ in classified)
                               + ": if a tool for it is missing, run `autoharness mode full`")
-            checked = [c.name for c, _ in classified if c.requires]
             if checked:
                 result["hint"] += (f". {', '.join(checked)} come with required references, results and a critic, "
                                    "enforced only in full or reviewed mode: if the result must match something real, "
@@ -388,6 +400,12 @@ def read_answer(task: Task, path: str, kind: str, allowed, subject: str) -> dict
     return answer
 
 
+def MATCHED(item: dict) -> str:
+    """How a loop was detected, so a wrong match shows: the previous round's point it was taken for."""
+    return (f" (Counted as the previous round's point \"{item['matched_previous']}\": if these are different "
+            "problems, tell the user instead of changing an approach that works.)" if item.get("matched_previous") else "")
+
+
 def cmd_review(args, project, catalog):
     task = project.task()
     warnings, answer = [], None
@@ -438,7 +456,7 @@ def cmd_review(args, project, catalog):
                      "`autoharness arbiter`, give its prompt unchanged to a fresh subagent that neither made nor "
                      "reviewed the work, save its answer unedited to a file and record it "
                      "with `autoharness arbitrate --answer-file <file>`. The next critic will not run before that."
-                     + final})
+                     + final + MATCHED(item)})
         return 0
     if item.get("needs_approach"):
         part = item["needs_approach"]
@@ -455,8 +473,15 @@ def cmd_review(args, project, catalog):
                      "capability gap: `autoharness need <capability> --reason \"<part>\"`, `autoharness search "
                      "skill \"<part>\"`, or write down what you learn in a skill. 3) Record it: `autoharness "
                      "approach --part \"<part>\" --was \"<old method>\" --now \"<new method>\"`. 4) Rebuild the part, "
-                     "add the result and a close-up of the part, then `autoharness critic`."})
+                     "add the result and a close-up of the part, then `autoharness critic`." + MATCHED(item)})
         return 0
+    if item.get("loop_asked"):
+        out({"status": "ask_user", "review": item, "trend": item["trend"],
+             "next": f"{len(item['trend'])} critic rounds and the verdict still blocks. Stop and ask the user, showing "
+                     "`trend` (verdict and blocking points per round) and what is still open: keep going (the next "
+                     "rounds count from here), or accept the result as it is (`autoharness teardown --accepted "
+                     "\"<their words>\"`). Do not run another critic before they answer."})
+        return EXIT_APPROVAL
     if item["fixable"]:
         nxt = ("Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
                "close-ups of the parts in question), and review again. If you believe a critic point is wrong, "
@@ -548,10 +573,13 @@ def cmd_check(args, project, catalog):
         raise HarnessError("run the check with --run \"<command>\" (the exit code decides), or record what you "
                            "measured with --result \"<measured>\" --pass yes|no")
     with write_lock(project):
-        item = evidence.record_check(task, args.result, args.passed == "yes", ran and ran["n"])
+        item = evidence.record_check(task, args.result, args.passed == "yes", ran and ran["n"], args.deviation)
     nxt = ("The fix took effect by its own measure: run `autoharness critic`." if args.passed == "yes" else
            "The check failed: the fix has not taken effect. Keep working on it and record the check again when it "
            "passes; if it cannot pass, `autoharness critic` still runs, and the critic sees the failed measurement.")
+    if not ran:
+        nxt = ("Recorded on your word: the critic and teardown show it as reported by you, not run by autoharness. "
+               "Where the check can be a script, run it with `autoharness check --run \"<command>\"`. ") + nxt
     out({"status": "ok", "arbitration": item, "next": nxt} | ({"run": ran} if ran else {}))
     return 0
 
@@ -900,6 +928,9 @@ def cmd_teardown(args, project, catalog):
         warnings.append("no discovery ran: no skill or MCP search was made for this task")
     if not info.get("brief"):
         warnings.append("no brief recorded: goal, missing inputs, constraints and verification were never written down")
+    if info.get("light_reason") and info.get("mode") == "light":
+        warnings.append(f"light mode on a task that mentions a reference or a visual check, because: "
+                        f"{info['light_reason']}; no reference was required")
     if drift := evidence.changed_since_review(task, project.root):
         warnings.append(drift)
     critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
@@ -1342,6 +1373,35 @@ def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
     return [*commands, words] if words or not commands else commands   # a trailing `;` ends nothing new
 
 
+# data fed to one autoharness command on stdin, never run: a Bash heredoc with a single-quoted delimiter
+# (no expansion), or a PowerShell single-quoted here-string piped into it
+HEREDOC_START = re.compile(r"[ \t]<<[ \t]*'([A-Za-z_]\w*)'[ \t]*\r?\n")
+HERE_STRING_START = re.compile(r"\A@'[ \t]*\r?\n")
+
+
+def _without_stdin(tool: str, command: str) -> str:
+    """The command without the data it is fed on stdin. The data ends where the shell ends it, at the first
+    closing line, and nothing may follow that line: what did would run."""
+    if tool == "Bash":
+        m = HEREDOC_START.search(command)
+        if not m:
+            return command
+        lines = command[m.end():].split("\n")
+        close = next((n for n, line in enumerate(lines) if line.rstrip("\r") == m.group(1)), None)
+        if close is None or any(line.strip() for line in lines[close + 1:]):
+            return command    # unclosed, or more after it: left for the plain-command check to refuse
+        return command[:m.start()]
+    m = HERE_STRING_START.match(command)
+    if not m:
+        return command
+    end = re.search(r"\r?\n'@", command[m.end() - 1:])
+    if not end:
+        return command
+    rest = command[m.end() - 1 + end.end():]
+    pipe = re.match(r"[ \t]*\|[ \t]*(?=autoharness\s)", rest)
+    return rest[pipe.end():] if pipe else command
+
+
 def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
     """The skill, or one plain `autoharness ...` command (after any `cd <dir> &&`). Nothing may run after it
     in the same call, so the gate is not passed by chaining another command on. The gate keeps the agent to
@@ -1350,7 +1410,7 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
         return str(tool_input.get("skill", "")).split(":")[-1] == "autoharness"
     if tool not in ("Bash", "PowerShell"):
         return False
-    command = TRAILING_OUTPUT.sub("", str(tool_input.get("command", "")).strip())
+    command = TRAILING_OUTPUT.sub("", _without_stdin(tool, str(tool_input.get("command", "")).strip()))
     commands = _plain_commands(command, bash=tool == "Bash")
     if not commands:
         return False
@@ -1365,7 +1425,7 @@ def _autoharness_subcommand(tool: str, tool_input: dict) -> str | None:
     """The subcommand of an `autoharness ...` call that `_is_autoharness_call` let through (`init`, `teardown`)."""
     if tool not in ("Bash", "PowerShell"):
         return None
-    command = TRAILING_OUTPUT.sub("", str(tool_input.get("command", "")).strip())
+    command = TRAILING_OUTPUT.sub("", _without_stdin(tool, str(tool_input.get("command", "")).strip()))
     words = (_plain_commands(command, bash=tool == "Bash") or [[]])[-1]
     words = words[words.index("autoharness") + 1:] if "autoharness" in words else []
     skip = False
@@ -1494,7 +1554,9 @@ def cmd_hook(args, project, catalog):
                     "and at the end `2>&1` and read-only filters (`| head`, `| tail`, `| jq`, `| grep`, "
                     "`| Select-Object -First N`, `| Out-String`, `| ConvertFrom-Json`); outside quotes no other "
                     "`;`, `|`, `&&`, `#`, redirection or brackets; `$(...)` and backticks only inside single "
-                    "quotes; `\\\"` only in Bash. "
+                    "quotes; `\\\"` only in Bash. Long texts go in on stdin: `autoharness brief --args-file - "
+                    "<<'EOF'` + JSON + `EOF` in Bash, or `@'` + JSON + `'@ | autoharness brief --args-file -` in "
+                    "PowerShell. "
                     "Reading files is still allowed. If the user explicitly said not to use it, run "
                     f"`autoharness waive {sid} --reason \"<their words>\"` and tell the user.")
                 out({"decision": "deny", "reason": reason} if agy else
@@ -1725,7 +1787,8 @@ def expand_args_files(argv: list[str]) -> list[str]:
         else:
             raise HarnessError(f"{ARGS_FILE} needs a file")
         try:
-            data = json.loads(Path(path).read_text("utf-8-sig"))
+            raw = sys.stdin.buffer.read().decode("utf-8-sig") if path == "-" else Path(path).read_text("utf-8-sig")
+            data = json.loads(raw)
         except (OSError, ValueError) as e:
             raise HarnessError(f"{ARGS_FILE} {path}: {e}") from e
         if not isinstance(data, dict):
@@ -1757,6 +1820,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="light (use existing tools), full (default: discovery and brief), reviewed (full and an "
                         "independent critic), auto (full when the task matches a capability, else light)")
     s.add_argument("--profile", choices=["quick", "standard", "reviewed"], help=argparse.SUPPRESS)
+    s.add_argument("--light-reason", help="light mode on a task that mentions a reference or a visual check: why "
+                                          "nothing real has to be matched")
     s = sub.add_parser("mode", help="raise the active task: light to full, or to reviewed (requires a critic)")
     s.add_argument("value", choices=["full", "reviewed"])
     s = sub.add_parser("eval", help="record and compare measured task runs")
@@ -1905,6 +1970,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=float, default=runs.DEFAULT_TIMEOUT, help="with --run: seconds allowed")
     s.add_argument("--result", help="what the check measured (when it is not a command)")
     s.add_argument("--pass", dest="passed", choices=["yes", "no"])
+    s.add_argument("--deviation", action="append", default=[],
+                   help="where you checked differently from the arbiter's check, and why (repeatable)")
     s = sub.add_parser("brief", help="record what a good result is, what is missing, and the verdict on candidates")
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
