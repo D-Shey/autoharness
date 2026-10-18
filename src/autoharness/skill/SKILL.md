@@ -183,7 +183,9 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    Run an arbiter's check with `check --run "<script>"`; where you had to check differently from
    its words, say so with `--deviation "<what and why>"` rather than adjusting it quietly.
    If the user accepts the result as it is or tells you to stop: `autoharness teardown --accepted
-   "<their words>"` (it does not hold the end up for lessons; offer them once instead).
+   "<their words>"` (it does not hold the end up for lessons; offer them once instead). Only their
+   words, never your own judgment: with the hook installed, `--accepted` and `--force` are refused
+   until the user has written something since the task started.
 2. **Save what you learned**: update each skill you created, then `autoharness skill save <name>`
    (exit 3: show name, description, warnings; `--approve` after a yes). Reusable know-how no
    skill covers goes into a new one the same way. When the task had friction (a check that failed
