@@ -734,6 +734,9 @@ def cmd_brief(args, project, catalog):
                      if need.get(k))
     owed = (f" Teardown will insist on evidence for this task: {owed}"
             + (f" ({need['media']} files)" if need.get("media") else "") + "."
+            + (f" If what you produce is not a {need['media']} file itself, getting a {need['media']} of it is a "
+               "capability like any other: plan it now (`autoharness need <capability>`, or a tool at hand) and "
+               "smoke-test it before relying on it." if need.get("media") else "")
             + (" Get the reference first." if need.get("reference") else "")
             if owed else "")
     if args.preserve:
@@ -1012,7 +1015,7 @@ def cmd_teardown(args, project, catalog):
             or info.get("profile") == "reviewed":
         blocking += evidence.problems(catalog, task)
     blocking += runs.problems(task)
-    if blocking and args.accepted:
+    if args.accepted:
         task._update_info(accepted_by_user=args.accepted)
         task.log(f"user accepted the result as it is: {args.accepted}")
     if blocking and not (args.force or args.accepted):
@@ -1021,7 +1024,8 @@ def cmd_teardown(args, project, catalog):
                      "run `autoharness teardown --accepted \"<their words>\"`."})
         return 1
     learned = lessons.friction(task)
-    if learned and not info.get("lessons_seen"):
+    # the user ending the task (`--accepted`, or `--force` on their word) is not held up for lessons
+    if learned and not info.get("lessons_seen") and not (args.accepted or args.force):
         task._update_info(lessons_seen=True)
         ripe = lessons.ripe()
         out({"status": "lessons", "task_id": task.id, "lessons": learned} | ({"ripe_insights": ripe} if ripe else {})
@@ -1078,6 +1082,9 @@ def cmd_teardown(args, project, catalog):
     if found:
         nxt += (" Tell the user the follow-ups this task left for later: "
                 + "; ".join(f"#{i['id']} {i['text']}" for i in found) + ".")
+    if learned and not info.get("lessons_seen"):
+        nxt += (" The task ended on the user's word with friction left unrecorded (`lessons`): offer once to keep "
+                "what it taught (`autoharness lesson add` or a skill); do nothing if they decline.")
     nxt += (" Report what was checked as `checked` has it, without upgrading it: `ran` are checks autoharness ran "
             "itself (a stale one ran on older code), `critic` says where each verdict came from, `reported_only` "
             "you only reported"

@@ -867,7 +867,10 @@ def problems(catalog, task: Task) -> list[str]:
                    f"(`autoharness evidence add <file> --kind reference`); a description of it is not a reference")
     if len(results) < need.get("result", 0):
         out.append(f"{len(results)}{of} result(s) recorded, {need['result']} needed: add what each round produced "
-                   f"(`autoharness evidence add <file> --kind result`)")
+                   f"(`autoharness evidence add <file> --kind result`"
+                   + (f"; a result that is not a {media} file needs a {media} of it: a capability to find, "
+                      "`autoharness need <capability>`" if media else "")
+                   + ")")
     if need.get("critic", 0):
         critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
         last = latest(task, "result")
