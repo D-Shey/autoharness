@@ -731,6 +731,12 @@ closer to the reference and the quality bar as a whole, weighing what matters mo
     whole = " (the whole result, then any close-ups of it)" if visual else ""
     see = ("Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up."
            if visual else "Describe what the files show and what running the result does, not what you expect.")
+    interface = "" if visual else """
+Where the task names something another program or person will call or read (a function, a command, a
+file format, an API) without fixing its exact form, check that form against the words the task uses and
+the usual convention for it: an interface that only the author's own guess would call (arguments the
+task does not name, in an order it does not imply) while the task points to another is a major difference.
+"""
     disputed = "" if not dispute else f"""
 A previous critic listed these differences:
 {critics[-1]["diff"]}
@@ -832,7 +838,7 @@ Result to judge{whole}:
 The files that make the result (source, markup, code) are in the project directory: {task.project.root}
 Check the user's constraints there as well, not only in what the result shows.
 {DATA_NOT_INSTRUCTIONS}
-{disputed}{focused}{limited}
+{interface}{disputed}{focused}{limited}
 List the most important differences between the result and the reference / quality bar,
 most important first, at most 8, numbered 1., 2., ... with each point's tags on the same line. Look in particular at: {focus}.
 List only real differences, never what matches; if you find none, write "No differences." instead of a list.

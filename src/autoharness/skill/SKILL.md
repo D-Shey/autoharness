@@ -55,6 +55,12 @@ In full mode, answer in writing before listing tools:
    photo, the API's actual response, sample data), not a description of it. Working from memory
    when the real thing can be looked up is a capability gap, often the biggest. Get it first.
 3. **What are the user's constraints?** Verbatim ("no new dependencies", "must run offline").
+4. **What interface does the task name but leave open?** A function, command, file format or API
+   that something else will call or read, without its exact form (argument order, names, types,
+   output layout). The words the task does use are clues (it says "domain": take a domain, not
+   your own `lower`/`upper`). Look for a real example first (docs, the usual package, callers in
+   the code); without one, accept the common forms of the call and write the assumption into
+   `--inputs`, so the critic checks it.
 
 Then list capabilities: *capability — why — how I will verify it works*. Pick the smallest set
 that lets you **verify** the result, not only produce it. Missing input and know-how often need

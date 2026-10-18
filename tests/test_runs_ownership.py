@@ -305,6 +305,16 @@ def test_critic_run_that_cannot_start_points_to_a_subagent(project, capsys, monk
     assert code == 1 and res["error"] == "no login" and "fresh subagent" in res["next"]
 
 
+def test_a_code_critic_checks_an_interface_the_task_left_open(project, capsys):
+    from autoharness import evidence
+    from autoharness.catalog import Catalog
+    briefed(capsys, project)
+    (project.root / "out.txt").write_text("result\n", "utf-8")
+    ah(capsys, project, "evidence", "add", str(project.root / "out.txt"), "--kind", "result")
+    prompt = evidence.critic_prompt(Catalog.load(), project.task())["prompt"]
+    assert "the author's own guess" in prompt and "major difference" in prompt
+
+
 # --- the task belongs to the session that started it -------------------------------------
 
 def test_another_session_can_neither_change_nor_end_the_task_until_it_claims_it(project, capsys, monkeypatch):
