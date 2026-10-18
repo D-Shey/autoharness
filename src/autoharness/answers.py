@@ -17,7 +17,7 @@ from pathlib import Path
 
 from autoharness.env import HarnessError, Task
 
-KINDS = ("critic", "arbiter", "vet")
+KINDS = ("critic", "quality", "arbiter", "vet")
 ID_LINE = re.compile(r"^\W*ANSWER-ID:\s*(ah-[0-9a-f]{12})\b", re.MULTILINE | re.IGNORECASE)
 VERDICT_LINE = re.compile(r"^\W*VERDICT:(.*)$", re.MULTILINE | re.IGNORECASE)
 CHECK_LINE = re.compile(r"^\W*CHECK:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
@@ -135,6 +135,17 @@ def as_diff(answer: dict) -> str:
     if not answer["items"]:
         return answer["body"]
     return "\n".join(f"{n}. {i}" for n, i in enumerate(answer["items"], 1))
+
+
+QUALITY_TAG = "[code quality] "   # a tag in brackets: the loop detection reads past it to the point itself
+
+
+def merged_diff(critic: dict, quality: dict) -> str:
+    """One round's list from both reviewers of a pair: the critic's points, then the code-quality reviewer's."""
+    points = critic["items"] + [QUALITY_TAG + i for i in quality["items"]]
+    if not points:
+        return critic["body"] or "No differences."
+    return "\n".join(f"{n}. {i}" for n, i in enumerate(points, 1))
 
 
 def consume(task: Task, answer: dict) -> str:

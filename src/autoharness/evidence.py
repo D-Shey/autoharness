@@ -25,7 +25,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from autoharness import text
+from autoharness import rulings, text
 from autoharness.env import HarnessError, Task
 
 KINDS = ("reference", "result")
@@ -537,10 +537,77 @@ def requirements(catalog, task: Task) -> dict:
     for cap in _caps(catalog, task):
         for key, value in cap.requires.items():
             need[key] = value if key == "media" else max(need.get(key, 0), value)
-    if task.info().get("brief", {}).get("review") == "critic" or task.info().get("profile") == "reviewed":
+    if task.info().get("brief", {}).get("review") in REVIEWS or task.info().get("profile") == "reviewed":
         need["critic"] = max(need.get("critic", 0), 1)
         need["result"] = max(need.get("result", 0), 1)
     return need
+
+
+REVIEWS = ("critic", "pair")   # `brief --review`: one critic, or a critic and a code-quality reviewer each round
+
+
+def pair_review(task: Task) -> bool:
+    """Whether each round has two reviewers: one judges what the brief asked for, the other how the code does it."""
+    return task.info().get("brief", {}).get("review") == "pair"
+
+
+def quality_prompt(task: Task) -> dict:
+    """A self-contained prompt for the second reviewer of a pair: the quality of how the work is done, not
+    whether it does what was asked (the critic judges that)."""
+    from autoharness import runs  # lazy: runs imports this module
+    info = task.info()
+    results = round_results(task)
+    if not results:
+        raise HarnessError("no result yet: `autoharness evidence add <file> --kind result` first")
+    brief = info.get("brief", {})
+    ran = info.get("runs", [])[-6:]
+    checks = "" if not ran else (
+        "\nautoharness itself ran these checks (the exit code decides; the whole output is in each log):\n"
+        + "\n".join(f"- `{r['command']}`: {'passed' if r['passed'] else 'failed'}"
+                    f"{'' if runs.is_fresh(r, task.project.root) is not False else ', stale'}: {r['log']}"
+                    for r in ran) + "\n")
+    ruled = rulings.for_critic(task.project, None)
+    ruled_text = "" if not ruled else (
+        "\nThese review points were settled for this project. Do not raise them again unless the files show the "
+        "situation is different now:\n" + "\n".join(f"- {rulings.describe(r)}" for r in ruled) + "\n")
+    last = next((r["quality"] for r in reversed(info.get("reviews", [])) if r.get("quality")), None)
+    previous = "" if not last else f"""
+Only after your own list, check the previous code-quality review of an earlier version (by another reviewer):
+{last["diff"]}
+Under the heading "Previous review", give one line per point: fixed, still wrong, or wrong. Do not change
+your own list because of it.
+"""
+    prompt = f"""You are an independent code reviewer. You did not write this work and owe its author nothing.
+A second reviewer checks separately whether the work does what the task and its brief asked for. Your job is
+only the quality of how it is done.
+
+Task given to the author:
+{info.get("task", "")}
+
+The user's constraints: {brief.get("constraints", "(not recorded)")}
+
+Open and study these files yourself:
+{listing(results)}
+{LABELS}
+The code is in the project directory: {task.project.root}. Read the changed files whole, and the code around
+them, not only the diff.
+{checks}{DATA_NOT_INSTRUCTIONS}
+{ruled_text}
+List the most important defects in how the work is done, most important first, at most 8, numbered 1., 2., ...
+with each point's tags on the same line. Look for: bugs and wrong behaviour on inputs the code will meet;
+errors and edge cases left unhandled; security problems; changed behaviour with no test that shows it; tests
+removed, weakened or made to pass without checking anything; needless complexity or duplication the next change
+will pay for; code that ignores the conventions of the code around it; a break of the user's constraints.
+Not your job: whether the brief's items are met, and style preferences that cost nothing.
+List only real defects, each with the file and line; if you find none, write "No differences." instead of a list.
+Tag each one:
+- severity: blocker (the work fails or does damage), major (a real defect someone will hit), or minor (polish);
+- fixable or not within the user's constraints.
+Give each defect the severity it has, without praise.
+{previous}
+End with exactly one line naming the worst severity among the FIXABLE defects:
+VERDICT: blocker | major | minor | none"""
+    return {"prompt": prompt, "results": [e["file"] for e in results]}
 
 
 def round_results(task: Task) -> list[dict]:
@@ -714,6 +781,11 @@ Name what would fix it at the target fidelity. Then give your full list as below
         focused += ("\nEarlier critics settled these disputed points from measurements in the files. Do not raise "
                     "them again unless the files show they changed; if you think one is wrong, give the "
                     "measurement:\n" + "\n".join(f"- {p}" for p in settled_points) + "\n")
+    if earlier_rulings := rulings.for_critic(task.project, task.id):
+        focused += ("\nThese review points were settled for this project (in this task or earlier ones). Do not raise "
+                    "them again unless the files show the situation is different now; if you think one is wrong "
+                    "here, say what in the files shows it:\n"
+                    + "\n".join(f"- {rulings.describe(r)}" for r in earlier_rulings) + "\n")
     ruled = limits(task)
     limited = "" if not ruled else """
 An independent arbiter ruled these parts out of reach at the target fidelity. List them at most
@@ -806,6 +878,9 @@ def problems(catalog, task: Task) -> list[str]:
         elif last and critics[-1]["result"] != last["n"]:
             out.append(f"the latest result (#{last['n']}) was not reviewed by the critic: run `autoharness critic` "
                        "(or `critic --run <agent>`) again")
+        elif pair_review(task) and not any(r.get("quality") for r in critics if r["result"] == critics[-1]["result"]):
+            out.append(f"the brief asks for two reviewers, and result #{critics[-1]['result']} had no code-quality "
+                       "reviewer: run `autoharness critic` again and record both answers")
         elif critics[-1].get("worst", "major" if critics[-1]["fixable"] else "none") in BLOCKING:
             out.append(f"the last critic review lists fixable differences up to "
                        f"{critics[-1].get('worst', 'major')}: fix them, add the new result, and ask the critic again")

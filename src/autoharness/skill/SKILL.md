@@ -81,7 +81,7 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get 
   --constraints "<verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; ...; searched: <queries>" \
   --gaps "create <skill-name>: <capability>; ..."   # or "none: <why tools at hand cover it>"
-  # optional: --fidelity "<level to judge at>"  --review critic
+  # optional: --fidelity "<level to judge at>"  --review critic|pair (pair: + a code-quality reviewer)
   #           --preserve "<existing behaviour that must keep working>"
 ```
 
@@ -170,7 +170,12 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    unchanged to a fresh subagent, save its answer unedited and pass the file; never write that
    file yourself. The task may stop when the latest critic verdict is `minor` or `none`.
    Disagreeing is not dropping: `autoharness critic --dispute "<point>"` lets a fresh critic
-   rule; record its ruling with the review, `--settled "<point and ruling>"`. When `review` answers `change_approach`, `arbitrate` or `limited`, its `next` says
+   rule; record its ruling with the review, `--settled "<point and ruling>"`. If the user
+   rejects a critic's point, record it: `autoharness ruling add "<point>" --reason "<their
+   words>"`. Settled points and rulings reach every later critic in the project. With
+   `brief --review pair`, `critic` gives two prompts: the critic, and a code-quality reviewer
+   under `quality`. Give them to two fresh subagents in parallel, or use `critic --run`. Record
+   both in one round: `review --answer-file <critic's> --quality-file <quality reviewer's>`. When `review` answers `change_approach`, `arbitrate` or `limited`, its `next` says
    exactly what to do. In visual work each critic also compares the result blind with the best
    earlier one; "Went backwards" in `next` means the earlier one is closer: restore what got worse
    before fixing more. `ask_user` (exit 3, after many rounds that still block): stop, show the user
@@ -184,6 +189,10 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    before it passed, a loop, an arbiter, rounds that went backwards, the user stepping in),
    teardown stops once with status `lessons` and lists them: write what failed and what fixed it
    into a skill, save it, then tear down again (or again without, telling the user why). A
+   conclusion too small for a skill is an insight: `autoharness lesson add "<when X, do Y,
+   because Z>"`. The same conclusion from another task is merged into it, and its `confirmed`
+   count grows. `init` shows the `insights` that bear on a task. Once teardown lists
+   `ripe_insights`, fold each into a skill and run `lesson fold <id> --skill <name>`. A
    `local` skill or recipe in `init` may carry a `record` of earlier tasks; heed its `note`.
 3. **End**: `autoharness teardown`, or `--save-recipe <name> --notes "<what it was good for>"`
    (`--query "skill|mcp:<query>"` to re-run a search next time) when the setup was useful. Pass `--keep`/`--remove` only when the user asked.
