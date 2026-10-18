@@ -146,7 +146,10 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 
    A check that is a command goes through `verify run`, never "I ran it and it passed": the run is
    tied to the code it saw and goes stale when the code changes, so run it again after your last
-   edit. With `--preserve` in the brief, teardown needs a passing `--for preserve` run.
+   edit. With `--preserve` in the brief, teardown needs a passing `--for preserve` run. A command
+   with quotes (PowerShell mangles them) goes in a JSON file: `{"command": "..."}`, then
+   `autoharness verify run --args-file <file> --for B1`. No subagents at hand (or the critic must
+   be another model)? `critic --run <agent>` starts the reviewer itself.
 
    Work in rounds: produce, add the result, compare it side by side with the reference, fix the most important
    differences, repeat. `--worst` is the worst still-fixable difference: blocker (fails its

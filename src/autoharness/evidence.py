@@ -706,9 +706,11 @@ def problems(catalog, task: Task) -> list[str]:
         last = latest(task, "result")
         if not critics:
             out.append("no independent review: run `autoharness critic`, give its prompt to a fresh subagent that "
-                       "did not make the work, and record the answer with `autoharness review --by critic ...`")
+                       "did not make the work, and record the answer with `autoharness review --by critic ...`; "
+                       "without subagents, `autoharness critic --run claude|codex|agy` starts one and records it")
         elif last and critics[-1]["result"] != last["n"]:
-            out.append(f"the latest result (#{last['n']}) was not reviewed by the critic: run `autoharness critic` again")
+            out.append(f"the latest result (#{last['n']}) was not reviewed by the critic: run `autoharness critic` "
+                       "(or `critic --run <agent>`) again")
         elif critics[-1].get("worst", "major" if critics[-1]["fixable"] else "none") in BLOCKING:
             out.append(f"the last critic review lists fixable differences up to "
                        f"{critics[-1].get('worst', 'major')}: fix them, add the new result, and ask the critic again")

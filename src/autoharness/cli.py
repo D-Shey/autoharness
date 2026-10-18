@@ -1656,6 +1656,11 @@ def cmd_audit(args, project, catalog):
 def cmd_verify(args, project, catalog):
     from autoharness import audit, verification
     if args.action == "run":
+        if len(args.kind) > 1 or (args.kind and args.command):
+            raise HarnessError(f"verify run got the command in pieces ({args.kind!r}): the shell split it at its "
+                               "quotes. Put it in a JSON file, {\"command\": \"<the command>\"}, and pass "
+                               "`autoharness verify run --args-file <file>`")
+        command = args.command or (args.kind[0] if args.kind else "")
         task = project.task()
         info = task.info()
         if info.get("mode", "full") == "full" and not info.get("brief"):
@@ -1669,7 +1674,7 @@ def cmd_verify(args, project, catalog):
         if purpose and items and purpose not in items + [runs.PRESERVE]:
             raise HarnessError(f"--for {purpose!r} is not a brief item: use one of {', '.join(items)} "
                                f"or {runs.PRESERVE}")
-        item = runs.run(task, args.kind, args.name or "", purpose, args.timeout)
+        item = runs.run(task, command, args.name or "", purpose, args.timeout)
         with write_lock(project):
             audit.append(task, "run", **{k: item[k] for k in ("n", "command", "for", "exit", "passed")})
         out({"status": "passed" if item["passed"] else "failed", "run": item,
@@ -1678,8 +1683,9 @@ def cmd_verify(args, project, catalog):
                       f"The check failed (exit {item['exit']}); the whole output is in {item['log']}. Fix the cause "
                       "and run it again.")})
         return 0 if item["passed"] else 1
-    if args.kind not in VERIFY_KINDS:
-        raise HarnessError(f"verify {args.action} takes a kind: {', '.join(VERIFY_KINDS)}")
+    if args.command or len(args.kind) != 1 or args.kind[0] not in VERIFY_KINDS:
+        raise HarnessError(f"verify {args.action} takes one kind: {', '.join(VERIFY_KINDS)}")
+    args.kind = args.kind[0]
     guide = verification.guide(args.kind)
     if args.action == "guide":
         out(guide | {"next": f"Use it with `autoharness brief --verify-template {args.kind} ...`; after running "
@@ -1780,8 +1786,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task_id", nargs="?")
     s = sub.add_parser("verify", help="run a check and record it by its exit code, or use a verification guide")
     s.add_argument("action", choices=["guide", "record", "run"])
-    s.add_argument("kind", metavar="KIND|COMMAND",
+    s.add_argument("kind", metavar="KIND|COMMAND", nargs="*",
                    help=f"guide/record: {', '.join(VERIFY_KINDS)}; run: the command, run in the project root")
+    s.add_argument("--command", help="for run: the command, instead of the positional one (fits --args-file, "
+                                     "so it needs no shell quoting)")
     s.add_argument("--passed", choices=["yes", "no"])
     s.add_argument("--evidence")
     s.add_argument("--name", help="for run: a short name for the check (default: the command's first word)")
@@ -1944,7 +1952,12 @@ def main(argv: list[str] | None = None) -> int:
     except HarnessError as e:
         out({"status": "error", "error": str(e)})
         return 1
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    if extra and args.cmd == "verify" and args.action == "run":
+        args.kind += extra   # a command the shell split at its quotes: verify run explains instead of argparse
+    elif extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     project = Project(Path(args.project).resolve(), args.agent)
     started = time.monotonic()
     before = project.active_id()

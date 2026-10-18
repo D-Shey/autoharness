@@ -95,7 +95,7 @@ def test_verify_record_and_guide_still_take_a_kind(project, capsys):
     code, res = ah(capsys, project, "verify", "guide", "browser")
     assert code == 0 and "brief_verify" in res
     code, res = ah(capsys, project, "verify", "guide", "pytest -q")
-    assert code == 1 and "takes a kind" in res["error"]
+    assert code == 1 and "takes one kind" in res["error"]
 
 
 def test_check_run_records_the_arbiter_check_by_exit_code(project, capsys):
@@ -360,3 +360,17 @@ def test_tasks_without_an_owner_keep_the_old_gate(project, capsys, monkeypatch):
     assert "owner" not in project.task().info()
     write = {"hook_event_name": "PreToolUse", "session_id": "any", "tool_name": "Write", "tool_input": {}}
     assert hook(capsys, monkeypatch, project, write) is None
+
+
+def test_verify_run_takes_the_command_from_an_args_file(project, capsys, tmp_path):
+    briefed(capsys, project)
+    spec = tmp_path / "cmd.json"
+    spec.write_text(json.dumps({"command": 'python -c "print(1)"'}), "utf-8")
+    code, res = ah(capsys, project, "verify", "run", "--args-file", str(spec))
+    assert code == 0 and res["run"]["passed"]
+
+
+def test_verify_run_explains_a_command_the_shell_split(project, capsys):
+    briefed(capsys, project)
+    code, res = ah(capsys, project, "verify", "run", "python", "-c", "print(1)")
+    assert code == 1 and "in pieces" in res["error"] and "--args-file" in res["error"]

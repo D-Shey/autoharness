@@ -57,6 +57,10 @@ autoharness verify run "uv run pytest -q" --for B1      # pass/fail по код�
 autoharness brief ... --preserve "старые экспорты работают"   # тогда teardown ждёт --for preserve
 ```
 
+Команду с кавычками (PowerShell их ломает) удобнее положить в JSON-файл
+`{"command": "python -c \"...\""}` и запустить `autoharness verify run --args-file cmd.json --for B1`.
+Если shell всё же разбил команду на куски, `verify run` скажет об этом прямо.
+
 Запуск привязан к версии кода (коммит + отпечаток изменённых файлов): после правки он
 устаревает (`stale`), и teardown это видит. В конце teardown выдаёт честную сводку `checked`:
 какие проверки autoharness запускал сам (свежие или устаревшие), откуда вердикты критика,
