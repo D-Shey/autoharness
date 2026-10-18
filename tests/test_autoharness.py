@@ -1309,7 +1309,8 @@ def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
 
 BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--constraints", "no generators",
          "--verify", "render and compare side by side", "--candidates", "svg-art: skip, it is a generator",
-         "--gaps", "none: a browser and the shell cover every capability"]
+         "--gaps", "none: a browser and the shell cover every capability",
+         "--fidelity", "stylised vector poster, not photographic"]
 
 
 def brief(capsys, project, *extra):
@@ -3395,6 +3396,62 @@ def test_a_visual_round_is_compared_blind_with_the_best_earlier_result(project, 
                                                                    "CLOSER: same\nVERDICT: major\n")
     assert res["review"]["compared"]["earlier"] == first and res["review"]["compared"]["closer"] == "same"
     assert project.task().info()["best_result"] == res["review"]["whole"]
+
+
+def backwards_round(capsys, root, tmp_path, name):
+    """A visual round whose blind comparison prefers the earlier result."""
+    ev(capsys, root, png(tmp_path / name), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    pair = project_info(root)["comparisons"][res["answer_id"]]
+    earlier = "B" if pair["A"] == pair["current"] else "A"
+    f = answer(tmp_path, name + ".txt", res["answer_id"], "1. head tilt (major, fixable)\n## Comparison\n"
+                                                          f"CLOSER: {earlier}\nthe whole was better before\n"
+                                                          "VERDICT: major\n")
+    return cli_json(capsys, "--project", root, "review", "--by", "critic", "--answer-file", f)
+
+
+def project_info(root):
+    return Project(Path(root), "claude").task().info()
+
+
+def test_two_rounds_going_backwards_restore_the_best_result_and_ask_the_user(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "ref.png"), "reference")
+    blind_round(capsys, root, tmp_path, "r1.png", "1. head tilt (major, fixable)\nVERDICT: major\n")
+    best = project.task().info()["best_result"]
+    code, res = backwards_round(capsys, root, tmp_path, "r2.png")
+    assert code == 0 and "Went backwards" in res["next"]
+    code, res = backwards_round(capsys, root, tmp_path, "r3.png")
+    assert code == 3 and res["status"] == "ask_user" and res["review"]["revert_to"] == best
+    assert f"Restore #{best}" in res["next"] and "--accepted" in res["next"] and len(res["trend"]) == 3
+
+
+def test_a_loop_that_goes_backwards_goes_to_an_arbiter_without_more_approaches(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "ref.png"), "reference")
+    blind_round(capsys, root, tmp_path, "r1.png", "1. head tilt (major, fixable)\nVERDICT: major\n")
+    blind_round(capsys, root, tmp_path, "r2.png", "1. head tilt (major, fixable)\n## Comparison\nCLOSER: same\n"
+                                                  "VERDICT: major\n")
+    code, res = backwards_round(capsys, root, tmp_path, "r3.png")
+    assert res["status"] == "arbitrate" and "went backwards" in res["next"] and res["review"]["tried"] == 0
+
+
+def test_visual_work_names_the_fidelity_it_is_judged_at(project, capsys):
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", BLADE_RUNNER)
+    code, res = cli_json(capsys, "--project", root, "brief", *BRIEF[:-2])
+    assert code == 1 and "--fidelity" in res["error"]
+    assert cli_json(capsys, "--project", root, "brief", *BRIEF)[0] == 0
+
+
+def test_a_critic_weighs_the_whole_and_keeps_additions_apart(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "ref.png"), "reference")
+    blind_round(capsys, root, tmp_path, "r1.png", "1. head tilt (major, fixable)\nVERDICT: major\n")
+    ev(capsys, root, png(tmp_path / "r2.png"), "result")
+    prompt = cli_json(capsys, "--project", root, "critic")[1]["prompt"]
+    assert "better work as a whole" in prompt and "at the cost of the whole" in prompt
+    assert "is not a difference\nby itself" in prompt
 
 
 def test_review_prompts_treat_files_as_data_not_instructions(project, capsys, tmp_path):

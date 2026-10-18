@@ -506,12 +506,24 @@ def cmd_review(args, project, catalog):
                         if not item["fixable"] else
                         "Fix the other blocker and major differences, add the result, then `autoharness critic`.")})
         return 0
+    if item.get("revert_to"):
+        out({"status": "ask_user", "review": item, "trend": item["trend"],
+             "next": f"Twice in a row the blind comparison prefers the earlier result #{item['revert_to']}: the "
+                     "fixes since then are making the work worse, and more rounds would go further down. Stop "
+                     f"fixing. Restore #{item['revert_to']} (its source, from version control or the copy you "
+                     "kept), render it and add it again with `evidence add`. Then ask the user, showing that "
+                     "result, `trend` and the points still open: accept it as it is (`autoharness teardown "
+                     "--accepted \"<their words>\"`) or keep going from it. Do not run another critic before they "
+                     "answer."})
+        return EXIT_APPROVAL
     if item.get("needs_arbiter"):
         final = (" This is the final arbitration for that part: if its fix fails too, the part is ruled out of "
                  "reach automatically." if item.get("final_arbiter") else "")
         out({"status": "arbitrate", "review": item,
              "next": f"\"{item['needs_arbiter']}\" is still listed after {item['repeats']} critic rounds and "
-                     f"{item['tried']} different approaches. Do not decide yourself whether it can be fixed: run "
+                     f"{item['tried']} different approaches"
+                     + (", and this round went backwards" if item.get("compared", {}).get("closer") == "earlier"
+                        else "") + ". Do not decide yourself whether it can be fixed: run "
                      "`autoharness arbiter`, give its prompt unchanged to a fresh subagent that neither made nor "
                      "reviewed the work, save its answer unedited to a file and record it "
                      "with `autoharness arbitrate --answer-file <file>`. The next critic will not run before that."
@@ -554,8 +566,9 @@ def cmd_review(args, project, catalog):
     if short := [f"{k} {v}" for k, v in item.get("coverage", {}).items() if v != "met"]:
         nxt = f"The critic finds these brief items not met: {', '.join(short)}. " + nxt
     if item.get("unrequested"):
-        nxt += (" The critic lists work the brief did not ask for (`unrequested`): drop it, or tell the user why "
-                "it belongs in this task.")
+        nxt += (" The critic lists work the brief did not ask for (`unrequested`): keep what serves the quality "
+                "bar and tell the user about it; drop only what breaks it, a constraint, or behaviour no one asked "
+                "to change.")
     out({"status": "ok", "review": item, "next": nxt})
     return 0
 
@@ -729,6 +742,12 @@ def cmd_brief(args, project, catalog):
                            "or start with `none:` and say why the tools at hand cover every capability")
     for name in planned:
         library.validate_name(name)
+    if evidence.requirements(catalog, task).get("media") and not (args.fidelity or "").strip():
+        raise HarnessError(
+            "this task is judged by eye: name the level it is judged at with --fidelity (e.g. \"stylised vector "
+            "poster: composition, palette, mood and poses read at a glance; not photographic likeness\"). "
+            "Without it a critic judges against the reference itself, which a different medium never reaches, "
+            "and every round stays major")
     task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
@@ -1585,9 +1604,9 @@ SHELL_WRITES = [
                r"Move-Item|Rename-Item|sc|ac|ni|ri|cpi|mi|rni)\b[^|;\n]*\.autoharness(?![\w.-])", re.I),
     re.compile(r"\|\s*(Set-Content|Add-Content|Out-File)\b[^|;\n]*\.autoharness(?![\w.-])", re.I),
     re.compile(r"open\([^)]*\.autoharness[^)]*['\"][wax]"),
-    re.compile(r"(write_text|write_bytes|WriteAllText|WriteAllBytes|unlink|rmtree|os\.remove|json\.dump)"
+    re.compile(r"(write_text|write_bytes|WriteAllText|WriteAllBytes|unlink|rmtree|os\.remove|json\.dump\b)"
                r"[\s\S]*\.autoharness(?![\w.-])|\.autoharness(?![\w.-])[\s\S]*"
-               r"(write_text|write_bytes|WriteAllText|WriteAllBytes|unlink|rmtree|os\.remove|json\.dump)"),
+               r"(write_text|write_bytes|WriteAllText|WriteAllBytes|unlink|rmtree|os\.remove|json\.dump\b)"),
 ]
 # text a command only carries, not runs: a commit message, a heredoc fed to something other than an interpreter
 _MESSAGE = re.compile(r"""(\s(?:-m|--message)[= ]?\s*)("(?:[^"\\]|\\.)*"|'[^']*')""")
