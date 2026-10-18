@@ -128,6 +128,9 @@ def test_preserve_needs_a_fresh_passing_regression_run_before_teardown(project, 
     assert code == 1 and any("older version" in p for p in res["problems"])
     ah(capsys, project, "verify", "run", OK, "--for", "preserve")
     code, res = ah(capsys, project, "teardown")
+    assert code == 1 and res["status"] == "lessons"
+    assert any("check for preserve failed 1 time(s) before" in line for line in res["lessons"])
+    code, res = ah(capsys, project, "teardown")
     assert code == 0, res
 
 
@@ -430,3 +433,41 @@ def test_a_run_in_a_repository_without_commits_is_tied_to_the_code(tmp_path):
     assert runs.is_fresh({"fingerprint": seen}, root) is True
     (root / "flag.py").write_text("x = 2\n", "utf-8")
     assert runs.is_fresh({"fingerprint": seen}, root) is False
+
+
+# --- lessons from friction, and what became of saved skills ---------------------------------
+
+def test_the_hook_notes_what_the_user_writes_during_their_own_task(project, capsys, monkeypatch):
+    from autoharness import lessons
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    briefed(capsys, project)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    said = {"hook_event_name": "UserPromptSubmit", "session_id": "owner-1", "prompt": "no, the title must be bold"}
+    hook(capsys, monkeypatch, project, said)
+    hook(capsys, monkeypatch, project, dict(said, session_id="other-2", prompt="something else entirely"))
+    task = project.task()
+    assert [m["text"] for m in lessons.user_messages(task)] == ["no, the title must be bold"]
+    assert any("stepped in 1 time(s)" in line and "title must be bold" in line for line in lessons.friction(task))
+
+
+def test_a_smooth_task_has_no_lessons_and_tears_down_at_once(project, capsys):
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 0 and "lessons" not in res
+
+
+def test_saved_skills_and_recipes_keep_a_record_of_what_became_of_them(project, capsys):
+    from autoharness import lessons
+    briefed(capsys, project)
+    task = project.task()
+    lessons.bump("skill", "svg-scenes", "offered")
+    lessons.mark_used(task, "skill", "svg-scenes")
+    lessons.mark_used(task, "skill", "svg-scenes")          # once per task
+    assert task.info()["library_used"] == [["skill", "svg-scenes"]]
+    lessons.settle(task, ["svg-scenes"], [])
+    assert lessons.record("skill", "svg-scenes") == {"offered": 1, "used": 1, "kept": 1, "smooth": 1}
+    for _ in range(2):
+        lessons.bump("skill", "svg-scenes", "used", "removed", "friction")   # two later tasks dropped it
+    assert "removed in most tasks" in lessons.record("skill", "svg-scenes")["note"]
+    assert lessons.record("recipe", "never-used") == {}

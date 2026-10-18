@@ -174,7 +174,11 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    If the user accepts the result as it is: `autoharness teardown --accepted "<their words>"`.
 2. **Save what you learned**: update each skill you created, then `autoharness skill save <name>`
    (exit 3: show name, description, warnings; `--approve` after a yes). Reusable know-how no
-   skill covers goes into a new one the same way.
+   skill covers goes into a new one the same way. When the task had friction (a check that failed
+   before it passed, a loop, an arbiter, rounds that went backwards, the user stepping in),
+   teardown stops once with status `lessons` and lists them: write what failed and what fixed it
+   into a skill, save it, then tear down again (or again without, telling the user why). A
+   `local` skill or recipe in `init` may carry a `record` of earlier tasks; heed its `note`.
 3. **End**: `autoharness teardown`, or `--save-recipe <name> --notes "<what it was good for>"`
    (`--query "skill|mcp:<query>"` to re-run a search next time) when the setup was useful. Pass `--keep`/`--remove` only when the user asked.
 4. **Tell the user** what was installed, kept and removed, any part ruled out of reach, any

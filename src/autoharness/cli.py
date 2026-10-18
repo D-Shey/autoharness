@@ -17,7 +17,7 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from autoharness import (agents, answers, approvals, config, egress, evidence, followups, history, library, recipes,
+from autoharness import (agents, answers, approvals, config, egress, evidence, followups, history, lessons, library, recipes,
                          registry, reviewers, runs, text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
@@ -78,7 +78,8 @@ def resolve_skill(catalog: Catalog, spec: str) -> dict:
 
 
 def local_skills(catalog: Catalog, task_text: str) -> list[dict]:
-    """Skills from the user's own library that fit the task: by the capabilities it matches, or its words."""
+    """Skills from the user's own library that fit the task: by the capabilities it matches, or its words.
+    Each comes with its record in earlier tasks (`lessons.record`) when it has one."""
     return library.matching([c.name for c, _ in catalog.classify(task_text)], task_text)
 
 
@@ -246,6 +247,11 @@ def cmd_init(args, project, catalog):
                    "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}}
         if local := local_skills(catalog, args.task):
             result["local"] = local
+        for kind, items in (("skill", result.get("local", [])), ("recipe", result["recipes"])):
+            for item in items:
+                if rec := lessons.record(kind, item["name"]):   # earlier tasks only, before this offer counts
+                    item["record"] = rec
+                lessons.bump(kind, item["name"], "offered")
         result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
         task.record_discovery(discovered)
         if rejected := rejected_before(project, task.id, result):
@@ -757,6 +763,8 @@ def cmd_add(args, project, catalog):
                  "next": "Do not install. Pick another skill, or show the findings to the user; --force only on their explicit say-so."})
             return 1
         skill = parse_skill_spec(args.name)[1]
+        if args.name.startswith("local:"):
+            lessons.mark_used(task, "skill", skill)
         where = skill_dir(task.skills_dir, skill)
         missing = missing_tools(where)
         warnings = retold + ([f"its dependencies name {', '.join(missing)}, not found on PATH: check that the parts "
@@ -933,6 +941,17 @@ def cmd_teardown(args, project, catalog):
              "next": "Fix these, then tear down again. If the user decides the result is good enough as it is, "
                      "run `autoharness teardown --accepted \"<their words>\"`."})
         return 1
+    learned = lessons.friction(task)
+    if learned and not info.get("lessons_seen"):
+        task._update_info(lessons_seen=True)
+        out({"status": "lessons", "task_id": task.id, "lessons": learned,
+             "next": "Before you finish: this task taught something the next one would pay for again (`lessons`). "
+                     "Write what failed and what fixed it, as steps and checks, into a skill: the one you created or "
+                     "used for this task, or `autoharness skill new <name> --description \"<when to use>\"` (values "
+                     "measured here go under \"Facts found here\"). Then `autoharness skill save <name>` (it asks the "
+                     "user), and run `autoharness teardown` again. If none of it is reusable, run teardown again and "
+                     "say why to the user."})
+        return 1
     warnings += blocking + skill_warnings
     if not task.discovery_ran():
         warnings.append("no discovery ran: no skill or MCP search was made for this task")
@@ -960,6 +979,7 @@ def cmd_teardown(args, project, catalog):
     checked = runs.summary(task)
     policy, source = config.teardown_policy(project.root, args.policy)
     result = task.teardown(policy)
+    lessons.settle(task, result["kept"]["skills"], learned)
     kept = result["kept"]["mcp"] + result["kept"]["skills"]
     nxt = (f"Tell the user these stay installed in the project: {', '.join(kept)}. "
            "They can remove one with `autoharness remove mcp|skill <name>`, or all with `autoharness prune`."
@@ -978,6 +998,7 @@ def cmd_teardown(args, project, catalog):
             + (f", and these brief items were never checked: {', '.join(checked['unchecked_items'])}"
                if checked["unchecked_items"] else "") + ".")
     out({"status": "ok", "policy": policy, "policy_source": source} | result | {"checked": checked}
+        | ({"lessons": learned} if learned else {})
         | {"recipe_saved": saved} | ({"followups": found} if found else {}) | {"next": nxt}
         | ({"warnings": warnings} if warnings else {}))
     return 0
@@ -1064,6 +1085,7 @@ def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
 def cmd_skill(args, project, catalog):
     if args.action == "list":
         entries, warnings = library.list_skills()
+        entries = [e | ({"record": rec} if (rec := lessons.record("skill", e["name"])) else {}) for e in entries]
         out({"skills": entries} | ({"warnings": warnings} if warnings else {}))
         return 0
     if not args.name:
@@ -1124,7 +1146,8 @@ def cmd_config(args, project, catalog):
 
 def cmd_recipe(args, project, catalog):
     if args.action == "list":
-        out([{"name": r["name"], "capabilities": r["capabilities"], "uses": r.get("uses", 0)} for r in recipes.load_all()])
+        out([{"name": r["name"], "capabilities": r["capabilities"], "uses": r.get("uses", 0)}
+             | ({"record": rec} if (rec := lessons.record("recipe", r["name"])) else {}) for r in recipes.load_all()])
     elif args.action == "match":
         out([{"score": s} | r for s, r in recipes.match(args.value)])
     elif args.action == "show":
@@ -1132,6 +1155,8 @@ def cmd_recipe(args, project, catalog):
         if not match:
             raise HarnessError(f"no recipe named {args.value!r}")
         recipes.mark_used(args.value)
+        active = project.active_id()
+        lessons.mark_used(project.task(active) if active else None, "recipe", args.value)
         r = match[0]
         nxt = "Add each entry with `autoharness add mcp <name>` / `autoharness add skill <spec>`; trust checks still apply."
         if r.get("queries"):
@@ -1542,6 +1567,11 @@ def cmd_hook(args, project, catalog):
                 out({"injectSteps": [{"ephemeralMessage": ctx}]} if agy else
                     {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
                 return 0
+            if active and not foreign and state != "waived":
+                try:
+                    lessons.note_user_message(Task(project, active), str(data.get("prompt", "")))
+                except OSError:
+                    pass   # a lost note must never block the user's message
             if state in ("done", "waived") or active:
                 return 0
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
