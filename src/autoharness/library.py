@@ -45,9 +45,17 @@ def validate_name(name: str) -> None:
         raise HarnessError(f"skill name must match {NAME_RE.pattern}, got {name!r}")
 
 
+# procedure travels to the next task; a value measured in one project (a threshold, a mapping, a colour)
+# is only a hypothesis there, so a skill keeps the two apart
+FACTS_NOTE = ("<!-- optional: values verified in the project this skill came from (a threshold, a mapping, a colour), "
+              "each with where it was measured. Another task re-checks them before relying on them; procedure "
+              "goes in Steps. -->")
+
+
 def template(name: str, description: str) -> str:
     return (f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n"
-            f"## When to use\n{FILL_MARKER}\n\n## Steps\n{FILL_MARKER}\n\n## How to verify\n{FILL_MARKER}\n")
+            f"## When to use\n{FILL_MARKER}\n\n## Steps\n{FILL_MARKER}\n\n## How to verify\n{FILL_MARKER}\n\n"
+            f"## Facts found here\n{FACTS_NOTE}\n")
 
 
 @dataclass

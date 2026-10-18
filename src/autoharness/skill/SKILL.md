@@ -93,7 +93,9 @@ least two results and a critic before teardown; `brief` lists what this task owe
 **No fitting skill for real know-how? Create it** (`--gaps "create ..."`):
 `autoharness skill new <name> --description "<when to use>"`, fill When to use / Steps / How to
 verify from what you found (no absolute paths, secrets or people's names) before producing the
-result, follow it, and update it as you learn. Teardown refuses while a planned skill is missing or unfilled.
+result, follow it, and update it as you learn. Values you measured in this project (a threshold, a
+mapping, a colour) go under "Facts found here", apart from the procedure: the next task re-checks
+them. Teardown refuses while a planned skill is missing or unfilled.
 
 ## 4. Vet and install
 
@@ -163,7 +165,9 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    file yourself. The task may stop when the latest critic verdict is `minor` or `none`.
    Disagreeing is not dropping: `autoharness critic --dispute "<point>"` lets a fresh critic
    rule; record its ruling with the review, `--settled "<point and ruling>"`. When `review` answers `change_approach`, `arbitrate` or `limited`, its `next` says
-   exactly what to do; `ask_user` (exit 3, after many rounds that still block): stop, show the user
+   exactly what to do. In visual work each critic also compares the result blind with the best
+   earlier one; "Went backwards" in `next` means the earlier one is closer: restore what got worse
+   before fixing more. `ask_user` (exit 3, after many rounds that still block): stop, show the user
    its `trend` and ask whether to go on or accept. Code edited after a review needs a new `evidence diff` and review.
    Run an arbiter's check with `check --run "<script>"`; where you had to check differently from
    its words, say so with `--deviation "<what and why>"` rather than adjusting it quietly.

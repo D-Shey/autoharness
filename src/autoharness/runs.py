@@ -28,10 +28,18 @@ VERDICTS = ("met", "partial", "missing", "contradicts")
 ITEM_START = re.compile(r"(^\s*|[;:]\s*|\s)(\d+)([.)]?)\s")
 
 
+# git's empty tree: the base for a repository with no commit yet, where every file counts as changed
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
 def fingerprint(root: Path) -> dict | None:
     """The code version a run sees: HEAD and the state of every file changed since it. None outside git."""
     try:
-        head = evidence._git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").decode().strip()
+        try:
+            head = evidence._git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").decode().strip()
+        except HarnessError:
+            evidence._git(root, "rev-parse", "--git-dir")   # a repository, just no commit yet
+            head = EMPTY_TREE
         return {"base_sha": head, "tree_state": evidence.tree_state(root, head)}
     except (HarnessError, OSError):
         return None
