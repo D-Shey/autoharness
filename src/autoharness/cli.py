@@ -2176,6 +2176,7 @@ def cmd_hook(args, project, catalog):
                 # a full task ended before its brief is dropped, and starting it again lighter escapes the brief
                 elif (active and not foreign and state != "waived"
                         and _autoharness_subcommand(tool, tool_input) == "teardown"
+                        and not {"-h", "--help"} & set(_autoharness_words(tool, tool_input))
                         and (info := Task(project, active).info()).get("mode", "full") != "light"
                         and not info.get("brief") and not lessons.user_messages(Task(project, active))):
                     reason = ("This task has no brief yet, and ending it now drops it: only the user decides that. "
