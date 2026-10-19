@@ -239,6 +239,7 @@ def cmd_init(args, project, catalog):
                 else args.mode or "full")
     if selected == "auto":
         selected = "full" if classified else "light"
+    requested = selected
     floor, floor_source = config.resolve(project.root, "min_mode")
     raised = floor != "any" and LEVELS.index(selected) < LEVELS.index(floor)
     if raised:
@@ -270,6 +271,7 @@ def cmd_init(args, project, catalog):
             "\"<why no reference is needed>\"`")
     check_owner(project, project.active_id())
     task = project.init_task(args.task, mode=mode)
+    task._update_info(requested=requested)
     if mode == "light" and visual:
         task._update_info(light_reason=light_reason)
         task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
@@ -2050,9 +2052,16 @@ def _routine(project, text: str) -> str | None:
             info = json.loads(info_path.read_text("utf-8"))
         except (OSError, ValueError):
             continue
-        if (info.get("mode") == "light" and info.get("profile") != "reviewed"
+        # the level the agent asked for, not the one init raised it to: a routine raised once by mistake stays one
+        requested = info.get("requested")
+        if requested is None:   # recorded before `requested` was: the log says when light was raised
+            log = info_path.parent / "harness.md"
+            requested = ("light" if info.get("mode") == "light" or (log.is_file() and "light raised to full"
+                                                                   in log.read_text("utf-8", errors="replace"))
+                         else info.get("mode"))
+        if (requested == "light" and info.get("profile") != "reviewed"
                 and re.sub(r"\d+", "#", " ".join(str(info.get("task", "")).split()).lower()) == same):
-            return "the same task ran light in this project before"
+            return "the same task was started light in this project before"
     return None
 
 
