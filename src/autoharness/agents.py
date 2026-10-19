@@ -362,6 +362,7 @@ def session_id(environ: dict | None = None, agent: str | None = None) -> str:
     """The agent session running this command, or "" outside one (the user's own terminal). An agent started
     from another agent's shell inherits that one's id as well: the agent named for the command comes first."""
     environ = os.environ if environ is None else environ
+    agent = agent or detect(environ)
     if agent in _SESSION and environ.get(_SESSION[agent]):
         return environ[_SESSION[agent]]
     return next((environ[v] for v in _SESSION.values() if environ.get(v)), "")

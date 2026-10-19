@@ -1427,9 +1427,16 @@ def check_owner(project: Project, task_id: str | None) -> None:
     if not task_id:
         return
     task = Task(project, task_id)
-    owner, me = task.info().get("owner"), agents.session_id(agent=project.agent_name)
+    owner, me = task.info().get("owner"), my_session(project, task)
     if owner and me and owner != me and task.info().get("status") == "active":
         raise HarnessError(handoff(task, me))
+
+
+def my_session(project: Project, task: Task | None = None) -> str:
+    """The session id of the agent running this command: the one named with --agent, else the task's own agent,
+    so a command that leaves out --agent is not taken for the outer agent whose shell started this one."""
+    agent = project.agent_name or (task.info().get("agent") if task else None)
+    return agents.session_id(agent=agent if isinstance(agent, str) else None)
 
 
 def write_lock(project: Project):
@@ -1440,7 +1447,7 @@ def write_lock(project: Project):
 
 def cmd_claim(args, project, catalog):
     task = project.task()
-    me = args.session_id or agents.session_id(agent=project.agent_name)
+    me = args.session_id or my_session(project, task)
     if not me:
         raise HarnessError("no agent session id in the environment: pass it, `autoharness claim <session id>`")
     info = task.info()
