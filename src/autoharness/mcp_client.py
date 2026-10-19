@@ -267,6 +267,9 @@ class HttpClient(_Client):
         try:
             resp = _http_open(req, timeout=timeout_s())
         except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:   # Python 3.11 has no 308 handler, so the redirect arrives unhandled
+                raise McpError(f"{self.name}: HTTP {e.code} redirect refused; "
+                               "configure the final MCP endpoint") from e
             raise McpError(f"{self.name}: HTTP {e.code} {e.reason}") from e
         except OSError as e:
             raise McpError(f"{self.name}: {e}") from e

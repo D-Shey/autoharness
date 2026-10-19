@@ -3050,6 +3050,8 @@ def main(argv: list[str] | None = None) -> int:
     args, extra = parser.parse_known_args(argv)
     if extra and args.cmd == "verify" and args.action == "run":
         args.kind += extra   # a command the shell split at its quotes: verify run explains instead of argparse
+    elif extra and args.cmd == "eval" and args.action == "batch":
+        args.command += extra   # Python 3.11 argparse leaves what follows `--` unparsed here
     elif extra:
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
     project = Project(Path(args.project).resolve(), args.agent)
