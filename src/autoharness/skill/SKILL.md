@@ -142,6 +142,9 @@ thing you must check, guessing at an API whose docs you have not read, or drawin
 you have not looked at are gaps: `autoharness need <capability> --reason "<what blocked me>"`
 (after `mode full` in a light task), then resume.
 
+A browser tool that refuses `file://` (Playwright MCP does) opens a local page or file over
+`http://localhost` instead: serve the folder (`python -m http.server 8000`) in the background.
+
 Matching a reference (an API's response, a sample file, a layout, a picture, the old behaviour)?
 Take its facts from the reference itself with a tool, not from memory: field names and values,
 sizes, positions, timings, the exact output. Then check your result against the same facts, part
