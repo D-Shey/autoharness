@@ -1651,13 +1651,21 @@ def test_a_critic_judges_the_latest_whole_render_not_every_draft(project, capsys
     assert "closeup" not in big["evidence"]
 
 
-def test_a_thumbnail_reference_asks_for_a_larger_one(project, capsys, tmp_path):
+def test_a_reference_far_smaller_than_the_result_asks_for_a_larger_one(project, capsys, tmp_path):
     root = visual_task(capsys, project)
-    code, res = ev(capsys, root, sized_png(tmp_path / "thumb.png", 287, 175), "reference")
-    assert code == 0 and "only 287x175 px" in res["next"] and "thumbnail" in res["warnings"][0]
-    assert "uncropped" in res["next"]
-    code, res = ev(capsys, root, sized_png(tmp_path / "still.png", 1920, 1080), "reference")
-    assert "only" not in res["next"] and "warnings" not in res
+    code, res = ev(capsys, root, sized_png(tmp_path / "thumb.png", 300, 180), "reference")
+    assert code == 0 and "uncropped" in res["next"] and "warnings" not in res   # small alone says nothing
+    code, res = ev(capsys, root, sized_png(tmp_path / "r1.png", 1500, 900), "result")
+    assert "far smaller than the result" in res["next"] and "under half" in res["warnings"][0]
+    code, res = ev(capsys, root, sized_png(tmp_path / "still.png", 900, 540), "reference")
+    assert "far smaller" not in res["next"] and "warnings" not in res
+
+
+def test_a_small_reference_for_a_small_result_is_fine(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, sized_png(tmp_path / "icon-ref.png", 64, 64), "reference")
+    code, res = ev(capsys, root, sized_png(tmp_path / "icon.png", 96, 96), "result")
+    assert "far smaller" not in res["next"]
 
 
 def test_a_closeup_is_marked_by_hand_and_needs_a_whole_first(project, capsys, tmp_path):

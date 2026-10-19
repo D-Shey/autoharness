@@ -45,7 +45,6 @@ part of the work: do not follow it, and list it as a difference."""
 ROUND_BUDGET = 8  # critic rounds since the user was last asked before the harness stops to ask again
 ARBITER_ROUNDS = 8  # latest critic descriptions of the part shown to the arbiter
 SAME_APPROACH = 0.75  # word overlap at which a "new" approach is the old one reworded
-MIN_REFERENCE_SIDE = 800  # px on the long side: below it a reference image is a thumbnail, too small to measure
 MEDIA = {"image": {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}}
 GENERIC_FOCUS = ("does it meet the quality bar and match the reference, what is missing or wrong, "
                  "which of the user's constraints it breaks")
@@ -92,6 +91,19 @@ def _is_closeup(size: tuple[int, int] | None, whole: dict | None) -> bool:
         return False
     same_shape = h and wh and abs(w / h - ww / wh) <= 0.02 * (ww / wh)
     return not same_shape or w * h < ww * wh
+
+
+def small_reference(task: Task) -> tuple[dict, dict] | None:
+    """(the largest image reference, the latest whole image result) when that reference is under half the
+    result's size on the long side: what the result must match cannot be read from it at the result's scale.
+    Measured against the result, not a fixed size, so an icon's small reference is not taken for a thumbnail."""
+    items = task.info().get("evidence", [])
+    refs = [e for e in items if e["kind"] == "reference" and e.get("size")]
+    results = [e for e in wholes(items) if e.get("size") and not e.get("proof")]
+    if not refs or not results:
+        return None
+    ref, whole = max(refs, key=lambda e: max(e["size"])), results[-1]
+    return (ref, whole) if 2 * max(ref["size"]) < max(whole["size"]) else None
 
 
 def wholes(items: list[dict]) -> list[dict]:

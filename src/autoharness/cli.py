@@ -412,19 +412,17 @@ def cmd_evidence(args, project, catalog):
                "of result and the close-ups or parts added after it with `--closeup`"
                + (" (a crop smaller than the whole is taken as one)" if item.get("media") == "image" else "")
                + "; earlier versions are drafts it does not see. " + nxt)
-    small = args.kind == "reference" and item.get("size") and max(item["size"]) < evidence.MIN_REFERENCE_SIDE
     if args.kind == "reference" and item.get("media") == "image":
         nxt = ("Check that it shows everything the task names, whole and uncropped; if a part is cut off or "
                "missing, find a reference that shows it and add it as well. " + nxt)
-    if small:
-        w, h = item["size"]
-        nxt = (f"This reference is only {w}x{h} px: too small to take sizes, shapes and details from. Find a larger "
-               f"version (at least {evidence.MIN_REFERENCE_SIDE} px on the long side) and add it too, before you "
-               "work from it. " + nxt)
     warnings = ([f"this file is byte for byte the same as evidence #{item['same_as']}: a result must be what "
                  "you produced, not the reference itself; the critic is told"] if item.get("same_as") else [])
-    if small:
-        warnings.append(f"reference #{item['n']} is {item['size'][0]}x{item['size'][1]} px: a thumbnail")
+    if small := evidence.small_reference(task):
+        ref, whole = small
+        nxt = (f"The best reference (#{ref['n']}, {ref['size'][0]}x{ref['size'][1]} px) is far smaller than the "
+               f"result (#{whole['n']}, {whole['size'][0]}x{whole['size'][1]} px): sizes, shapes and details cannot "
+               "be taken from it at the result's scale. Find a larger version of it and add it too. " + nxt)
+        warnings.append(f"reference #{ref['n']} is under half the size of result #{whole['n']}")
     out({"status": "ok", "evidence": item, "next": nxt} | ({"warnings": warnings} if warnings else {}))
     return 0
 
