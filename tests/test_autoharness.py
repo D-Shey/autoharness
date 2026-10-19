@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from autoharness import cli, recipes, registry
+from autoharness import cli, evidence, recipes, registry
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected
 from autoharness.trust import scan_skill, score_registry_entry, score_skill
@@ -1618,6 +1618,61 @@ def test_critic_prompt_points_at_the_files_the_bar_and_the_focus(project, capsys
     assert "fresh subagent" in res["next"]
 
 
+def sized_png(path: Path, w: int, h: int) -> Path:
+    import struct
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h)
+                     + b"\x08\x02\x00\x00\x00" + path.name.encode())
+    return path
+
+
+def test_image_size_reads_png_and_jpeg_headers(tmp_path):
+    import struct
+    assert evidence.image_size(sized_png(tmp_path / "a.png", 1600, 900)) == (1600, 900)
+    jpg = tmp_path / "a.jpg"
+    jpg.write_bytes(b"\xff\xd8" + b"\xff\xe0" + struct.pack(">H", 4) + b"JF"
+                    + b"\xff\xc0" + struct.pack(">HBHH", 11, 8, 502, 892) + b"\x03" * 6)
+    assert evidence.image_size(jpg) == (892, 502)
+    (tmp_path / "x.png").write_bytes(b"not an image")
+    assert evidence.image_size(tmp_path / "x.png") is None
+
+
+def test_a_critic_judges_the_latest_whole_render_not_every_draft(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    drafts = [ev(capsys, root, sized_png(tmp_path / f"r{i}.png", 1600, 900), "result")[1] for i in (1, 2, 3)]
+    assert not any(d["evidence"].get("closeup") for d in drafts) and "new version of the whole" in drafts[-1]["next"]
+    code, crop = ev(capsys, root, sized_png(tmp_path / "face.png", 400, 400), "result")
+    assert crop["evidence"]["closeup"] == drafts[-1]["evidence"]["n"] and "close-up or part of result" in crop["next"]
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert res["results"] == [drafts[-1]["evidence"]["file"], crop["evidence"]["file"]]
+    assert drafts[0]["evidence"]["file"] not in res["prompt"]
+    # a bigger render at the same shape is a new whole view, not a close-up
+    code, big = ev(capsys, root, sized_png(tmp_path / "r4.png", 1920, 1080), "result")
+    assert "closeup" not in big["evidence"]
+
+
+def test_a_closeup_is_marked_by_hand_and_needs_a_whole_first(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    code, res = cli_json(capsys, "--project", root, "evidence", "add", str(png(tmp_path / "c.png")),
+                         "--kind", "result", "--closeup")
+    assert code == 1 and "whole result first" in res["error"]
+    ev(capsys, root, sized_png(tmp_path / "r1.png", 800, 600), "result")
+    code, res = cli_json(capsys, "--project", root, "evidence", "add",
+                         str(sized_png(tmp_path / "hand.png", 1600, 1200)), "--kind", "result", "--closeup")
+    assert code == 0 and res["evidence"]["closeup"] == 1
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert len(res["results"]) == 2
+
+
+def test_a_stylised_fidelity_does_not_excuse_broken_drawing(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    ev(capsys, root, png(tmp_path / "r1.png"), "result")
+    code, res = cli_json(capsys, "--project", root, "critic")
+    assert "not how well it is made" in res["prompt"] and "never a reason to rate those minor" in res["prompt"]
+    assert "hand" not in res["prompt"] and "anatomy" not in res["prompt"]  # no one kind of picture
+
+
 def test_a_page_to_copy_pixel_for_pixel_is_visual_work():
     names = [c.name for c, _ in Catalog.load().classify(
         "Сверстай главную страницу https://example.com одним HTML-файлом так, чтобы на скриншоте она была "
@@ -1846,8 +1901,8 @@ def test_critic_prompt_grades_severity_at_the_target_fidelity(project, capsys, t
     root = str(project.root)
     cli_json(capsys, "--project", root, "init", BLADE_RUNNER)
     cli_json(capsys, "--project", root, "brief", *BRIEF, "--fidelity", "stylised poster, not photographic")
-    ev(capsys, root, png(tmp_path / "r1.png"), "result")
-    ev(capsys, root, png(tmp_path / "face.png"), "result")  # a close-up of the same round
+    ev(capsys, root, sized_png(tmp_path / "r1.png", 1600, 900), "result")
+    ev(capsys, root, sized_png(tmp_path / "face.png", 400, 400), "result")  # a close-up of the same round
     code, res = cli_json(capsys, "--project", root, "critic")
     p = res["prompt"]
     assert "stylised poster, not photographic" in p and "blocker" in p and "minor" in p
@@ -2524,6 +2579,29 @@ def test_evidence_diff_includes_untracked_files(project, capsys):
     assert "+x = 2" in patch and "new_module.py" in patch and "+def f():" in patch
     assert ".autoharness" not in patch
     assert [p.name for p in (project.task().dir / "evidence").iterdir()] == [Path(res["evidence"]["file"]).name]
+
+
+def test_a_critic_of_code_sees_the_latest_diff_its_parts_and_proofs_not_older_diffs(project, capsys, tmp_path):
+    git_repo(project.root)
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    _, old = cli_json(capsys, "--project", root, "evidence", "diff")
+    (project.root / "a.py").write_text("x = 3\n", "utf-8")
+    _, new = cli_json(capsys, "--project", root, "evidence", "diff")
+    assert "new version of the whole result" in new["next"]
+    log = tmp_path / "pytest.log"
+    log.write_text("3 passed", "utf-8")
+    _, part = cli_json(capsys, "--project", root, "evidence", "add", str(log), "--kind", "result", "--part")
+    assert part["evidence"]["closeup"] == new["evidence"]["n"]
+    proof = tmp_path / "api.json"
+    proof.write_text("{}", "utf-8")
+    cli_json(capsys, "--project", root, "verify", "record", "api", "--passed", "yes", "--evidence", str(proof))
+    code, res = cli_json(capsys, "--project", root, "critic")
+    files = [e["file"] for e in project.task().info()["evidence"]]
+    assert res["results"] == files[1:]               # the new diff, its log, then the check's proof
+    assert old["evidence"]["file"] not in res["prompt"]
+    assert "not how well it is made" in res["prompt"] and "passes without checking anything" in res["prompt"]
 
 
 def test_evidence_diff_refuses_an_empty_change(project, capsys):

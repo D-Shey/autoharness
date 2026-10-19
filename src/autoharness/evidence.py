@@ -21,6 +21,7 @@ import hashlib
 import re
 import secrets
 import shutil
+import struct
 import subprocess
 import time
 from pathlib import Path
@@ -54,19 +55,88 @@ def media_of(path: str) -> str | None:
     return next((m for m, suffixes in MEDIA.items() if suffix in suffixes), None)
 
 
-def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = None) -> dict:
+def image_size(path: Path) -> tuple[int, int] | None:
+    """Width and height from a PNG, GIF, BMP or JPEG header; None for anything else."""
+    try:
+        head = path.read_bytes()[:64 * 1024]
+    except OSError:
+        return None
+    if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
+        return struct.unpack(">II", head[16:24])
+    if head[:6] in (b"GIF87a", b"GIF89a") and len(head) >= 10:
+        return struct.unpack("<HH", head[6:10])
+    if head[:2] == b"BM" and len(head) >= 26:
+        w, h = struct.unpack("<ii", head[18:26])
+        return w, abs(h)
+    if head[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(head):
+            if head[i] != 0xFF:
+                return None
+            marker, length = head[i + 1], struct.unpack(">H", head[i + 2:i + 4])[0]
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                h, w = struct.unpack(">HH", head[i + 5:i + 9])
+                return w, h
+            i += 2 + length
+    return None
+
+
+def _is_closeup(size: tuple[int, int] | None, whole: dict | None) -> bool:
+    """An image result that is a part of the last whole view, not a new whole: smaller than it, or cut to
+    another shape. A whole render keeps the canvas, so it keeps the size (or grows at the same shape)."""
+    if not size or not whole or not whole.get("size"):
+        return False
+    (w, h), (ww, wh) = size, whole["size"]
+    if (w, h) == (ww, wh):
+        return False
+    same_shape = h and wh and abs(w / h - ww / wh) <= 0.02 * (ww / wh)
+    return not same_shape or w * h < ww * wh
+
+
+def wholes(items: list[dict]) -> list[dict]:
+    """The results that are whole: every result that is not a close-up or a part of another."""
+    return [e for e in items if e["kind"] == "result" and not e.get("closeup")]
+
+
+def version_of(e: dict) -> str:
+    """What sort of result this is a version of: a later whole result of the same sort (the next diff, the
+    next render, the next draft of the report) replaces it; a check's proof stands beside the work."""
+    if e.get("proof"):
+        return "proof:" + e["proof"]
+    if "tree_state" in e:
+        return "diff"
+    return e.get("media") or Path(e.get("source") or e["file"]).suffix.lower() or "file"
+
+
+def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = None,
+        closeup: bool = False) -> dict:
     if kind not in KINDS:
         raise HarnessError(f"kind must be one of {', '.join(KINDS)}")
     if not path.is_file():
         raise HarnessError(f"no such file: {path}")
     items = task.info().get("evidence", [])
+    if closeup and kind != "result":
+        raise HarnessError("--closeup marks a close-up or part of a result: use it with --kind result")
+    media = media_of(path.name)
+    whole = next((e for e in reversed(wholes(items)) if e.get("media") == media and not e.get("proof")), None)
+    if closeup:
+        # a part named by hand may be of another sort than its whole (a test log beside the diff)
+        whole = whole or next((e for e in reversed(wholes(items)) if not e.get("proof")), None)
+        if not whole:
+            raise HarnessError("a close-up or part needs the whole result first: add it without --closeup")
     dest_dir = task.dir / "evidence"
     dest_dir.mkdir(exist_ok=True)
     dest = dest_dir / f"{len(items) + 1:02d}-{kind}-{path.name}"
     shutil.copy2(path, dest)
     item = {"n": len(items) + 1, "kind": kind, "file": str(dest), "source": str(path), "note": note,
-            "media": media_of(path.name), "sha256": hashlib.sha256(dest.read_bytes()).hexdigest(),
+            "media": media, "sha256": hashlib.sha256(dest.read_bytes()).hexdigest(),
             "added": time.strftime("%Y-%m-%dT%H:%M:%S")} | (extra or {})
+    size = image_size(dest) if media == "image" else None
+    if size:
+        item["size"] = list(size)
+    # a round is one whole result and its close-ups or parts; with images the author may not say which is which
+    if kind == "result" and (closeup or (not item.get("proof") and _is_closeup(size, whole))):
+        item["closeup"] = whole["n"]
     # a result byte for byte the same as a reference may be the reference handed in as the result:
     # recorded, so the author is warned and the critic is told, not refused (a faithful copy can be)
     other = "reference" if kind == "result" else "result"
@@ -622,13 +692,33 @@ VERDICT: blocker | major | minor | none"""
     return {"prompt": prompt, "results": [e["file"] for e in results]}
 
 
+def _one_view(results: list[dict], fresh: list[dict]) -> list[dict]:
+    """Of `fresh`, the latest whole result of each sort, each followed by its close-ups or parts: an earlier
+    diff, render or draft of the round is one the author went past, not a part of the result. A close-up
+    whose whole came before `fresh` brings that whole along; the work comes before any check's proof."""
+    by_n = {e["n"]: e for e in results}
+    kept: dict[str, dict] = {}
+    for e in fresh:
+        if not e.get("closeup"):
+            kept[version_of(e)] = e
+    for e in fresh:
+        whole = by_n.get(e.get("closeup"))
+        if whole:
+            kept.setdefault(version_of(whole), whole)
+    out = []
+    for whole in sorted(kept.values(), key=lambda w: (bool(w.get("proof")), w["n"])):
+        out += [whole] + [e for e in fresh if e.get("closeup") == whole["n"]]
+    return out or fresh
+
+
 def round_results(task: Task) -> list[dict]:
     """Results added since the last critic review: the whole result plus any close-ups of this round."""
     info = task.info()
     critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
     after = critics[-1]["result"] if critics else 0
-    fresh = [e for e in info.get("evidence", []) if e["kind"] == "result" and e["n"] > after]
-    return fresh or [latest(task, "result")]
+    results = [e for e in info.get("evidence", []) if e["kind"] == "result"]
+    fresh = [e for e in results if e["n"] > after]
+    return _one_view(results, fresh) if fresh else [latest(task, "result")]
 
 
 def best_earlier(task: Task, current: dict) -> dict | None:
@@ -685,9 +775,10 @@ def latest_round(task: Task) -> list[dict]:
     after = critics[-1]["result"] if critics else 0
     fresh = [e for e in results if e["n"] > after]
     if fresh or not critics:
-        return fresh or results[-1:]
+        return _one_view(results, fresh) if fresh else results[-1:]
     before = critics[-2]["result"] if len(critics) > 1 else 0
-    return [e for e in results if before < e["n"] <= after] or results[-1:]
+    seen = [e for e in results if before < e["n"] <= after]
+    return _one_view(results, seen) if seen else results[-1:]
 
 
 def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
@@ -743,6 +834,17 @@ versions equally good as a whole. Then one sentence why.
 """
     beyond = ("for example photographic detail in a stylised drawing" if visual else
               "for example polish or cases the quality bar does not ask for")
+    # a lower fidelity owes less, not worse work: without this a critic files a broken part under "beyond the bar"
+    broken = ("broken structure or proportions, parts that do not read as what they are, misaligned or clipped "
+              "elements, a crude or unfinished look" if visual else
+              "behaviour that is wrong on inputs the work will meet, errors left unhandled, a check or test that "
+              "passes without checking anything, output that is wrong or unreadable where it is used")
+    craft = f"""
+The target fidelity lowers how much is owed, not how well it is made. At any fidelity, what a skilled
+maker working at that level would not let through is major: {broken}. A simpler level or a smaller scope
+is never a reason to rate those minor. Judge the result as a piece of work, part by part, not only
+against the reference and the brief.
+"""
     whole = " (the whole result, then any close-ups of it)" if visual else ""
     see = ("Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up."
            if visual else "Describe what the files show and what running the result does, not what you expect.")
@@ -844,7 +946,7 @@ Quality bar: {brief.get("goal", "(not recorded)")}
 The user's constraints: {brief.get("constraints", "(not recorded)")}
 
 Target fidelity: {fidelity}. Judge at that level: detail beyond it ({beyond}) is at most minor.
-
+{craft}
 Open and study these files yourself:
 Reference:
 {ref_lines}

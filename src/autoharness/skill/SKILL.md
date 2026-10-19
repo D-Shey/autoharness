@@ -142,6 +142,11 @@ thing you must check, guessing at an API whose docs you have not read, or drawin
 you have not looked at are gaps: `autoharness need <capability> --reason "<what blocked me>"`
 (after `mode full` in a light task), then resume.
 
+Matching a reference (an API's response, a sample file, a layout, a picture, the old behaviour)?
+Take its facts from the reference itself with a tool, not from memory: field names and values,
+sizes, positions, timings, the exact output. Then check your result against the same facts, part
+by part, side by side.
+
 Found work outside this task (a bug next door, a critic point beyond the brief)? Do not fix it
 now and do not drop it: `autoharness followup add "<what, where>"`. `init` shows open follow-ups;
 close one a task settles with `autoharness followup done <id> --note "..."`.
@@ -152,6 +157,7 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 
    ```bash
    autoharness evidence add <file> --kind reference|result   # the thing itself; the whole result, then close-ups
+   autoharness evidence add <file> --kind result --closeup   # a close-up or part of the latest whole result
    autoharness verify run "<test command>" --for B1|preserve   # autoharness runs it: exit code decides
    autoharness evidence diff                                 # code: the whole working-tree diff
    autoharness review --by self --diff "1 <most important>; 2 ..." --worst blocker|major|minor|none
