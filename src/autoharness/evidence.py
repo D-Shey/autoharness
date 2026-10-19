@@ -655,11 +655,12 @@ def needs_facts(catalog, task: Task) -> str | None:
     if not requirements(catalog, task).get("reference"):
         return None
     items = task.info().get("evidence", [])
-    if any(e["kind"] == "facts" for e in items):
-        return None
-    if not any(e["kind"] == "reference" for e in items):
+    refs = [e["n"] for e in items if e["kind"] == "reference"]
+    if not refs:
         return ("this task must match a reference: add the original first (`autoharness evidence add <file> --kind "
                 "reference`), then the facts you take from it (`--kind facts`)")
+    if any(e["kind"] == "facts" and e["n"] > min(refs) for e in items):
+        return None
     return ("before the first result, write down the facts the result must match, taken from the reference with a "
             "tool, not by eye: sizes, positions and proportions of its main parts (crops, a grid, coordinates), "
             "names, values and formats (quoted or extracted), whatever the task is judged on. Save them to a file "

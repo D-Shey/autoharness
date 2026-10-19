@@ -389,6 +389,10 @@ def cmd_evidence(args, project, catalog):
     if args.action == "list":
         out({"evidence": task.info().get("evidence", []), "reviews": task.info().get("reviews", [])})
         return 0
+    if args.kind == "facts" and not any(e["kind"] == "reference" for e in task.info().get("evidence", [])):
+        raise HarnessError("facts are taken from a reference, not from memory: add the reference first (`autoharness "
+                           "evidence add <file> --kind reference`), then measure, crop or extract from it and add "
+                           "what you took as facts")
     if (args.action == "diff" or args.kind == "result") and not args.closeup \
             and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
             and (why := evidence.needs_facts(catalog, task)):
