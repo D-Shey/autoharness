@@ -166,6 +166,8 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    autoharness critic --run claude|codex|agy                 # or: autoharness starts a read-only critic itself
    ```
 
+   A check must be able to fail when its item is not met: one that only finds a name or a string in
+   a file checks nothing, the critic says so and it stops counting for the item.
    A check that is a command goes through `verify run`, never "I ran it and it passed": the run is
    tied to the code it saw and goes stale when the code changes, so run it again after your last
    edit. With `--preserve` in the brief, teardown needs a passing `--for preserve` run. A command

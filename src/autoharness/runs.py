@@ -199,11 +199,17 @@ def summary(task: Task) -> dict:
     info, root = task.info(), task.project.root
     ran = []
     changed = changed_after_failing(info.get("runs", []))
+    # the latest critic's word on each run: one it found empty no longer counts for its item
+    judged: dict[str, str] = {}
+    for r in info.get("reviews", []):
+        judged |= r.get("runs_judged", {})
     for r in info.get("runs", []):
         fresh = is_fresh(r, root)
+        empty = judged.get(str(r["n"])) == "does not check"
         ran.append({"n": r["n"], "command": r["command"], "for": r.get("for", ""),
                     "passed": r["passed"], "code": {True: "current", False: "stale", None: "unknown"}[fresh]}
-                   | ({"not_a_check": True} if r.get("trivial") else {})
+                   | ({"not_a_check": True} if r.get("trivial") or empty else {})
+                   | ({"critic": "does not check"} if empty else {})
                    | ({"check_changed": changed[r["n"]]} if r["n"] in changed else {}))
     critics = [{"round": r["round"], "worst": r["worst"],
                 "answer": ("run by autoharness: " + r["ran"]) if r.get("ran") else
@@ -240,4 +246,4 @@ def summary(task: Task) -> dict:
 
 
 def _why_not(r: dict) -> str:
-    return "not a check" if r.get("not_a_check") else "failed" if not r["passed"] else "stale"
+    return ("not a check, says the critic" if r.get("critic") else "not a check") if r.get("not_a_check") else "failed" if not r["passed"] else "stale"

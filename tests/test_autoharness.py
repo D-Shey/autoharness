@@ -2179,6 +2179,19 @@ def test_issues_split_a_critic_list():
     # a `;` inside a point is part of it, not an untagged point of its own
     assert evidence.issues("1. [severity: major] hair: too round; fringe wrong\n2. [severity: minor] sky") == [
         "[severity: major] hair: too round; fringe wrong"]
+    # in a list of one point per line, a number inside a point does not start a new one, and tags alone
+    # are no problem of their own: they would match every point of every round
+    diff = ("1. the panel is a hard-edged artifact. — major, fixable\n"
+            "2. the layout is broken by the panel from point 1. — major, fixable")
+    assert evidence.issues(diff) == ["the panel is a hard-edged artifact. — major, fixable",
+                                     "the layout is broken by the panel from point 1. — major, fixable"]
+    assert evidence.issues("1. totals wrong; 2. — major, fixable") == ["totals wrong"]
+
+
+def test_a_change_of_approach_names_kinds_of_method_to_switch_to():
+    import inspect
+    src = inspect.getsource(cli.cmd_review)
+    assert "from memory" in src and "judged by eye -> a check that fails" in src
 
 
 def test_args_file_carries_long_texts_without_shell_quoting(project, capsys, tmp_path):

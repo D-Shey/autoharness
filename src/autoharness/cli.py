@@ -493,6 +493,7 @@ def cmd_review(args, project, catalog):
     ran = getattr(args, "critic_run", None)
     extra = {"answer_id": answer["id"]} | {k: answer[k] for k in ("coverage", "unrequested") if answer[k]} \
         | ({"previous_review": answer["previous"]} if answer["previous"] else {}) | ({"ran": ran} if ran else {}) \
+        | ({"runs_judged": {str(n): v for n, v in answer["runs"].items()}} if answer.get("runs") else {}) \
         if answer else {}
     if quality:
         extra["quality"] = {"answer_id": quality["id"], "verdict": quality["verdict"],
@@ -550,7 +551,10 @@ def cmd_review(args, project, catalog):
                      f"{done} ({len(tried)} of {evidence.MAX_APPROACHES} before an arbiter decides). "
                      "1) Name the method you used and a different one: rebuild that part from the reference piece "
                      "by piece (measure or quote the reference instead of working from memory), reduce it to what "
-                     "carries it, or change the technique. 2) If you lack the know-how for that part, that is a "
+                     "carries it, or change the technique. Change the kind of method, not its numbers: from memory "
+                     "-> taken from the reference or the docs with a tool; tuned by hand -> derived, computed or "
+                     "generated; patched in place -> rebuilt from scratch; one piece -> separate parts, each checked "
+                     "alone (or the reverse); judged by eye -> a check that fails while the part is wrong. 2) If you lack the know-how for that part, that is a "
                      "capability gap: `autoharness need <capability> --reason \"<part>\"`, `autoharness search "
                      "skill \"<part>\"`, or write down what you learn in a skill. 3) Record it: `autoharness "
                      "approach --part \"<part>\" --was \"<old method>\" --now \"<new method>\"`. 4) Rebuild the part, "
@@ -575,6 +579,9 @@ def cmd_review(args, project, catalog):
                "reference than this one. Find what got worse since then and restore it before fixing more. " + nxt)
     if short := [f"{k} {v}" for k, v in item.get("coverage", {}).items() if v != "met"]:
         nxt = f"The critic finds these brief items not met: {', '.join(short)}. " + nxt
+    if empty := [f"#{n}" for n, v in item.get("runs_judged", {}).items() if v == "does not check"]:
+        nxt = (f"The critic finds that run(s) {', '.join(empty)} do not check their item: they no longer count "
+               "for it. Write a check that would fail if the item were not met, and `verify run` it. " + nxt)
     if item.get("unrequested"):
         nxt += (" The critic lists work the brief did not ask for (`unrequested`): keep what serves the quality "
                 "bar and tell the user about it; drop only what breaks it, a constraint, or behaviour no one asked "

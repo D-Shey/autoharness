@@ -192,6 +192,24 @@ def test_the_critic_judges_each_brief_item_and_names_unrequested_work(project, c
     assert runs.summary(project.task())["unchecked_items"] == ["B2"]
 
 
+def test_a_run_the_critic_finds_empty_no_longer_counts_for_its_item(project, capsys, tmp_path):
+    critic_ready(capsys, project, tmp_path)
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    ah(capsys, project, "verify", "run", OK, "--for", "B2")
+    code, res = ah(capsys, project, "critic")
+    assert "#1 for B1" in res["prompt"] and '"Runs"' in res["prompt"]
+    f = tmp_path / "a.txt"
+    f.write_text(f"ANSWER-ID: {res['answer_id']}\n1. title still says Q2 (major, fixable)\n\n## Runs\n"
+                 "#1: does not check - it only prints 42\n#2: checks\n\n## Brief coverage\nB1: partial - x\n"
+                 "B2: partial - y\n\nVERDICT: major\n", "utf-8")
+    code, res = ah(capsys, project, "review", "--answer-file", str(f))
+    assert res["review"]["runs_judged"] == {"1": "does not check", "2": "checks"}
+    assert "#1 do not check" in res["next"] and res["review"]["diff"] == "1. title still says Q2 (major, fixable)"
+    summary = runs.summary(project.task())
+    assert summary["unchecked_items"] == ["B1"]
+    assert summary["brief_items"][0]["run"] == "run #1 not a check, says the critic"
+
+
 def test_for_must_name_a_brief_item(project, capsys):
     briefed(capsys, project)
     code, res = ah(capsys, project, "verify", "run", OK, "--for", "B9")
