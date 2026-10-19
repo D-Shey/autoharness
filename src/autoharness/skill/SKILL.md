@@ -32,10 +32,9 @@ session is gone), `autoharness claim <your session id> --reason "<their words>"`
 autoharness --agent {{AGENT}} init "<the user's task, verbatim>" --mode light|full|reviewed|auto
 ```
 
-- `light`: the inputs and the way to verify are already at hand (a small fix, a git chore). No
-  search, no brief: do the work, verify it, `teardown`. A task that has to match an image (a
-  scene, a design) is not light: `init` refuses it unless you say why nothing real is to be
-  matched (`--light-reason "..."`). Drawing from memory what can be looked up is the gap.
+- `light`: a chore that needs no capability (a typo, a git commit). No search, no brief: do the
+  work, verify it, `teardown`. A task that needs any capability of the catalog (an API, a browser,
+  tests, debugging, an image to match) is not a chore: `init` raises it to full.
 - `full` (default): something the result must match or a way to check it is missing. Search,
   brief, vet, install.
 - `reviewed`: full, and an independent critic must pass the result before teardown.

@@ -218,6 +218,12 @@ def cmd_init(args, project, catalog):
     restarted = before and LEVELS.index(selected) < LEVELS.index(before)
     if restarted:
         selected = before
+    # light is for chores: a task that needs any capability of the catalog (an API, a browser, tests, debugging,
+    # a reference) is not one, whatever the agent chose; skipping the harness altogether is the user's call (waive)
+    needs = [c.name for c, _ in classified]
+    lightened = selected == "light" and bool(needs)
+    if lightened:
+        selected = "full"
     mode = "light" if selected == "light" else "full"
     checked = [c.name for c, _ in classified if c.requires]
     # an image to match is the case agents skip most (drawing from memory): light mode has to be argued for
@@ -242,6 +248,10 @@ def cmd_init(args, project, catalog):
     if raised:
         result["mode_raised"] = f"to {floor} by the min_mode setting ({floor_source})"
         task.log(f"mode raised to {floor} by the min_mode setting ({floor_source})")
+    if lightened:
+        result["mode_raised"] = (f"to full: the task needs {', '.join(needs)}, and light mode is for chores that "
+                                 "need none (a typo, a commit). Prepare as full mode asks")
+        task.log(f"light raised to full: the task needs {', '.join(needs)}")
     if restarted:
         result["mode_raised"] = (f"to {before}: this task was started at that level before, and starting it again "
                                  "does not lower it. Do what the earlier start asked for (its brief) instead")
