@@ -1151,10 +1151,23 @@ def cmd_vet(args, project, catalog):
         vet.note_pending(task, "skill", args.name, digest)
     nonce = answers.issue(task, "vet", f"{args.kind}:{args.name}")
     text = vet.prompt(task, args.kind, args.name, content) + answers.instruction(nonce)
-    out({"status": "ok", "prompt": text, "answer_id": nonce, "prompt_file": evidence.save_prompt(task, "vet", text),
+    prompt_file = evidence.save_prompt(task, "vet", text)
+    if args.run:  # an agent with no subagents of its own: autoharness starts the reviewer, read-only
+        answer_file = task.dir / "answers" / f"run-vet-{nonce}.txt"
+        answer_file.parent.mkdir(exist_ok=True)
+        try:
+            reviewers.run(args.run, project.root, Path(prompt_file), answer_file, args.timeout, nonce)
+        except HarnessError as e:
+            raise HarnessError(f"{e}. Give the prompt in {prompt_file} to a reviewer yourself and record its "
+                               f"answer with `autoharness vet {args.kind} {args.name} --answer-file <file>`") from e
+        task.log(f"vet of {args.name} run by {args.run} (answer {nonce})")
+        args.answer_file, args.run = str(answer_file), None
+        return cmd_vet(args, project, catalog)
+    out({"status": "ok", "prompt": text, "answer_id": nonce, "prompt_file": prompt_file,
          "next": "Give `prompt` to a fresh subagent that did not pick this candidate (Claude Code: the Agent tool), "
                  "unchanged. Save its answer unedited to a file and record it: `autoharness vet "
-                 f"{args.kind} {args.name} --answer-file <file>`."})
+                 f"{args.kind} {args.name} --answer-file <file>`. No subagents at hand? `autoharness vet "
+                 f"{args.kind} {args.name} --run claude|codex|agy` starts the reviewer and records its answer."})
     return 0
 
 
@@ -2601,6 +2614,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--answer-file", help="record the reviewer's answer, saved unedited")
     s.add_argument("--verdict", choices=list(vet.VERDICTS), help="record the reviewer's VERDICT")
     s.add_argument("--text", help="with --verdict: the reviewer's REASON")
+    s.add_argument("--run", choices=list(reviewers.AGENTS),
+                   help="start that agent headless and read-only as the reviewer, and record its answer")
+    s.add_argument("--timeout", type=float, default=reviewers.DEFAULT_TIMEOUT, help="with --run: seconds allowed")
     s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")

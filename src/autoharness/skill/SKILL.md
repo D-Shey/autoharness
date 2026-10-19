@@ -136,7 +136,8 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
   if you find out after installing, `autoharness remove` it and say so.
 - `vet_required`: you do not judge the fit yourself. `autoharness vet mcp|skill <name>`, give
   its prompt unchanged to a fresh subagent, save the answer unedited to a file, record it with
-  `--answer-file <file>`. On `breaks`, pick another.
+  `--answer-file <file>`. No subagents at hand: `autoharness vet mcp|skill <name> --run
+  claude|codex|agy` starts the reviewer and records its answer. On `breaks`, pick another.
 - `approval_required` (exit 3): show the user name, trust score, reasons, needed secrets and any
   `egress` reason in one message; `--approve` only after a clear yes, never on your own.
 - `rejected`: dangerous patterns found; pick another (`--force` only if the user insists after
