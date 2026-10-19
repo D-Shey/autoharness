@@ -937,6 +937,11 @@ def _check_constraints(text: str, task) -> None:
                 "none. Facts about the environment (the OS, the shell, what is installed) go in --inputs, and the "
                 "tools and commands you choose are your decisions, not the user's constraints: candidates are "
                 "vetted against these words.")
+        if len(_plain(piece)) > len(_plain(str(task.info().get("task", "")))) / 2:
+            raise HarnessError(
+                f"--constraints: `{piece.strip()[:80]}...` quotes most of the task, which is the goal, not a limit "
+                "on it. Quote only the user's words that rule something out or require it (a version, a library to "
+                "use or avoid, offline, a deadline), or `none` if they set none.")
 
 
 def _skills_not_installed(project, task) -> list[str]:
@@ -950,7 +955,9 @@ def _skills_not_installed(project, task) -> list[str]:
             name = m["name"].split("@")[-1]
             if name not in have and not library.exists(name):
                 missing.append(f"area `{m['area'].strip()}` is covered by skill `{m['name']}`, not installed: "
-                               f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`")
+                               f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`; if it "
+                               "cannot be installed or vetting rejects it, record the brief again with another "
+                               "candidate from your searches for that area, or `create` a skill for it")
     return missing
 
 
