@@ -80,10 +80,18 @@ autoharness search mcp|skill "<query>"            # MCP registry, skills.sh
 Prefer local skill → curated entry → high-trust result → nothing. Install only what beats the
 tools you have: a CLI (`gh`, `psql`, `npx playwright`) needs no MCP server.
 
+**Research the method before you build.** Someone has usually solved this kind of task before:
+search the web, the field's docs, papers, repos and tutorials for how it is done well (the
+algorithm, the workflow, the known pitfalls), read the best two or three sources, and write the
+steps down. This is deep research, not a single query: it is the difference between doing the
+work from memory and doing it the way it is done well. The steps go into `--method`; reusable
+know-how goes into a skill (`--gaps "create ..."`).
+
 ## 3. Brief (full)
 
 ```bash
 autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get them>" \
+  --method "<technique or steps>: <url>; ...; searched: <queries>" \
   --constraints "<verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; ...; searched: <queries>" \
   --gaps "create <skill-name>: <capability>; ..."   # or "none: <why tools at hand cover it>"

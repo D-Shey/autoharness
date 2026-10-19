@@ -866,6 +866,9 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
                            "technique>\"`, rebuild that part, and add the new result with a close-up of it")
     focus = "; ".join(c.review for c in _caps(catalog, task) if c.review) or GENERIC_FOCUS
     ref_lines = listing(refs) or "- none: judge against the task and the quality bar only"
+    method_text = "" if not brief.get("method") else (
+        "Method the author found for this kind of work (how it is done well): " + brief["method"] + "\n"
+        "Where the result does not follow it and that shows in the result, that is a difference.")
     facts = [e for e in info.get("evidence", []) if e["kind"] == "facts"]
     facts_text = "" if not facts else (
         "Facts the author took from the reference (check a few of them against the reference yourself: a wrong "
@@ -1006,6 +1009,7 @@ Task given to the author:
 {info.get("task", "")}
 
 Quality bar: {brief.get("goal", "(not recorded)")}
+{method_text}
 The user's constraints: {brief.get("constraints", "(not recorded)")}
 
 Target fidelity: {fidelity}. Judge at that level: detail beyond it ({beyond}) is at most minor.

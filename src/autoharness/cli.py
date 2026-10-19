@@ -796,13 +796,21 @@ def cmd_brief(args, project, catalog):
                            "or start with `none:` and say why the tools at hand cover every capability")
     for name in planned:
         library.validate_name(name)
+    method = args.method.strip()
+    if "searched:" not in method.lower() or not (re.search(r"https?://", method)
+                                                 or re.search(r"nothing usable", method, re.IGNORECASE)):
+        raise HarnessError(
+            "--method must say how this kind of work is done well, from sources you found and read before starting, "
+            "not from memory: `<technique or steps>: <url>; ...; searched: <queries>`. Search the web (and the docs, "
+            "papers, repos, tutorials of the field) for how others solved it: the algorithm, the workflow, the "
+            "pitfalls. Only if nothing usable turned up: `nothing usable; searched: <queries>`.")
     if evidence.requirements(catalog, task).get("media") and not (args.fidelity or "").strip():
         raise HarnessError(
             "this task is judged by eye: name the level it is judged at with --fidelity (e.g. \"stylised vector "
             "poster: composition, palette, mood and poses read at a glance; not photographic likeness\"). "
             "Without it a critic judges against the reference itself, which a different medium never reaches, "
             "and every round stays major")
-    task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
+    task.record_brief({"goal": args.goal, "method": method, "inputs": args.inputs, "constraints": args.constraints,
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
@@ -832,7 +840,8 @@ def cmd_brief(args, project, catalog):
     items = runs.brief_items(task.info()["brief"])
     out({"status": "ok", "task_id": task.id, "planned_skills": planned, "warnings": warnings,
          "brief_items": [f"{i['id']}: {i['text']}" for i in items],
-         "next": "Install what you decided to take and get the missing inputs first." + owed + create
+         "next": "Install what you decided to take and get the missing inputs first. Then work by the method you "
+                 "found, step by step: the critic checks the result against it." + owed + create
                  + " Then do the work and verify it the way the brief says: a check that is a command (tests, a "
                    "build, a script) runs through `autoharness verify run \"<command>\" --for <brief item, e.g. B1>`, "
                    "so it counts as checked, not as reported. Teardown refuses while a planned "
@@ -2507,6 +2516,8 @@ def build_parser() -> argparse.ArgumentParser:
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
                        ("--goal", "what a good result looks like (the quality bar)"),
+                       ("--method", "how this kind of work is done well, from sources found and read first: "
+                                    "`<technique or steps>: <url>; ...; searched: <queries>`"),
                        ("--inputs", "missing inputs and how you will get them (references, docs, data)"),
                        ("--constraints", "the user's constraints, verbatim"),
                        ("--verify", "how the result will be checked, and against what"),
