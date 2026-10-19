@@ -32,11 +32,13 @@ MANY_ROUNDS = 4  # critic rounds from which the number of rounds is itself a les
 EVENTS = ("offered", "used", "kept", "removed", "smooth", "friction")
 
 
-def note_user_message(task: Task, prompt: str) -> None:
+def note_user_message(task: Task, prompt: str, started_by: str | None = None) -> None:
     """Record a message the user sent while the task was active: corrections and new input are lessons.
     Appended without the project lock: the hook has seconds, and a line per message cannot clash. The prompt
-    that set the task is not one (some agents send it to the hook again on every step)."""
-    if prompt.strip() == str(task.info().get("task", "")).strip():
+    that set the task is not one (some agents send it to the hook again on every step): neither the task text
+    nor `started_by`, the prompt the session started with (the agent may have passed `init` other words)."""
+    if prompt.strip() == str(task.info().get("task", "")).strip() or (
+            started_by and prompt[:300].strip() == started_by.strip()):
         return
     with (task.dir / USER_MESSAGES).open("a", encoding="utf-8") as f:
         f.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "text": prompt[:300]},

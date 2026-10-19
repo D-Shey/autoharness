@@ -1375,6 +1375,9 @@ def cmd_teardown(args, project, catalog):
     if info.get("mode", "full") == "full" or info.get("brief", {}).get("review") in evidence.REVIEWS \
             or info.get("profile") == "reviewed":
         blocking += evidence.problems(catalog, task)
+    if info.get("mode", "full") != "light" and info.get("brief"):
+        # what the brief said covers each area is in use, whether or not a result was ever recorded
+        blocking += [p for p in _skills_not_installed(project, task) if p not in blocking]
     blocking += runs.problems(task)
     if args.accepted:
         task._update_info(accepted_by_user=args.accepted)
@@ -2209,7 +2212,7 @@ def cmd_hook(args, project, catalog):
                    "brief" if ready else "waiting")
             if state != wanted or saved_state.get("task_id") != active or saved_state.get("via", via) != via:
                 set_session_state(sid, state=wanted, task_id=active, via=via, told=saved_state.get("told"),
-                                  stop_seen=saved_state.get("stop_seen"))
+                                  stop_seen=saved_state.get("stop_seen"), prompt=saved_state.get("prompt"))
                 state = wanted
         if event == "Stop":
             return _stop_gate(data, sid, state, active, task_info)
@@ -2222,11 +2225,14 @@ def cmd_hook(args, project, catalog):
                 return 0
             if active and not foreign and state != "waived":
                 try:
-                    lessons.note_user_message(Task(project, active), str(data.get("prompt", "")))
+                    lessons.note_user_message(Task(project, active), str(data.get("prompt", "")),
+                                              started_by=saved_state.get("prompt"))
                 except OSError:
                     pass   # a lost note must never block the user's message
             if state in ("done", "waived") or active:
                 return 0
+            if sid:   # the prompt that sets the task: some agents send it again on every step, and it is not a note
+                set_session_state(sid, **(saved_state | {"prompt": data.get("prompt", "")[:300]}))
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
             if not ctx:
                 return 0
