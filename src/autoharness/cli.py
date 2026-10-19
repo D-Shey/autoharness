@@ -915,6 +915,30 @@ def _skill_sources(task) -> set[str]:
     return found
 
 
+def _plain(text: str) -> str:
+    """Text compared for quoting: case, quote marks, punctuation at the ends and runs of spaces do not count."""
+    text = re.sub(r"[\"'`«»“”„‘’]", "", text.lower())
+    return re.sub(r"\s+", " ", text).strip(" .,;:!?")
+
+
+def _check_constraints(text: str, task) -> None:
+    """The brief's constraints are the user's own words: each, between `;`, is quoted from the task or from what
+    the user wrote since, or the whole is `none`. Candidates are vetted against them, so a constraint the agent
+    made up ("no bash") rejects tools the user never ruled out."""
+    if re.fullmatch(r"\W*none\b.*", text.strip(), re.IGNORECASE | re.DOTALL):
+        return
+    said = _plain(" \n ".join([str(task.info().get("task", ""))] + [m.get("text", "")
+                                                                  for m in lessons.user_messages(task)]))
+    for piece in (p for p in text.split(";") if _plain(p)):
+        if _plain(piece) not in said:
+            raise HarnessError(
+                f"--constraints are the user's own words, quoted: `{piece.strip()}` is not in the task or in what "
+                "the user wrote. Quote each constraint as the user put it, separated by `;`, or `none` if they set "
+                "none. Facts about the environment (the OS, the shell, what is installed) go in --inputs, and the "
+                "tools and commands you choose are your decisions, not the user's constraints: candidates are "
+                "vetted against these words.")
+
+
 def _skills_not_installed(project, task) -> list[str]:
     """The skills the brief's areas are covered by that are neither installed for this task, kept in the project,
     nor in the user's library: an area is covered by a skill in use, not by its name."""
@@ -942,6 +966,7 @@ def cmd_brief(args, project, catalog):
                            "or start with `none:` and say why the tools at hand cover every capability")
     for name in planned:
         library.validate_name(name)
+    _check_constraints(args.constraints, task)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
     method = args.method.strip()
     if "searched:" not in method.lower() or not (SOURCE.search(method)
