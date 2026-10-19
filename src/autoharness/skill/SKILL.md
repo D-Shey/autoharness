@@ -60,6 +60,11 @@ In full mode, answer in writing before listing tools:
    your own `lower`/`upper`). Look for a real example first (docs, the usual package, callers in
    the code); without one, accept the common forms of the call and write the assumption into
    `--inputs`, so the critic checks it.
+5. **What does the person who asked expect where the task leaves a choice open?** A requirement is
+   what they want, and they cannot always be asked. For each open choice (a format, a value or a
+   formula, what a field holds) pick what they would take for granted on first look: the plain,
+   simple form, where what they see is what is there, nothing they did not ask for, clean to look
+   at. A tool's or skill's advice does not decide it for you. Record it with `--expects`.
 
 Then list capabilities: *capability — why — how I will verify it works*. Pick the smallest set
 that lets you **verify** the result, not only produce it. Missing input and know-how often need
@@ -100,6 +105,7 @@ know-how goes into a skill (`--gaps "create ..."`).
 
 ```bash
 autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get them>" \
+  --expects "<open choice>: <pick> - <why they would expect it>; ...  (or none: <why>)" \
   --domains "<area>: skill|mcp|create <name> (searched: <query>); ..." \
   --method "<technique or steps>: <url>; ...; searched: <queries>" \
   --constraints "<verbatim>" --verify "<checks, against what>" \

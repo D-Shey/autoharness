@@ -12,7 +12,7 @@ from autoharness.env import Project
 PY = f'"{sys.executable}"'
 OK = f'{PY} -c "import json; print(42)"'
 FAIL = f'{PY} -c "import sys; print(7); sys.exit(3)"'
-BRIEF = ["brief", "--goal", "1 totals row added; 2 title fixed", "--inputs", "the report", "--constraints", "none",
+BRIEF = ["brief", "--goal", "1 totals row added; 2 title fixed", "--inputs", "the report", "--expects", "none: the task settles every choice", "--constraints", "none",
          "--verify", "run the tests", "--candidates", "none", "--gaps", "none: tools at hand"]
 
 

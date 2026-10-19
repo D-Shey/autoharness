@@ -341,7 +341,7 @@ def cmd_init(args, project, catalog):
         result["next"] = (
         "Read `discovered`: these skills and MCP servers were found for this task. Search more with "
         "`autoharness search mcp|skill \"<query>\"` where it falls short. Then record "
-        "`autoharness brief --goal ... --inputs ... --constraints ... --verify ... --candidates ...`, "
+        "`autoharness brief --goal ... --inputs ... --expects ... --constraints ... --verify ... --candidates ...`, "
         "with a take/skip verdict and reason for each candidate worth considering, and `--gaps`: for each "
         "capability no found skill covers, `create <skill-name>: <capability>` (you write that skill before "
         "producing the result), or `none: <why tools at hand cover it>`. Tools that do work stay blocked until "
@@ -1056,6 +1056,17 @@ def _mcp_not_used(project, task) -> list[str]:
     return unused
 
 
+EXPECTS_ITEM = re.compile(r"\S\s*:\s*\S.*\S\s+(?:-|—|because|since)\s+\S", re.IGNORECASE)
+EXPECTS_HOW = (
+    "--expects must name the choices the task leaves open and, for each, what the person who asked most likely "
+    "expects: `<open choice>: <your pick> - <why they would expect it>; ...`, or `none: <why the task's words "
+    "settle every choice>`. A requirement is what that person wants; where the words leave a choice open (a format, "
+    "a value or a formula, what a column holds, where the output goes) and they cannot be asked, pick what they "
+    "would take for granted on first look: the plain, simple form, where what they see is what is there, nothing "
+    "they did not ask for, clean and pleasant to look at. A choice a tool's or skill's advice makes for you is still "
+    "your choice: check it against what they would expect.")
+
+
 def cmd_brief(args, project, catalog):
     from autoharness import verification
     task = project.task()
@@ -1092,8 +1103,11 @@ def cmd_brief(args, project, catalog):
             "poster: composition, palette, mood and poses read at a glance; not photographic likeness\"). "
             "Without it a critic judges against the reference itself, which a different medium never reaches, "
             "and every round stays major")
+    expects = args.expects.strip()
+    if not EXPECTS_ITEM.search(expects) and not re.match(r"none\s*:\s*\S", expects, re.IGNORECASE):
+        raise HarnessError(EXPECTS_HOW)
     task.record_brief({"goal": args.goal, "domains": domains, "method": method, "inputs": args.inputs,
-                       "constraints": args.constraints,
+                       "constraints": args.constraints, "expects": expects,
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
@@ -2977,6 +2991,8 @@ def build_parser() -> argparse.ArgumentParser:
                        ("--method", "how this kind of work is done well, from sources found and read first: "
                                     "`<technique or steps>: <url>; ...; searched: <queries>`"),
                        ("--inputs", "missing inputs and how you will get them (references, docs, data)"),
+                       ("--expects", "the choices the task leaves open and what the person who asked most likely "
+                                     "expects for each: `<choice>: <pick> - <why>; ...`, or `none: <why>`"),
                        ("--constraints", "the user's constraints, verbatim"),
                        ("--verify", "how the result will be checked, and against what"),
                        ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:

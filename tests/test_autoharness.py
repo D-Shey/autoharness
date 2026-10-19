@@ -1307,7 +1307,7 @@ def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
     return res and res["hookSpecificOutput"]["permissionDecision"]
 
 
-BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--constraints", "no generators",
+BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--expects", "none: the task settles every choice", "--constraints", "no generators",
          "--verify", "render and compare side by side", "--candidates", "svg-art: skip, it is a generator",
          "--gaps", "none: a browser and the shell cover every capability",
          "--fidelity", "stylised vector poster, not photographic"]
