@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 
 from autoharness import answers, cli, reviewers, runs
+from conftest import TEST_DOMAINS, TEST_METHOD
 from autoharness.env import Project
 
 PY = f'"{sys.executable}"'
 OK = f'{PY} -c "import json; print(42)"'
 FAIL = f'{PY} -c "import sys; print(7); sys.exit(3)"'
-BRIEF = ["brief", "--goal", "1 totals row added; 2 title fixed", "--inputs", "the report", "--expects", "none: the task settles every choice", "--constraints", "none",
+BRIEF = ["brief", "--goal", "1 totals row added; 2 title fixed", "--inputs", "the report", "--domains", TEST_DOMAINS, "--method", TEST_METHOD, "--expects", "none: the task settles every choice", "--constraints", "none",
          "--verify", "run the tests", "--candidates", "none", "--gaps", "none: tools at hand"]
 
 
@@ -456,7 +457,8 @@ def test_light_mode_on_a_visual_task_needs_a_reason(project, capsys):
 def test_args_file_from_stdin(project, capsys, monkeypatch):
     ah(capsys, project, "init", "fix the quarterly report")
     data = {"goal": "1 totals row added", "inputs": "the report", "constraints": "none", "verify": "tests",
-            "candidates": "none", "gaps": "none: tools at hand"}
+            "candidates": "none", "gaps": "none: tools at hand", "domains": TEST_DOMAINS, "method": TEST_METHOD,
+            "expects": "none: the task settles every choice"}
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(data).encode("utf-8"))))
     code, res = ah(capsys, project, "brief", "--args-file", "-")
     assert code == 0, res

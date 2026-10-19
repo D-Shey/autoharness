@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from autoharness import cli, evidence, recipes, registry
+from conftest import TEST_DOMAINS, TEST_METHOD
 from autoharness.catalog import Catalog
 from autoharness.env import HarnessError, Project, SkillRejected
 from autoharness.trust import scan_skill, score_registry_entry, score_skill
@@ -1307,7 +1308,7 @@ def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
     return res and res["hookSpecificOutput"]["permissionDecision"]
 
 
-BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--expects", "none: the task settles every choice", "--constraints", "no generators",
+BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--domains", TEST_DOMAINS, "--method", TEST_METHOD, "--expects", "none: the task settles every choice", "--constraints", "no generators",
          "--verify", "render and compare side by side", "--candidates", "svg-art: skip, it is a generator",
          "--gaps", "none: a browser and the shell cover every capability",
          "--fidelity", "stylised vector poster, not photographic"]
@@ -2216,7 +2217,8 @@ def test_args_file_carries_long_texts_without_shell_quoting(project, capsys, tmp
     cli_json(capsys, "--project", root, "init", "t")
     texts = {"goal": 'matches the "frame"; (no) $(rm -rf x) `tick`', "inputs": "-stills first",
              "constraints": "none", "verify": "side by side", "candidates": "none: x",
-             "gaps": "none: tools at hand", "review": "critic", "fidelity": None}
+             "gaps": "none: tools at hand", "review": "critic", "fidelity": None, "domains": TEST_DOMAINS,
+             "method": TEST_METHOD, "expects": "none: the task settles every choice"}
     f = tmp_path / "brief.json"
     f.write_text("﻿" + json.dumps(texts), "utf-8")
     code, res = cli_json(capsys, "--project", root, "brief", "--args-file", str(f))
