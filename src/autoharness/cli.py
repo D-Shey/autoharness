@@ -285,6 +285,9 @@ def cmd_init(args, project, catalog):
         task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
     if owner := agents.session_id(agent=project.agent_name):
         task._update_info(owner=owner)
+        # the user's own words: the agent may pass init a summary, and the brief quotes the user
+        if prompt := session_state(owner).get("prompt"):
+            task._update_info(prompt=prompt)
     if selected == "reviewed":
         task._update_info(profile="reviewed")
     result = {"status": "ok", "task_id": task.id, "dir": str(task.dir), "mode": selected}
@@ -974,8 +977,8 @@ def _check_constraints(text: str, task) -> None:
     made up ("no bash") rejects tools the user never ruled out."""
     if re.fullmatch(r"\W*none\b.*", text.strip(), re.IGNORECASE | re.DOTALL):
         return
-    said = _plain(" \n ".join([str(task.info().get("task", ""))] + [m.get("text", "")
-                                                                  for m in lessons.user_messages(task)]))
+    said = _plain(" \n ".join([str(task.info().get("task", "")), str(task.info().get("prompt", ""))]
+                              + [m.get("text", "") for m in lessons.user_messages(task)]))
     for piece in (p for p in text.split(";") if _plain(p)):
         if _plain(piece) not in said:
             raise HarnessError(
@@ -984,7 +987,7 @@ def _check_constraints(text: str, task) -> None:
                 "none. Facts about the environment (the OS, the shell, what is installed) go in --inputs, and the "
                 "tools and commands you choose are your decisions, not the user's constraints: candidates are "
                 "vetted against these words.")
-        if len(_plain(piece)) > len(_plain(str(task.info().get("task", "")))) / 2:
+        if len(_plain(piece)) > max(len(_plain(str(task.info().get(k, "")))) for k in ("task", "prompt")) / 2:
             raise HarnessError(
                 f"--constraints: `{piece.strip()[:80]}...` quotes most of the task, which is the goal, not a limit "
                 "on it. Quote only the user's words that rule something out or require it (a version, a library to "
@@ -1713,6 +1716,9 @@ def session_state(session_id: str) -> dict:
         return {}
 
 
+PROMPT_KEPT = 20000   # the prompt a session started with: the user's own words, which the brief quotes
+
+
 def set_session_state(session_id: str, **state) -> None:
     f = session_file(session_id)
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -2232,12 +2238,12 @@ def cmd_hook(args, project, catalog):
             if state in ("done", "waived") or active:
                 return 0
             if sid:   # the prompt that sets the task: some agents send it again on every step, and it is not a note
-                set_session_state(sid, **(saved_state | {"prompt": data.get("prompt", "")[:300]}))
+                set_session_state(sid, **(saved_state | {"prompt": data.get("prompt", "")[:PROMPT_KEPT]}))
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
             if not ctx:
                 return 0
             if sid:
-                set_session_state(sid, state="pending", prompt=data.get("prompt", "")[:300])
+                set_session_state(sid, state="pending", prompt=data.get("prompt", "")[:PROMPT_KEPT])
             out({"injectSteps": [{"ephemeralMessage": ctx}]} if agy else
                 {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
             return 0
