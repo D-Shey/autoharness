@@ -325,8 +325,34 @@ class Project:
         _write_json(self.state / "gateway.json", data)
 
     def gateway_active(self) -> bool:
-        return (self.agent.name in self.gateway_registry()["installed"]
-                and self.agent.mcp_store(self.root).has(GATEWAY_NAME))
+        return ((self.agent.name in self.gateway_registry()["installed"]
+                 and self.agent.mcp_store(self.root).has(GATEWAY_NAME)) or self.user_gateway_active())
+
+    def user_gateway_active(self) -> bool:
+        """The gateway in the agent's own MCP file: it serves whatever project the agent runs in, so a server
+        added to a new project works without restarting the agent."""
+        store = self.agent.user_mcp_store()
+        return bool(store) and store.has(GATEWAY_NAME)
+
+    def install_user_gateway(self, server: dict) -> Path:
+        store = self.agent.user_mcp_store()
+        if store is None:
+            raise HarnessError(f"autoharness does not know {self.agent.title}'s own MCP file: install the gateway "
+                               "per project with `autoharness gateway install`")
+        if store.has(GATEWAY_NAME):
+            raise HarnessError(f"{store.path} already has an MCP server named {GATEWAY_NAME!r}")
+        try:
+            store.add(GATEWAY_NAME, self.agent.translate(server)[0])
+        except AgentError as e:
+            raise HarnessError(str(e)) from e
+        return store.path
+
+    def uninstall_user_gateway(self) -> Path:
+        store = self.agent.user_mcp_store()
+        if store is None or not store.has(GATEWAY_NAME):
+            raise HarnessError(f"the gateway is not in {self.agent.title}'s own MCP file")
+        store.remove(GATEWAY_NAME, created_file=False, created_dir=False)
+        return store.path
 
     def install_gateway(self, server: dict) -> None:
         agent, reg = self.agent, self.gateway_registry()
@@ -433,6 +459,12 @@ class Task:
 
     def info(self) -> dict:
         return _read_json(self.dir / "task.json", {})
+
+    def about(self) -> str:
+        """What the task is, to match capabilities against: the text init got, and the prompt the session
+        started with (the user's own words, when the agent passed init a summary)."""
+        info = self.info()
+        return "\n".join(t for t in (str(info.get("task", "")), str(info.get("prompt", ""))) if t)
 
     @property
     def agent(self) -> Agent:

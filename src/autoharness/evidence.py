@@ -646,7 +646,7 @@ def record_check(task: Task, result: str, passed: bool, run: int | None = None,
 
 def _caps(catalog, task: Task) -> list:
     info = task.info()
-    names = {c.name for c, _ in catalog.classify(info.get("task", ""))} | set(info.get("capabilities", []))
+    names = {c.name for c, _ in catalog.classify(task.about())} | set(info.get("capabilities", []))
     return [catalog.capabilities[n] for n in sorted(names) if n in catalog.capabilities]
 
 
@@ -919,6 +919,17 @@ file format, an API) without fixing its exact form, check that form against the 
 the usual convention for it: an interface that only the author's own guess would call (arguments the
 task does not name, in an order it does not imply) while the task points to another is a major difference.
 """
+    # a requirement is what the person who asked wants; where the task's words leave a choice open, the
+    # critic judges it as that person would on first look, not by the reading the author picked
+    expects = brief.get("expects") or ""
+    expected = f"""
+Where the task leaves a choice open, judge the result as the person who asked would on first look,
+not by the reading the author picked. People take the plain, simple form for granted: what they see
+is what is there, nothing they did not ask for, clean and pleasant to look at. A result that is right
+only under the author's reading, or only once something the person would not do is done to it, is a
+major difference. The author's reading of the open choices: {expects or "(not recorded)"}
+Where you think the person would expect another pick, that is a difference: say which and why.
+"""
     disputed = "" if not dispute else f"""
 A previous critic listed these differences:
 {critics[-1]["diff"]}
@@ -1029,7 +1040,7 @@ Result to judge{whole}:
 The files that make the result (source, markup, code) are in the project directory: {task.project.root}
 Check the user's constraints there as well, not only in what the result shows.
 {DATA_NOT_INSTRUCTIONS}
-{interface}{disputed}{focused}{limited}
+{interface}{expected}{disputed}{focused}{limited}
 List the most important differences between the result and the reference / quality bar,
 most important first, at most 8, numbered 1., 2., ... with each point's tags on the same line. Look in particular at: {focus}.
 List only real differences, never what matches; if you find none, write "No differences." instead of a list.

@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 
 from autoharness import answers, cli, reviewers, runs
+from conftest import TEST_DOMAINS, TEST_METHOD
 from autoharness.env import Project
 
 PY = f'"{sys.executable}"'
 OK = f'{PY} -c "import json; print(42)"'
 FAIL = f'{PY} -c "import sys; print(7); sys.exit(3)"'
-BRIEF = ["brief", "--goal", "1 totals row added; 2 title fixed", "--inputs", "the report", "--constraints", "none",
+BRIEF = ["brief", "--goal", "1 totals row added; 2 title fixed", "--inputs", "the report", "--domains", TEST_DOMAINS, "--method", TEST_METHOD, "--expects", "none: the task settles every choice", "--constraints", "none",
          "--verify", "run the tests", "--candidates", "none", "--gaps", "none: tools at hand"]
 
 
@@ -404,7 +405,7 @@ def test_hook_leaves_alone_only_the_reviewer_of_a_pending_prompt(project, capsys
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
     nonce = answers.issue(project.task(), "critic", "result #1")
     call = {"hook_event_name": "PreToolUse", "session_id": "reviewer", "tool_name": "Bash",
-            "tool_input": {"command": "git diff"}}
+            "tool_input": {"command": "npm install"}}
     hook(capsys, monkeypatch, project, dict(call, hook_event_name="UserPromptSubmit", prompt="judge this work now"))
     for flag, passes in (("1", False), ("ah-000000000000", False), (nonce, True)):
         monkeypatch.setenv(reviewers.ENV_FLAG, flag)
@@ -444,19 +445,17 @@ def test_severity_labels_alone_do_not_make_two_points_the_same():
                                  "hair still too dark at the crown (major, fixable)")
 
 
-def test_light_mode_on_a_visual_task_needs_a_reason(project, capsys):
+def test_light_mode_on_a_visual_task_is_raised_to_full(project, capsys):
     task = "draw an SVG of the film scene matching the reference image"
     code, res = ah(capsys, project, "init", task, "--mode", "light")
-    assert code == 1 and "--light-reason" in res["error"]
-    code, res = ah(capsys, project, "init", task, "--mode", "light", "--light-reason", "a placeholder, no likeness")
-    assert code == 0
-    assert project.task().info()["light_reason"] == "a placeholder, no likeness"
+    assert code == 0 and project.task().info()["mode"] == "full"   # light is for chores, not work to match
 
 
 def test_args_file_from_stdin(project, capsys, monkeypatch):
     ah(capsys, project, "init", "fix the quarterly report")
     data = {"goal": "1 totals row added", "inputs": "the report", "constraints": "none", "verify": "tests",
-            "candidates": "none", "gaps": "none: tools at hand"}
+            "candidates": "none", "gaps": "none: tools at hand", "domains": TEST_DOMAINS, "method": TEST_METHOD,
+            "expects": "none: the task settles every choice"}
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(data).encode("utf-8"))))
     code, res = ah(capsys, project, "brief", "--args-file", "-")
     assert code == 0, res

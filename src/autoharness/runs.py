@@ -130,11 +130,15 @@ def latest_for(task: Task, purpose: str) -> dict | None:
 
 def brief_items(brief: dict) -> list[dict]:
     """The brief's goal and what it must preserve, split into numbered items: B1, B2, ... for the goal,
-    P1, P2, ... for what must keep working."""
+    P1, P2, ... for what must keep working, E1, E2, ... for what the person who asked expects where the task
+    leaves a choice open."""
     out = []
-    for prefix, key in (("B", "goal"), ("P", PRESERVE)):
+    for prefix, key in (("B", "goal"), ("P", PRESERVE), ("E", "expects")):
         parts, expected = [], 1
-        for line in (brief.get(key) or "").splitlines():
+        text = brief.get(key) or ""
+        if key == "expects":   # one choice per `;`, and `none: ...` names no choice
+            text = "" if re.match(r"\s*none\s*:", text, re.IGNORECASE) else "\n".join(text.split(";"))
+        for line in text.splitlines():
             found, expected = _numbered(line, expected)
             parts += found
         out += [{"id": f"{prefix}{i}", "text": p} for i, p in enumerate(parts, 1)]

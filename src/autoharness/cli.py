@@ -15,15 +15,16 @@ import shutil
 import sys
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 from pathlib import Path
 
 from autoharness import (__version__, agents, answers, approvals, config, egress, evidence, followups, history, lessons,
                          library, recipes, registry, reviewers, rulings, runs, text, vet)
 from autoharness.catalog import Catalog
-from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
-                             npx_stage_skill, parse_skill_spec, skill_dir)
-from autoharness.trust import curated_report, score_registry_entry, score_skill
+from autoharness.env import (GATEWAY_NAME, ContentChanged, HarnessError, Project, SkillRejected, Task,
+                             missing_tools, npx_stage_skill, parse_skill_spec, skill_dir)
+from autoharness.trust import curated_report, score_marketplace, score_registry_entry, score_skill
 
 EXIT_APPROVAL = 3
 VERIFY_KINDS = ("browser", "api", "api-client", "logs", "database")
@@ -42,9 +43,15 @@ def need_approval(what: str, report: dict) -> int:
 # --- resolution helpers -----------------------------------------------------
 
 def resolve_mcp(catalog: Catalog, name: str) -> tuple[dict, str]:
-    """Curated short names win; otherwise the name must be an exact MCP registry server name."""
+    """Curated short names win; then `claude-plugins-official/<plugin>` from Anthropic's marketplace;
+    otherwise the name must be an exact MCP registry server name."""
     if name in catalog.mcp_servers:
         return curated_report(name, catalog.mcp_servers[name]).to_dict(), "catalog"
+    if name.startswith(registry.MARKETPLACE_PREFIX):
+        found = registry.get_marketplace(name)
+        if not found:
+            raise HarnessError(f"{name!r} is not in Anthropic's plugin marketplace: `autoharness search mcp <query>`")
+        return score_marketplace(name, found["plugin"], found["servers"]).to_dict(), "claude-plugins-official"
     entry = registry.get_mcp(name)
     if not entry:
         raise HarnessError(f"{name!r} is neither a curated server ({', '.join(catalog.mcp_servers)}) nor in the MCP registry")
@@ -109,21 +116,53 @@ def discovery_queries(catalog: Catalog, task_text: str) -> list[str]:
     return list(dict.fromkeys(q for q in queries if q.strip()))[:DISCOVERY_QUERIES]
 
 
+def search_mcp_sources(catalog: Catalog, query: str, limit: int, timeout: float = 8.0) -> tuple[list[dict], list[str]]:
+    """MCP servers for a query, as trust reports with a description: Anthropic's curated plugin marketplace
+    first (one fast file), then the official registry, whose search can take longer than a budget allows.
+    Both sources, and each plugin's server file, are fetched at once; one source failing leaves the other's
+    results: (results, the errors)."""
+    fetch = lambda url: registry.quick_get_json(url, timeout)  # noqa: E731
+
+    def from_marketplace() -> list[dict]:
+        plugins = registry.search_marketplace(query, limit=limit * 2, fetch=fetch)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            servers = list(pool.map(lambda p: registry.marketplace_servers(p, fetch), plugins))
+        return [score_marketplace(registry.MARKETPLACE_PREFIX + p["name"], p, found).to_dict()
+                | {"description": p.get("description", "")} for p, found in zip(plugins, servers) if found][:limit]
+
+    def from_registry() -> list[dict]:
+        found = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict()
+                 | {"description": e["server"].get("description", "")}
+                 for e in registry.search_mcp(query, limit=limit, fetch=fetch)]
+        return sorted(found, key=lambda r: r["score"], reverse=True)
+
+    results, errors = [], []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = [("claude-plugins-official", pool.submit(from_marketplace)),
+                ("registry.modelcontextprotocol.io", pool.submit(from_registry))]
+        for source, job in jobs:
+            try:
+                results += job.result()
+            except Exception as e:  # noqa: BLE001 - one failed source must not hide the other
+                errors.append(f"{source}: {e}")
+    return results, errors
+
+
 def _search(catalog: Catalog, kind: str, query: str) -> dict:
-    fetch = lambda url: registry.http_get_json(url, timeout=8, retries=0)  # noqa: E731
+    fetch = lambda url: registry.quick_get_json(url, 8)  # noqa: E731
     try:
         if kind == "skill":
             found = [score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict() | {"installs": r["installs"]}
                      for r in registry.search_skills(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
             found.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
             results = [{"name": r["name"], "score": r["score"], "level": r["level"], "installs": r["installs"]} for r in found]
-        else:
-            results = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict()
-                       | {"description": e["server"].get("description", "")[:140]}
-                       for e in registry.search_mcp(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
-            results = [{"name": r["name"], "score": r["score"], "level": r["level"], "description": r["description"]}
-                       for r in sorted(results, key=lambda r: r["score"], reverse=True)]
-        return {"kind": kind, "query": query, "results": results}
+            return {"kind": kind, "query": query, "results": results}
+        found, errors = search_mcp_sources(catalog, query, DISCOVERY_RESULTS)
+        if errors and not found:
+            return {"kind": kind, "query": query, "error": "; ".join(errors)}
+        results = [{"name": r["name"], "score": r["score"], "level": r["level"], "description": r["description"][:140]}
+                   for r in found]
+        return {"kind": kind, "query": query, "results": results} | ({"partial": errors} if errors else {})
     except Exception as e:  # noqa: BLE001 - one failed source must not stop init
         return {"kind": kind, "query": query, "error": str(e)}
 
@@ -202,16 +241,35 @@ LEVELS = ("light", "full", "reviewed")
 def cmd_init(args, project, catalog):
     if args.profile and args.mode:
         raise HarnessError("use either --profile or --mode, not both")
-    classified = catalog.classify(args.task)
+    # the user's own words too: an agent may pass init a summary that drops what the task needs ("browser")
+    sid = agents.session_id(agent=project.agent_name)
+    prompt = session_state(sid).get("prompt", "") if sid else ""
+    about = "\n".join(t for t in (args.task, prompt) if t)
+    classified = catalog.classify(about)
     # --profile is the older spelling of the same levels
     selected = ({"quick": "light", "standard": "full", "reviewed": "reviewed"}[args.profile] if args.profile
                 else args.mode or "full")
     if selected == "auto":
         selected = "full" if classified else "light"
+    requested = selected
     floor, floor_source = config.resolve(project.root, "min_mode")
     raised = floor != "any" and LEVELS.index(selected) < LEVELS.index(floor)
     if raised:
         selected = floor   # the user's setting, not the agent's judgement, sets the lowest level
+    # the same task started again: it does not restart below the level it was started at, or a brief that is
+    # hard to write is escaped by ending the task and starting it light
+    before = _earlier_level(project, args.task)
+    restarted = before and LEVELS.index(selected) < LEVELS.index(before)
+    if restarted:
+        selected = before
+    # light is for chores: a task that needs any capability of the catalog (an API, a browser, tests, debugging,
+    # a reference) is not one, whatever the agent chose; skipping the harness altogether is the user's call (waive)
+    # A routine is still a chore: a skill the agent has, named in the task, or the same task run light before
+    needs = [c.name for c, _ in classified]
+    routine = selected == "light" and bool(needs) and _routine(project, args.task)
+    lightened = selected == "light" and bool(needs) and not routine
+    if lightened:
+        selected = "full"
     mode = "light" if selected == "light" else "full"
     checked = [c.name for c, _ in classified if c.requires]
     # an image to match is the case agents skip most (drawing from memory): light mode has to be argued for
@@ -225,17 +283,30 @@ def cmd_init(args, project, catalog):
             "\"<why no reference is needed>\"`")
     check_owner(project, project.active_id())
     task = project.init_task(args.task, mode=mode)
+    task._update_info(requested=requested)
     if mode == "light" and visual:
         task._update_info(light_reason=light_reason)
         task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
-    if owner := agents.session_id(agent=project.agent_name):
+    if owner := sid:
         task._update_info(owner=owner)
+        if prompt:   # the user's own words: the agent may pass init a summary, and the brief quotes the user
+            task._update_info(prompt=prompt)
     if selected == "reviewed":
         task._update_info(profile="reviewed")
     result = {"status": "ok", "task_id": task.id, "dir": str(task.dir), "mode": selected}
     if raised:
         result["mode_raised"] = f"to {floor} by the min_mode setting ({floor_source})"
         task.log(f"mode raised to {floor} by the min_mode setting ({floor_source})")
+    if lightened:
+        result["mode_raised"] = (f"to full: the task needs {', '.join(needs)}, and light mode is for chores that "
+                                 "need none (a typo, a commit). Prepare as full mode asks")
+        task.log(f"light raised to full: the task needs {', '.join(needs)}")
+    if routine:
+        task.log(f"light kept although the task needs {', '.join(needs)}: {routine}")
+    if restarted:
+        result["mode_raised"] = (f"to {before}: this task was started at that level before, and starting it again "
+                                 "does not lower it. Do what the earlier start asked for (its brief) instead")
+        task.log(f"mode raised to {before}: the same task was started at that level before")
     if mode == "light":
         # everything else init prints serves discovery: light mode does none, so it would only fill the context
         if classified:
@@ -263,14 +334,14 @@ def cmd_init(args, project, catalog):
                 if rec := lessons.record(kind, item["name"]):   # earlier tasks only, before this offer counts
                     item["record"] = rec
                 lessons.bump(kind, item["name"], "offered")
-        result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
+        result["discovered"] = discovered = discover(catalog, about, recipe_queries(matches))
         task.record_discovery(discovered)
         if rejected := rejected_before(project, task.id, result):
             result["rejected_before"] = rejected
         result["next"] = (
         "Read `discovered`: these skills and MCP servers were found for this task. Search more with "
         "`autoharness search mcp|skill \"<query>\"` where it falls short. Then record "
-        "`autoharness brief --goal ... --inputs ... --constraints ... --verify ... --candidates ...`, "
+        "`autoharness brief --goal ... --inputs ... --expects ... --constraints ... --verify ... --candidates ...`, "
         "with a take/skip verdict and reason for each candidate worth considering, and `--gaps`: for each "
         "capability no found skill covers, `create <skill-name>: <capability>` (you write that skill before "
         "producing the result), or `none: <why tools at hand cover it>`. Tools that do work stay blocked until "
@@ -365,11 +436,13 @@ def cmd_need(args, project, catalog):
 
 def cmd_search(args, project, catalog):
     if args.kind == "mcp":
-        results = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict() | {"description": e["server"].get("description", "")}
-                   for e in registry.search_mcp(args.query, limit=args.limit)]
+        found, errors = search_mcp_sources(catalog, args.query, args.limit, timeout=20)
+        if errors and not found:
+            raise HarnessError("; ".join(errors))
         curated = [curated_report(n, e).to_dict() for n, e in catalog.mcp_servers.items() if args.query.lower() in n]
-        results = curated + sorted(results, key=lambda r: r["score"], reverse=True)
+        results = curated + found
     else:
+        errors = []
         results = []
         for r in registry.search_skills(args.query, limit=args.limit):
             rep = score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict()
@@ -377,7 +450,7 @@ def cmd_search(args, project, catalog):
         results.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
     if project.active_id():
         project.task().note_search(args.kind, args.query, [r["name"] for r in results[:DISCOVERY_RESULTS]])
-    out({"query": args.query, "kind": args.kind, "results": results})
+    out({"query": args.query, "kind": args.kind, "results": results} | ({"partial": errors} if errors else {}))
     return 0
 
 
@@ -548,6 +621,8 @@ def cmd_review(args, project, catalog):
     pair = task.info().get("comparisons", {}).get(answer["id"]) if answer else None
     if pair and (cmp := evidence.compared(pair, answer["closer"])):
         extra["compared"] = cmp
+    if args.by == "critic":
+        extra["skill_sources"] = sorted(_skill_sources(task))  # what the skills cited when this review came in
     item = evidence.review(task, diff, worst, args.by, args.settled, extra | ({"warnings": warnings} if warnings else {}))
     for point in item.get("settled", []):
         rulings.add(project, point, "critic", task.id)   # later tasks in the project are told as well
@@ -616,8 +691,9 @@ def cmd_review(args, project, catalog):
         return EXIT_APPROVAL
     if item["fixable"]:
         nxt = (("First research each point your skills do not already teach: how that part is done well, from "
-                "sources you search and read, written into the skill with its source (the next result is refused "
-                "until a skill of this task changes). " if item["by"] == "critic" and task.skills_lock() else "")
+                "pages you search and read, written into the skill with the page's address; and, with a reference, "
+                "measure the parts the critic names from it and add that as facts (the next result is refused "
+                "until a skill cites a new page and the new facts are in). " if item["by"] == "critic" else "")
                + "Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
                "close-ups of the parts in question), and review again. If you believe a critic point is wrong, "
                "do not drop it yourself: add a close-up and run `autoharness critic --dispute \"<the point>\"`.")
@@ -856,36 +932,139 @@ def _unresearched_review(task) -> str | None:
     last = reviews[-1]
     if any(e["kind"] == "result" and e["n"] > (last.get("result") or 0) for e in info.get("evidence", [])):
         return None  # the round after this review already has its result
-    skills = [task.skills_dir / name / "SKILL.md" for name in task.skills_lock()]
-    if not skills:
+    owed = []
+    if task.skills_lock() and "skill_sources" in last and not (_skill_sources(task) - set(last["skill_sources"])):
+        owed.append(
+            "find out how each point is done well before fixing it. For every point your skills do not already teach "
+            "(how to build that part, the technique, the known pitfalls), search for it (the web, docs, worked "
+            "examples, `autoharness search skill \"<query>\"`), read the best sources and write the technique into "
+            "the skill it belongs to (" + ", ".join(task.skills_lock()) + ") or a new one (`autoharness skill new`), "
+            "with the address of the page you took it from (a page, not a site's front page). The critic's words "
+            "restated as rules are not research: a skill counts as changed when it cites a source it did not cite "
+            "at the review")
+    refs = [e["n"] for e in info.get("evidence", []) if e["kind"] == "reference"]
+    if refs and not any(e["kind"] == "facts" and e["n"] > (last.get("result") or 0)
+                        for e in info.get("evidence", [])):
+        owed.append(
+            "take the parts the critic names from the reference itself before you rebuild them: for each, measure "
+            "it with a tool (crop it, lay a grid over it, read off the coordinates of its outline and key points, "
+            "its proportions; for data or code, the exact values and output), save that to a file and `autoharness "
+            "evidence add <file> --kind facts`, then build the part through those points, not by eye")
+    if not owed:
         return None
-    try:
-        since = time.mktime(time.strptime(last["time"], "%Y-%m-%dT%H:%M:%S"))
-    except (KeyError, ValueError):
-        return None
-    if any(p.is_file() and p.stat().st_mtime > since for p in skills):
-        return None
-    return ("the critic found blocking problems: before fixing them, find out how each is done well. For every "
-            "point your skills do not already teach (how to build that part, the technique, the known pitfalls), "
-            "search for it (the web, docs, worked examples, `autoharness search skill \"<query>\"`), read the best "
-            "sources and write the technique with its source into the skill it belongs to ("
-            + ", ".join(task.skills_lock()) + "), or a new one (`autoharness skill new`). Then fix by it and add "
-            "the result.")
+    return "the critic found blocking problems. Before the next result: " + "; and ".join(owed) + "."
 
 
-def _skills_not_installed(project, task) -> list[str]:
-    """The skills the brief's areas are covered by that are neither installed for this task, kept in the project,
-    nor in the user's library: an area is covered by a skill in use, not by its name."""
-    have = set(task.skills_lock()) | set(project.kept()["skills"])
+SOURCE = re.compile(r"https?://[^\s/)\]>\"'`]+/[^\s)\]>\"'`]*[\w-][^\s)\]>\"'`]*")
+
+
+def _skill_sources(task) -> set[str]:
+    """The page addresses the task's skills cite (a page: a site's front page alone cites nothing)."""
+    found: set[str] = set()
+    for name in task.skills_lock():
+        md = task.skills_dir / name / "SKILL.md"
+        if md.is_file():
+            found |= {u.rstrip(".,;:") for u in SOURCE.findall(md.read_text("utf-8", errors="replace"))}
+    return found
+
+
+def _plain(text: str) -> str:
+    """Text compared for quoting: case, quote marks, punctuation at the ends and runs of spaces do not count."""
+    text = re.sub(r"[\"'`«»“”„‘’]", "", text.lower())
+    return re.sub(r"\s+", " ", text).strip(" .,;:!?")
+
+
+def _check_constraints(text: str, task) -> None:
+    """The brief's constraints are the user's own words: each, between `;`, is quoted from the task or from what
+    the user wrote since, or the whole is `none`. Candidates are vetted against them, so a constraint the agent
+    made up ("no bash") rejects tools the user never ruled out."""
+    if re.fullmatch(r"\W*none\b.*", text.strip(), re.IGNORECASE | re.DOTALL):
+        return
+    said = _plain(" \n ".join([str(task.info().get("task", "")), str(task.info().get("prompt", ""))]
+                              + [m.get("text", "") for m in lessons.user_messages(task)]))
+    for piece in (p for p in text.split(";") if _plain(p)):
+        if _plain(piece) not in said:
+            raise HarnessError(
+                f"--constraints are the user's own words, quoted: `{piece.strip()}` is not in the task or in what "
+                "the user wrote. Quote each constraint as the user put it, separated by `;`, or `none` if they set "
+                "none. Facts about the environment (the OS, the shell, what is installed) go in --inputs, and the "
+                "tools and commands you choose are your decisions, not the user's constraints: candidates are "
+                "vetted against these words.")
+        if len(_plain(piece)) > max(len(_plain(str(task.info().get(k, "")))) for k in ("task", "prompt")) / 2:
+            raise HarnessError(
+                f"--constraints: `{piece.strip()[:80]}...` quotes most of the task, which is the goal, not a limit "
+                "on it. Quote only the user's words that rule something out or require it (a version, a library to "
+                "use or avoid, offline, a deadline), or `none` if they set none.")
+
+
+def _skills_not_installed(project, task, templates: bool = True) -> list[str]:
+    """The skills and MCP servers the brief's areas are covered by that are not installed (for this task, kept in
+    the project, in the user's library, or already in the agent's config): an area is covered by what is in use,
+    not by its name. `templates` also names generated skills still left unfilled."""
+    lock = task.skills_lock()
+    have = set(lock) | set(project.kept()["skills"]) | {p.parent.name for p in _agent_skills(project)}
     missing = []
+    for name, entry in (lock.items() if templates else ()):
+        skill_md = task.skills_dir / name / "SKILL.md"
+        if (entry.get("source") == "generated" and name not in task.info().get("planned_skills", [])
+                and skill_md.is_file() and library.FILL_MARKER in skill_md.read_text("utf-8")):
+            missing.append(f"skill `{name}` is still an unfilled template: fill in every section from the sources "
+                           "you read before it counts for an area")
     for entry in task.info().get("brief", {}).get("domains", "").split(";"):
         m = DOMAIN.match(entry.strip())
         if m and m["how"].lower() == "skill":
             name = m["name"].split("@")[-1]
-            if name not in have and not library.exists(name):
+            if name not in have and not library.exists(name) and name not in task.info().get("planned_skills", []):
                 missing.append(f"area `{m['area'].strip()}` is covered by skill `{m['name']}`, not installed: "
-                               f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`")
+                               f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`; if it "
+                               "cannot be installed or vetting rejects it, record the brief again with another "
+                               "candidate from your searches for that area, or `create` a skill for it")
+        elif m and m["how"].lower() == "mcp":
+            name = local_mcp_name(m["name"])
+            stores = [project.agent.mcp_store(project.root), project.agent.user_mcp_store()]
+            if not (name in task.mcp_lock() or name in project.kept()["mcp"]
+                    or any(s is not None and s.has(name) for s in stores)):
+                missing.append(f"area `{m['area'].strip()}` is covered by MCP server `{m['name']}`, not installed: "
+                               f"`autoharness inspect mcp {m['name']}`, then `autoharness add mcp {m['name']}`, and "
+                               "use it (through harness_call when it was added through the gateway); if it cannot "
+                               "be installed, record the brief again with another server from your searches")
     return missing
+
+
+def _mcp_not_used(project, task) -> list[str]:
+    """The MCP servers the brief covers an area with that were installed but never called since this task added
+    them (or, for one it found installed, since the task started): installing a server to pass teardown is not
+    using it. Calls are counted by the gateway and, for servers in the agent's own config, by the hook."""
+    from autoharness.gateway import calls
+    made, lock, info = calls(project.root), task.mcp_lock(), task.info()
+    unused = []
+    for entry in info.get("brief", {}).get("domains", "").split(";"):
+        m = DOMAIN.match(entry.strip())
+        if not (m and m["how"].lower() == "mcp"):
+            continue
+        name = local_mcp_name(m["name"])
+        stores = [project.agent.mcp_store(project.root), project.agent.user_mcp_store()]
+        if not (name in lock or name in project.kept()["mcp"] or any(s is not None and s.has(name) for s in stores)):
+            continue   # not installed at all: _skills_not_installed says so
+        since = lock.get(name, {}).get("added") or info.get("created", "")
+        if made.get(name, {}).get("last", "") < since:
+            unused.append(f"area `{m['area'].strip()}` is covered by MCP server `{m['name']}`, which was never called "
+                          "in this task: do the work for that area with it (" +
+                          ("harness_tools, then harness_call" if lock.get(name, {}).get("via") == "gateway" else
+                           "its own tools") + ") and check the result again; if it cannot do the job, say why and "
+                          "record the brief again with another server")
+    return unused
+
+
+EXPECTS_ITEM = re.compile(r"\S\s*:\s*\S.*\S\s+(?:-|—|because|since)\s+\S", re.IGNORECASE)
+EXPECTS_HOW = (
+    "--expects must name the choices the task leaves open and, for each, what the person who asked most likely "
+    "expects: `<open choice>: <your pick> - <why they would expect it>; ...`, or `none: <why the task's words "
+    "settle every choice>`. A requirement is what that person wants; where the words leave a choice open (a format, "
+    "a value or a formula, what a column holds, where the output goes) and they cannot be asked, pick what they "
+    "would take for granted on first look: the plain, simple form, where what they see is what is there, nothing "
+    "they did not ask for, clean and pleasant to look at. A choice a tool's or skill's advice makes for you is still "
+    "your choice: check it against what they would expect.")
 
 
 def cmd_brief(args, project, catalog):
@@ -900,13 +1079,22 @@ def cmd_brief(args, project, catalog):
                            "or start with `none:` and say why the tools at hand cover every capability")
     for name in planned:
         library.validate_name(name)
+    _check_constraints(args.constraints, task)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
+    live = [c.name for c, _ in catalog.classify(task.about()) if c.interactive]
+    if live and not any((m := DOMAIN.match(e.strip())) and m["how"].lower() == "mcp" for e in domains.split(";")):
+        raise HarnessError(
+            f"the task needs {', '.join(live)}: you have to see and operate it live, step by step, and a skill is "
+            "know-how, not a tool for that, while a script written blind does not show you what is on screen. Cover "
+            "it with an MCP server: `autoharness search mcp \"<query>\"`, then `<area>: mcp <name> (searched: "
+            "<query>)` in --domains and `<name>: take, <why>` in --candidates. Skills may cover other areas.")
     method = args.method.strip()
-    if "searched:" not in method.lower() or not (re.search(r"https?://", method)
+    if "searched:" not in method.lower() or not (SOURCE.search(method)
                                                  or re.search(r"nothing usable", method, re.IGNORECASE)):
         raise HarnessError(
             "--method must say how this kind of work is done well, from sources you found and read before starting, "
-            "not from memory: `<technique or steps>: <url>; ...; searched: <queries>`. Search the web (and the docs, "
+            "not from memory: `<technique or steps>: <url of the page you read, not a site's front page>; ...; "
+            "searched: <queries>`. Search the web (and the docs, "
             "papers, repos, tutorials of the field) for how others solved it: the algorithm, the workflow, the "
             "pitfalls. Only if nothing usable turned up: `nothing usable; searched: <queries>`.")
     if evidence.requirements(catalog, task).get("media") and not (args.fidelity or "").strip():
@@ -915,8 +1103,11 @@ def cmd_brief(args, project, catalog):
             "poster: composition, palette, mood and poses read at a glance; not photographic likeness\"). "
             "Without it a critic judges against the reference itself, which a different medium never reaches, "
             "and every round stays major")
+    expects = args.expects.strip()
+    if not EXPECTS_ITEM.search(expects) and not re.match(r"none\s*:\s*\S", expects, re.IGNORECASE):
+        raise HarnessError(EXPECTS_HOW)
     task.record_brief({"goal": args.goal, "domains": domains, "method": method, "inputs": args.inputs,
-                       "constraints": args.constraints,
+                       "constraints": args.constraints, "expects": expects,
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
@@ -1078,6 +1269,12 @@ def cmd_vet(args, project, catalog):
     if not vet.constraints(task):
         raise HarnessError("the brief records no constraints to vet against; record `autoharness brief "
                            "--constraints \"<the user's words>\"` first (or there is nothing to vet)")
+    if args.verdict and not args.answer_file and _reviewer_can_start(project.agent.name):
+        # a retold verdict cannot be told from the author's own: where a reviewer can be started, it answers itself
+        raise HarnessError(f"the vet verdict comes from a reviewer that did not pick this candidate, not from you: "
+                           f"`autoharness vet {args.kind} {args.name} --run {project.agent.name}` starts one and records "
+                           "its answer (or give the prompt to a fresh subagent and pass its saved answer with "
+                           "--answer-file)")
     if args.answer_file or args.verdict:
         subject = f"{args.kind}:{args.name}"
         answer = read_answer(task, args.answer_file, "vet", vet.VERDICTS, subject) if args.answer_file else None
@@ -1108,10 +1305,23 @@ def cmd_vet(args, project, catalog):
         vet.note_pending(task, "skill", args.name, digest)
     nonce = answers.issue(task, "vet", f"{args.kind}:{args.name}")
     text = vet.prompt(task, args.kind, args.name, content) + answers.instruction(nonce)
-    out({"status": "ok", "prompt": text, "answer_id": nonce, "prompt_file": evidence.save_prompt(task, "vet", text),
+    prompt_file = evidence.save_prompt(task, "vet", text)
+    if args.run:  # an agent with no subagents of its own: autoharness starts the reviewer, read-only
+        answer_file = task.dir / "answers" / f"run-vet-{nonce}.txt"
+        answer_file.parent.mkdir(exist_ok=True)
+        try:
+            reviewers.run(args.run, project.root, Path(prompt_file), answer_file, args.timeout, nonce)
+        except HarnessError as e:
+            raise HarnessError(f"{e}. Give the prompt in {prompt_file} to a reviewer yourself and record its "
+                               f"answer with `autoharness vet {args.kind} {args.name} --answer-file <file>`") from e
+        task.log(f"vet of {args.name} run by {args.run} (answer {nonce})")
+        args.answer_file, args.run = str(answer_file), None
+        return cmd_vet(args, project, catalog)
+    out({"status": "ok", "prompt": text, "answer_id": nonce, "prompt_file": prompt_file,
          "next": "Give `prompt` to a fresh subagent that did not pick this candidate (Claude Code: the Agent tool), "
                  "unchanged. Save its answer unedited to a file and record it: `autoharness vet "
-                 f"{args.kind} {args.name} --answer-file <file>`."})
+                 f"{args.kind} {args.name} --answer-file <file>`. No subagents at hand? `autoharness vet "
+                 f"{args.kind} {args.name} --run claude|codex|agy` starts the reviewer and records its answer."})
     return 0
 
 
@@ -1216,6 +1426,10 @@ def cmd_teardown(args, project, catalog):
     if info.get("mode", "full") == "full" or info.get("brief", {}).get("review") in evidence.REVIEWS \
             or info.get("profile") == "reviewed":
         blocking += evidence.problems(catalog, task)
+    if info.get("mode", "full") != "light" and info.get("brief"):
+        # what the brief said covers each area is in use, whether or not a result was ever recorded
+        blocking += [p for p in _skills_not_installed(project, task) if p not in blocking]
+        blocking += _mcp_not_used(project, task)
     blocking += runs.problems(task)
     if args.accepted:
         task._update_info(accepted_by_user=args.accepted)
@@ -1305,7 +1519,18 @@ def cmd_gateway(args, project, catalog):
         from autoharness.gateway import serve
         return serve(project.root)
     agent = project.agent
-    if args.action == "install":
+    if args.action == "install" and args.user:
+        # no --project: the gateway serves the project the agent runs in, found from its working directory
+        path = project.install_user_gateway({"command": sys.executable, "args": ["-m", "autoharness", "gateway",
+                                                                                  "serve"]})
+        out({"status": "ok", "installed": agent.name, "file": str(path),
+             "next": f"One last restart: ask the user to {agent.reload_hint}. After that, in every project, servers "
+                     "added with `add mcp` are available at once through harness_tools / harness_call."})
+    elif args.action == "uninstall" and args.user:
+        path = project.uninstall_user_gateway()
+        out({"status": "ok", "uninstalled": agent.name, "file": str(path),
+             "next": f"Ask the user to {agent.reload_hint} to drop the gateway."})
+    elif args.action == "install":
         server = {"command": sys.executable, "args": ["-m", "autoharness", "--project", str(project.root),
                                                        "gateway", "serve"]}
         project.install_gateway(server)
@@ -1323,7 +1548,8 @@ def cmd_gateway(args, project, catalog):
         state_file = project.state / "gateway.state.json"
         state = json.loads(state_file.read_text("utf-8")) if state_file.exists() else None
         unapproved = unapproved_servers(project)
-        out({"installed": project.gateway_active(), "agents": reg["installed"], "servers": sorted(reg["servers"]),
+        out({"installed": project.gateway_active(), "user": project.user_gateway_active(),
+             "agents": reg["installed"], "servers": sorted(reg["servers"]),
              "unapproved": unapproved, "running": state and state.get("servers"),
              "state_updated": state and state.get("updated")}
             | ({"next": "The gateway does not run unapproved servers (gateway.json may come from a pull). "
@@ -1539,6 +1765,9 @@ def session_state(session_id: str) -> dict:
         return {}
 
 
+PROMPT_KEPT = 20000   # the prompt a session started with: the user's own words, which the brief quotes
+
+
 def set_session_state(session_id: str, **state) -> None:
     f = session_file(session_id)
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -1604,6 +1833,11 @@ def cmd_claim(args, project, catalog):
         raise HarnessError("no agent session id in the environment: pass it, `autoharness claim <session id>`")
     info = task.info()
     previous = info.get("owner")
+    mine = session_state(me)
+    if os.environ.get(reviewers.ENV_FLAG) or (mine.get("state") == "reviewer"
+                                              and mine.get("reviews") in _pending_answers(info)):
+        raise HarnessError("this session was given a review prompt of this task: a reviewer answers it and does not "
+                           "take the task over. Write the answer the prompt asks for and stop.")
     if previous == me:
         out({"status": "ok", "task_id": task.id, "owner": me, "next": "This session already owns the task."})
         return 0
@@ -1766,7 +2000,21 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
     while tool == "Bash" and last and ENV_PREFIX.match(last[0]):
         last = last[1:]
     return (all(len(c) == 2 and c[0] == "cd" for c in prefix)
-            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last)))
+            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last) or _reads_only(last)))
+
+
+READERS = {"ls", "dir", "pwd", "tree", "cat", "head", "tail", "type", "get-childitem", "gci", "get-location",
+           "get-content", "gc", "get-item", "test-path", "resolve-path"}
+GIT_READERS = {"status", "log", "diff", "show", "ls-files", "branch", "remote", "rev-parse"}
+
+
+def _reads_only(words: list[str]) -> bool:
+    """A listing or reading of files (`ls`, `Get-ChildItem`, `cat`, `git status`): reading stays open before the
+    brief, and these only read. Redirection and chaining never reach here (`_plain_commands` refuses them)."""
+    if not words:
+        return False
+    head = words[0].lower()
+    return head in READERS or (head == "git" and len(words) > 1 and words[1].lower() in GIT_READERS)
 
 
 def _looks_up_autoharness(words: list[str]) -> bool:
@@ -1863,6 +2111,60 @@ def _autoharness_words(tool: str, tool_input: dict) -> list[str]:
 
 
 # Flags that end a task on the user's word: the agent may pass them only after the user said something in the task
+def _earlier_level(project, text: str) -> str | None:
+    """The highest level this project started the same task text at before, if it did."""
+    found = None
+    for info_path in (project.state / "tasks").glob("*/task.json"):
+        try:
+            info = json.loads(info_path.read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        if info.get("task", "").strip() != text.strip():
+            continue
+        level = "reviewed" if info.get("profile") == "reviewed" else info.get("mode", "full")
+        if level in LEVELS and (found is None or LEVELS.index(level) > LEVELS.index(found)):
+            found = level
+    return found
+
+
+def _agent_skills(project, plugins: bool = True) -> list[Path]:
+    """The SKILL.md files the agent loads on its own: the project's and the user's skills, and its plugins'."""
+    agent = agents.get(project.agent_name)
+    found = [p for d in (agent.skills_path(project.root), agent.user_skills_path()) if d.is_dir()
+             for p in d.glob("*/SKILL.md")]
+    plugin_dir = agent.user_skills_path().parent / "plugins"
+    if plugins and plugin_dir.is_dir():
+        found += [p for p in plugin_dir.rglob("SKILL.md") if p.parent.parent.name == "skills"]
+    return found
+
+
+def _routine(project, text: str) -> str | None:
+    """Why a task is a routine the agent already knows how to do, or None: a skill it has is named in the task
+    text, or this project ran the same task (times and other numbers aside) in light mode before."""
+    # plugins bring generic skills (`pdf`, `debugging`) a task names in passing; the user's own are routines
+    for skill_md in _agent_skills(project, plugins=False) + (list(library.root().glob("*/SKILL.md"))
+                                                             if library.root().is_dir() else []):
+        if re.search(rf"(?<![\w-]){re.escape(skill_md.parent.name)}(?![\w-])", text, re.IGNORECASE):
+            return f"it names the skill `{skill_md.parent.name}` the agent has"
+    same = re.sub(r"\d+", "#", " ".join(text.split()).lower())
+    for info_path in (project.state / "tasks").glob("*/task.json"):
+        try:
+            info = json.loads(info_path.read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        # the level the agent asked for, not the one init raised it to: a routine raised once by mistake stays one
+        requested = info.get("requested")
+        if requested is None:   # recorded before `requested` was: the log says when light was raised
+            log = info_path.parent / "harness.md"
+            requested = ("light" if info.get("mode") == "light" or (log.is_file() and "light raised to full"
+                                                                   in log.read_text("utf-8", errors="replace"))
+                         else info.get("mode"))
+        if (requested == "light" and info.get("profile") != "reviewed"
+                and re.sub(r"\d+", "#", " ".join(str(info.get("task", "")).split()).lower()) == same):
+            return "the same task was started light in this project before"
+    return None
+
+
 USER_FLAGS = ("--accepted", "--force")
 
 
@@ -1960,6 +2262,14 @@ def cmd_hook(args, project, catalog):
         reviewer = task_info.get("answer_ids", {}).get(os.environ.get(reviewers.ENV_FLAG, ""), {})
         if reviewer and not reviewer.get("used") and not reviewer.get("retired"):
             return 0   # the reviewer `critic --run` started for its pending prompt: read-only, no task of its own
+        if active and sid and sid != task_info.get("owner"):
+            # a subagent the author gave a pending prompt to: it reviews the task, it does not own or take it
+            told = str(data.get("prompt", "")) if event == "UserPromptSubmit" else ""
+            if saved_state.get("state") == "reviewer" and saved_state.get("reviews") in _pending_answers(task_info):
+                return 0
+            if told and (reviews := _reviewer_prompt(told, active, task_info)):
+                set_session_state(sid, state="reviewer", reviews=reviews, prompt=told[:PROMPT_KEPT])
+                return 0
         owner = task_info.get("owner")
         # the task belongs to another session: this one is told about it and stays gated until it claims it
         foreign = bool(active and sid and owner and owner != sid and task_info.get("status") == "active")
@@ -1970,7 +2280,7 @@ def cmd_hook(args, project, catalog):
                    "brief" if ready else "waiting")
             if state != wanted or saved_state.get("task_id") != active or saved_state.get("via", via) != via:
                 set_session_state(sid, state=wanted, task_id=active, via=via, told=saved_state.get("told"),
-                                  stop_seen=saved_state.get("stop_seen"))
+                                  stop_seen=saved_state.get("stop_seen"), prompt=saved_state.get("prompt"))
                 state = wanted
         if event == "Stop":
             return _stop_gate(data, sid, state, active, task_info)
@@ -1983,16 +2293,19 @@ def cmd_hook(args, project, catalog):
                 return 0
             if active and not foreign and state != "waived":
                 try:
-                    lessons.note_user_message(Task(project, active), str(data.get("prompt", "")))
+                    lessons.note_user_message(Task(project, active), str(data.get("prompt", "")),
+                                              started_by=saved_state.get("prompt"))
                 except OSError:
                     pass   # a lost note must never block the user's message
             if state in ("done", "waived") or active:
                 return 0
+            if sid:   # the prompt that sets the task: some agents send it again on every step, and it is not a note
+                set_session_state(sid, **(saved_state | {"prompt": data.get("prompt", "")[:PROMPT_KEPT]}))
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
             if not ctx:
                 return 0
             if sid:
-                set_session_state(sid, state="pending", prompt=data.get("prompt", "")[:300])
+                set_session_state(sid, state="pending", prompt=data.get("prompt", "")[:PROMPT_KEPT])
             out({"injectSteps": [{"ephemeralMessage": ctx}]} if agy else
                 {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
             return 0
@@ -2003,6 +2316,12 @@ def cmd_hook(args, project, catalog):
                           "will not give a different result. Change what you call (the command, its input, the "
                           "approach); if a tool, input or know-how is missing, `autoharness need <capability> "
                           "--reason \"<what blocks you>\"`; or stop and ask the user.")
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
+            # the key is never for tools, even in a call that looks like reading autoharness's own files
+            if (reason := _writes_records(tool, tool_input, project.root)) == KEY_DENIED:
                 out({"decision": "deny", "reason": reason} if agy else
                     {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                             "permissionDecisionReason": reason}})
@@ -2024,8 +2343,33 @@ def cmd_hook(args, project, catalog):
                     out({"decision": "deny", "reason": reason} if agy else
                         {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                 "permissionDecisionReason": reason}})
+                # a full task ended before its brief is dropped, and starting it again lighter escapes the brief
+                elif (active and not foreign and state != "waived"
+                        and _autoharness_subcommand(tool, tool_input) == "teardown"
+                        and not {"-h", "--help"} & set(_autoharness_words(tool, tool_input))
+                        and (info := Task(project, active).info()).get("mode", "full") != "light"
+                        and not info.get("brief") and not lessons.user_messages(Task(project, active))):
+                    reason = ("This task has no brief yet, and ending it now drops it: only the user decides that. "
+                              "If the brief is refused, do what its error says (quote the user's constraints or "
+                              "`none`; search for each area and take or create a skill). If you think the task "
+                              "needs no harness, stop and ask the user; `autoharness waive` takes their words.")
+                    out({"decision": "deny", "reason": reason} if agy else
+                        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                "permissionDecisionReason": reason}})
                 return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
             if reason := _writes_records(tool, tool_input, project.root):
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
+            if active and not foreign and (server := MCP_TOOL.match(tool)) and server[1] != GATEWAY_NAME:
+                from autoharness.gateway import note_call
+                note_call(project.root, server[1])   # the gateway counts its own servers' calls
+            if (state == "done" and active and not foreign and task_info.get("mode", "full") != "light"
+                    and task_info.get("brief") and GATED_TOOLS.match(tool) and not MCP_TOOL.match(tool)
+                    and (missing := _skills_not_installed(project, Task(project, active), templates=False))):
+                reason = ("Install what the brief covers its areas with before doing the work, so the work is done "
+                          "with it, not around it: " + "; ".join(missing) + ". Reading files stays open.")
                 out({"decision": "deny", "reason": reason} if agy else
                     {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                             "permissionDecisionReason": reason}})
@@ -2057,8 +2401,30 @@ def cmd_hook(args, project, catalog):
         return 0
 
 
+def _reviewer_can_start(agent: str) -> bool:
+    """Whether autoharness can start a fresh reviewer of this agent kind here (`--run`)."""
+    return agent in reviewers.AGENTS and bool(shutil.which(agent))
+
+
+def _pending_answers(info: dict) -> list[str]:
+    """Answer ids of the task's prompts still waiting for their answer, the latest first."""
+    ids = info.get("answer_ids", {})
+    return sorted((i for i, a in ids.items() if not a.get("used") and not a.get("retired")),
+                  key=lambda i: ids[i].get("issued", ""), reverse=True)
+
+
+def _reviewer_prompt(text: str, task_id: str, info: dict) -> str | None:
+    """The pending answer id a session's first prompt hands it (the id itself, or the task's prompt file), or None."""
+    pending = _pending_answers(info)
+    named = next((i for i in pending if i in text), None)
+    if named or not pending:
+        return named
+    return pending[0] if re.search(rf"tasks[\\/]+{re.escape(task_id)}[\\/]+prompts[\\/]", text) else None
+
+
 REPEAT_LIMIT = 5   # the same call this many times in a row may pass; one more is a loop, not progress
 EDIT_TOOLS = re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit)$")
+MCP_TOOL = re.compile(r"^mcp__(.+?)__")
 # file edits after a review that found blocking problems, before an independent critic must see the work again:
 # an author fixing alone grades its own fixes, and in the end grades them "none"
 EDITS_BEFORE_CRITIC = 20
@@ -2070,6 +2436,9 @@ def _unchecked_edits(sid: str, task_id: str, info: dict) -> str | None:
     otherwise. Counted per session and reset by each critic review."""
     reviews = info.get("reviews", [])
     critics = sum(1 for r in reviews if r["by"] == "critic")
+    if any(a["kind"] == "critic" and not a.get("used") and not a.get("retired")
+           for a in info.get("answer_ids", {}).values()):
+        return None  # a critic prompt is out: its answer has to be saved to a file to be recorded
     first = not critics and any(e["kind"] == "result" for e in info.get("evidence", []))
     if not sid or not (first or reviews and reviews[-1]["worst"] in evidence.BLOCKING):
         return None
@@ -2525,6 +2894,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--answer-file", help="record the reviewer's answer, saved unedited")
     s.add_argument("--verdict", choices=list(vet.VERDICTS), help="record the reviewer's VERDICT")
     s.add_argument("--text", help="with --verdict: the reviewer's REASON")
+    s.add_argument("--run", choices=list(reviewers.AGENTS),
+                   help="start that agent headless and read-only as the reviewer, and record its answer")
+    s.add_argument("--timeout", type=float, default=reviewers.DEFAULT_TIMEOUT, help="with --run: seconds allowed")
     s = sub.add_parser("remove", help="remove something the active task added or an earlier task kept")
     s.add_argument("kind", choices=["mcp", "skill"])
     s.add_argument("name")
@@ -2561,6 +2933,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--approve", action="store_true", help="for `save`: the user explicitly agreed")
     s = sub.add_parser("gateway", help="one MCP server that hot-adds the servers you add, no agent restarts")
     s.add_argument("action", choices=["install", "uninstall", "status", "serve", "approve"])
+    s.add_argument("--user", action="store_true",
+                   help="for `install`/`uninstall`: in the agent's own MCP file, for every project")
     s.add_argument("name", nargs="?", help="for `approve`: the server in .autoharness/gateway.json")
     s.add_argument("--approve", action="store_true", help="for `approve`: the user read the config and agreed")
     s.add_argument("--all", action="store_true", help="for `approve`: every server waiting for approval")
@@ -2627,6 +3001,8 @@ def build_parser() -> argparse.ArgumentParser:
                        ("--method", "how this kind of work is done well, from sources found and read first: "
                                     "`<technique or steps>: <url>; ...; searched: <queries>`"),
                        ("--inputs", "missing inputs and how you will get them (references, docs, data)"),
+                       ("--expects", "the choices the task leaves open and what the person who asked most likely "
+                                     "expects for each: `<choice>: <pick> - <why>; ...`, or `none: <why>`"),
                        ("--constraints", "the user's constraints, verbatim"),
                        ("--verify", "how the result will be checked, and against what"),
                        ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:

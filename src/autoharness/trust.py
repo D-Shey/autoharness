@@ -164,7 +164,8 @@ def score_registry_entry(entry: dict, trusted_publishers: set[str] = frozenset()
 
 SKILL_PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("high", "pipes a download into a shell", re.compile(r"(curl|wget|iwr|Invoke-WebRequest)[^\n|]*\|\s*(ba|z)?sh|\|\s*iex", re.I)),
-    ("high", "reads credential stores", re.compile(r"~/\.ssh|id_rsa|\.aws/credentials|\.netrc|\.git-credentials|Login Data|keychain", re.I)),
+    ("high", "reads credential stores", re.compile(r"~/\.ssh|id_rsa|\.aws/credentials|\.netrc|\.git-credentials|Login Data|\.keychain(?:-db)?\b"
+                                            r"|security\s+(?:find-(?:generic|internet)-password|dump-keychain)", re.I)),
     ("high", "destructive recursive delete of home/root", re.compile(r"rm\s+-rf\s+(/|~|\$HOME)(\s|$)", re.I)),
     ("high", "instructs the agent to hide actions", re.compile(r"(do not|don't|never) (tell|inform|mention to) the user|without (telling|asking) the user", re.I)),
     ("medium", "decodes obfuscated payloads", re.compile(r"base64\s+(-d|--decode)|FromBase64String|atob\(", re.I)),
@@ -252,3 +253,30 @@ def score_skill(spec: str, installs: int, trusted_owners: set[str]) -> TrustRepo
     level = _level(score)
     reasons.append("skills run with full agent permissions; content is statically scanned before install")
     return TrustReport(spec, score, level, reasons, level != "high", None, {"runs_with": "full agent permissions"})
+
+
+def score_marketplace(name: str, plugin: dict, servers: dict[str, dict]) -> TrustReport:
+    """A plugin of Anthropic's curated marketplace: reviewed before it was listed, so high trust; still, a
+    remote server sends data off the machine and a value read from the environment may be a secret, and
+    both need the user's approval."""
+    reasons = ["listed in Anthropic's curated plugin marketplace (claude-plugins-official)"]
+    if not servers:
+        return TrustReport(name, 0, "low", reasons + ["the plugin brings no MCP server"], True, None,
+                           {"network": "any", "filesystem": "unknown", "shell": "unknown", "secrets": [], "env": []})
+    server_name, config = next(iter(servers.items()))
+    config = {k: v for k, v in config.items() if k in ("type", "command", "args", "env", "url", "headers")}
+    if len(servers) > 1:
+        reasons.append(f"brings {len(servers)} servers; installs `{server_name}`")
+    env_names = sorted({m for v in [*config.get("env", {}).values(), *config.get("headers", {}).values()]
+                        for m in re.findall(r"\$\{(\w+)", str(v))})
+    remote = "url" in config
+    if remote:
+        reasons.append(f"remote server at {config['url']} (your data leaves the machine)")
+    else:
+        reasons.append(f"runs `{config.get('command')} {' '.join(map(str, config.get('args', [])))}` locally")
+    if env_names:
+        reasons.append(f"reads from your environment: {', '.join(env_names)}")
+    if plugin.get("homepage"):
+        reasons.append(f"homepage: {plugin['homepage']}")
+    perms = {"network": "any", "filesystem": "unknown", "shell": "unknown", "secrets": env_names, "env": env_names}
+    return TrustReport(name, 90, "high", reasons, bool(env_names) or remote, config, perms)

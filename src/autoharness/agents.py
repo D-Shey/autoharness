@@ -294,6 +294,7 @@ class Agent:
     user_skills_dir: str          # relative to the home directory
     translate: Callable[[dict], tuple[dict, list[str]]]
     reload_hint: str
+    user_mcp_file: str = ""       # relative to the home directory: servers every project gets ("" unknown)
 
     def mcp_path(self, root: Path) -> Path:
         return root / self.mcp_file
@@ -308,6 +309,13 @@ class Agent:
     def user_skills_path(self) -> Path:
         return Path.home() / self.user_skills_dir
 
+    def user_mcp_store(self):
+        """The agent's own MCP file, which every project loads; None when autoharness does not know it."""
+        if not self.user_mcp_file:
+            return None
+        path = Path.home() / self.user_mcp_file
+        return TomlMcpStore(path) if path.suffix == ".toml" else JsonMcpStore(path)
+
 
 _GEMINI_HINT = "restart {title} (or run /mcp refresh) so it picks up the new server"
 
@@ -317,15 +325,15 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
     Agent("codex", "Codex CLI", ".codex/config.toml", ".agents/skills", ".agents/skills", to_codex,
           "restart Codex; project .codex/config.toml is only loaded when the project is trusted"),
     Agent("gemini", "Gemini CLI", ".gemini/settings.json", ".gemini/skills", ".gemini/skills", to_gemini,
-          _GEMINI_HINT.format(title="Gemini CLI")),
+          _GEMINI_HINT.format(title="Gemini CLI"), ".gemini/settings.json"),
     Agent("qwen", "Qwen Code", ".qwen/settings.json", ".qwen/skills", ".qwen/skills", to_gemini,
-          _GEMINI_HINT.format(title="Qwen Code")),
+          _GEMINI_HINT.format(title="Qwen Code"), ".qwen/settings.json"),
     Agent("gigacode", "GigaCode CLI", ".gigacode/settings.json", ".gigacode/skills", ".gigacode/skills", to_gemini,
-          _GEMINI_HINT.format(title="GigaCode CLI")),
+          _GEMINI_HINT.format(title="GigaCode CLI"), ".gigacode/settings.json"),
     Agent("strands", "Strands harness", ".agent/mcp.json", ".agent/skills", ".agent/skills", to_claude,
           "restart the agent; pass mcp_servers=\".agent/mcp.json\" to create_harness() so it loads the server"),
     Agent("agy", "Antigravity CLI", ".agents/mcp_config.json", ".agents/skills", ".gemini/config/skills", to_agy,
-          "restart agy so it picks up the new server"),
+          "restart agy so it picks up the new server", ".gemini/config/mcp_config.json"),
 ]}
 
 DEFAULT_AGENT = "claude"

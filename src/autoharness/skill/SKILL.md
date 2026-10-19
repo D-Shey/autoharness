@@ -32,10 +32,9 @@ session is gone), `autoharness claim <your session id> --reason "<their words>"`
 autoharness --agent {{AGENT}} init "<the user's task, verbatim>" --mode light|full|reviewed|auto
 ```
 
-- `light`: the inputs and the way to verify are already at hand (a small fix, a git chore). No
-  search, no brief: do the work, verify it, `teardown`. A task that has to match an image (a
-  scene, a design) is not light: `init` refuses it unless you say why nothing real is to be
-  matched (`--light-reason "..."`). Drawing from memory what can be looked up is the gap.
+- `light`: a chore that needs no capability (a typo, a git commit). No search, no brief: do the
+  work, verify it, `teardown`. A task that needs any capability of the catalog (an API, a browser,
+  tests, debugging, an image to match) is not a chore: `init` raises it to full.
 - `full` (default): something the result must match or a way to check it is missing. Search,
   brief, vet, install.
 - `reviewed`: full, and an independent critic must pass the result before teardown.
@@ -61,6 +60,11 @@ In full mode, answer in writing before listing tools:
    your own `lower`/`upper`). Look for a real example first (docs, the usual package, callers in
    the code); without one, accept the common forms of the call and write the assumption into
    `--inputs`, so the critic checks it.
+5. **What does the person who asked expect where the task leaves a choice open?** A requirement is
+   what they want, and they cannot always be asked. For each open choice (a format, a value or a
+   formula, what a field holds) pick what they would take for granted on first look: the plain,
+   simple form, where what they see is what is there, nothing they did not ask for, clean to look
+   at. A tool's or skill's advice does not decide it for you. Record it with `--expects`.
 
 Then list capabilities: *capability — why — how I will verify it works*. Pick the smallest set
 that lets you **verify** the result, not only produce it. Missing input and know-how often need
@@ -78,7 +82,9 @@ autoharness search mcp|skill "<query>"            # MCP registry, skills.sh
 ```
 
 Prefer local skill → curated entry → high-trust result → nothing. Install only what beats the
-tools you have: a CLI (`gh`, `psql`, `npx playwright`) needs no MCP server.
+tools you have: a CLI (`gh`, `psql`) needs no MCP server. A skill is know-how, not a tool: when you
+have to see and operate something live (a page, an app), step by step, cover it with an MCP server
+(`brief` asks for one); a script written blind does not show you what is on screen.
 
 **Prepare like an engineer, not head-on.** Building an aircraft takes aerodynamics, materials,
 strength, control theory; every non-trivial task likewise splits into areas of know-how. List them
@@ -99,6 +105,7 @@ know-how goes into a skill (`--gaps "create ..."`).
 
 ```bash
 autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get them>" \
+  --expects "<open choice>: <pick> - <why they would expect it>; ...  (or none: <why>)" \
   --domains "<area>: skill|mcp|create <name> (searched: <query>); ..." \
   --method "<technique or steps>: <url>; ...; searched: <queries>" \
   --constraints "<verbatim>" --verify "<checks, against what>" \
@@ -137,7 +144,8 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
   if you find out after installing, `autoharness remove` it and say so.
 - `vet_required`: you do not judge the fit yourself. `autoharness vet mcp|skill <name>`, give
   its prompt unchanged to a fresh subagent, save the answer unedited to a file, record it with
-  `--answer-file <file>`. On `breaks`, pick another.
+  `--answer-file <file>`. No subagents at hand: `autoharness vet mcp|skill <name> --run
+  claude|codex|agy` starts the reviewer and records its answer. On `breaks`, pick another.
 - `approval_required` (exit 3): show the user name, trust score, reasons, needed secrets and any
   `egress` reason in one message; `--approve` only after a clear yes, never on your own.
 - `rejected`: dangerous patterns found; pick another (`--force` only if the user insists after
@@ -147,7 +155,8 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - `already_installed`: an earlier task kept it; use it.
 - `via: gateway`: works now, use `harness_tools` / `harness_call`. Otherwise the server is in
   `{{MCP_FILE}}`: tell the user to {{RELOAD}}, and continue what does not depend on it. If `add`
-  suggests `autoharness gateway install`, offer it once: later servers then need no restart.
+  suggests `autoharness gateway install`, offer it once (`--user` puts it in your own config, for
+  every project): later servers then need no restart.
 
 Smoke-test each new capability with one cheap call before relying on it; if it fails,
 `remove` it and try the next. Do not debug a third-party tool for long.
@@ -201,8 +210,11 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    be another model)? `critic --run <agent>` starts the reviewer itself.
 
    After a critic finds blocking problems, do not fix from memory what your skills do not teach:
-   research how that part is done well and write it into the skill first (the next result is refused
-   until a skill of the task changes), then fix by it.
+   research how that part is done well and write it into the skill with the address of the page you
+   took it from; with a reference, measure the parts the critic names from it and add that as facts
+   (`--kind facts`). Then build them through those measurements, not by eye. The next result is
+   refused until a skill cites a new page and the new facts are in. The critic's words restated as
+   rules are not research.
 
    Work in rounds: block in the base, add the result, run the critic, then compare each result side by side with the reference, fix the most important
    differences, repeat. `--worst` is the worst still-fixable difference: blocker (fails its

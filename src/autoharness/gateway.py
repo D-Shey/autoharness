@@ -55,6 +55,33 @@ def find_project(start: Path) -> Path | None:
     return None
 
 
+CALLS_FILE = "gateway.calls.json"
+
+
+def note_call(project: Path, server: str) -> None:
+    """Count a call to an MCP server and when it was last made, so teardown can tell a server the task
+    installed from one it used. Both the gateway and the hook (for servers in the agent's own config) write it."""
+    path = project / ".autoharness" / CALLS_FILE
+    try:
+        calls = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        calls = {}
+    entry = calls.get(server) if isinstance(calls.get(server), dict) else {}
+    calls[server] = {"calls": entry.get("calls", 0) + 1, "last": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    try:
+        path.write_text(json.dumps(calls, indent=2, ensure_ascii=False) + "\n", "utf-8")
+    except OSError:
+        pass   # a lost count must never fail the call
+
+
+def calls(project: Path) -> dict:
+    try:
+        data = json.loads((project / ".autoharness" / CALLS_FILE).read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _text(t: str, error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": t}], **({"isError": True} if error else {})}
 
@@ -65,8 +92,9 @@ def native_name(server: str, tool: str) -> str:
 
 class Gateway:
     def __init__(self, project: Path | None, write: Callable[[dict], None], log: Callable[[str], None],
-                 stderr=None, client_factory=make_client):
+                 stderr=None, client_factory=make_client, start: Path | None = None):
         self.project, self.write, self.log, self.stderr = project, write, log, stderr
+        self.start = start  # where to look for the project until it has one (a gateway in the agent's own config)
         self.client_factory = client_factory
         self.configs: dict[str, dict] = {}
         self.clients: dict[str, object] = {}
@@ -81,6 +109,10 @@ class Gateway:
     # --- registry and children -------------------------------------------------
 
     def _registry_file(self) -> Path | None:
+        if self.project is None and self.start is not None:
+            self.project = find_project(self.start)   # the task adds its first server after the agent started
+            if self.project:
+                self.log(f"serving {self.project}")
         return self.project / ".autoharness" / "gateway.json" if self.project else None
 
     def _enforce_hosts(self) -> bool:
@@ -328,6 +360,8 @@ class Gateway:
             client = self._restart(server)
             if client is None:
                 return _text(f"server {server!r} stopped and did not restart: {self.status.get(server, {}).get('error')}", True)
+        if self.project:
+            note_call(self.project, server)
         try:
             return client.call_tool(tool, arguments)
         except McpError as e:
@@ -396,7 +430,7 @@ def serve(start: Path | None = None) -> int:
             log_file.write(stamped + "\n")
             log_file.flush()
 
-    gw = Gateway(project, write, log, stderr=log_file)
+    gw = Gateway(project, write, log, stderr=log_file, start=(start or Path.cwd()).resolve())
     gw.sync()
     stop = threading.Event()
 
