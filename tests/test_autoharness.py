@@ -1651,6 +1651,23 @@ def test_a_critic_judges_the_latest_whole_render_not_every_draft(project, capsys
     assert "closeup" not in big["evidence"]
 
 
+def test_a_reference_far_smaller_than_the_result_asks_for_a_larger_one(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    code, res = ev(capsys, root, sized_png(tmp_path / "thumb.png", 300, 180), "reference")
+    assert code == 0 and "uncropped" in res["next"] and "warnings" not in res   # small alone says nothing
+    code, res = ev(capsys, root, sized_png(tmp_path / "r1.png", 1500, 900), "result")
+    assert "far smaller than the result" in res["next"] and "under half" in res["warnings"][0]
+    code, res = ev(capsys, root, sized_png(tmp_path / "still.png", 900, 540), "reference")
+    assert "far smaller" not in res["next"] and "warnings" not in res
+
+
+def test_a_small_reference_for_a_small_result_is_fine(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    ev(capsys, root, sized_png(tmp_path / "icon-ref.png", 64, 64), "reference")
+    code, res = ev(capsys, root, sized_png(tmp_path / "icon.png", 96, 96), "result")
+    assert "far smaller" not in res["next"]
+
+
 def test_a_closeup_is_marked_by_hand_and_needs_a_whole_first(project, capsys, tmp_path):
     root = visual_task(capsys, project)
     code, res = cli_json(capsys, "--project", root, "evidence", "add", str(png(tmp_path / "c.png")),
@@ -3149,6 +3166,11 @@ BRIEF_AS_DOCUMENTED = ('autoharness brief --goal "report matches the ledger" --i
     ("Bash", "autoharness \\' ; rm x ; \\'", False),
     ("Bash", "autoharness $'a\\' ' ; rm x ; '", False),
     ("PowerShell", 'autoharness "a\u201c ; rm x ; \u201cb"', False),
+    # a typographic apostrophe in a task text is a plain character inside "...", in both shells
+    ("PowerShell", 'autoharness --agent agy init "Gosling\u2019s character. Don\'t use x" --mode full', True),
+    ("Bash", 'autoharness init "Gosling\u2019s character"', True),
+    ("PowerShell", "autoharness init 'a\u2019 ; rm x ; \u2019b'", False),   # ends '...' in PowerShell
+    ("PowerShell", "autoharness init a\u2019s", False),                     # starts a string in PowerShell
     ("PowerShell", 'autoharness @"\nx\n"@ ; rm x', False),
     ("Bash", "autoharness-evil init", False),
     ("Bash", "cd x && rm -rf y && autoharness init", False),

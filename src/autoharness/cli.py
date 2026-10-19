@@ -228,7 +228,7 @@ def cmd_init(args, project, catalog):
     if mode == "light" and visual:
         task._update_info(light_reason=light_reason)
         task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
-    if owner := agents.session_id():
+    if owner := agents.session_id(agent=project.agent_name):
         task._update_info(owner=owner)
     if selected == "reviewed":
         task._update_info(profile="reviewed")
@@ -389,6 +389,22 @@ def cmd_evidence(args, project, catalog):
     if args.action == "list":
         out({"evidence": task.info().get("evidence", []), "reviews": task.info().get("reviews", [])})
         return 0
+    if args.kind == "facts" and not any(e["kind"] == "reference" for e in task.info().get("evidence", [])):
+        raise HarnessError("facts are taken from a reference, not from memory: add the reference first (`autoharness "
+                           "evidence add <file> --kind reference`), then measure, crop or extract from it and add "
+                           "what you took as facts")
+    if (args.action == "diff" or args.kind == "result") and not args.closeup \
+            and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
+            and (why := evidence.needs_facts(catalog, task)):
+        raise HarnessError(why)
+    if (args.action == "diff" or args.kind == "result") and not args.closeup \
+            and (why := _unresearched_review(task)):
+        raise HarnessError(why)
+    if (args.action == "diff" or args.kind == "result") \
+            and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
+            and (unready := task.planned_skill_problems()[0] + _skills_not_installed(project, task)):
+        raise HarnessError("prepare before the first result: the skills the brief creates hold the know-how the "
+                           "work is built on, from the sources you read. " + "; ".join(unready))
     if args.action == "diff":
         item = evidence.add_diff(task, project.root, args.base, args.note or "")
         out({"status": "ok", "evidence": item,
@@ -397,10 +413,19 @@ def cmd_evidence(args, project, catalog):
                      "an independent one with `autoharness critic`."})
         return 0
     if not args.file or not args.kind:
-        raise HarnessError("usage: autoharness evidence add <file> --kind reference|result [--note ...]")
+        raise HarnessError("usage: autoharness evidence add <file> --kind reference|facts|result [--note ...]")
     item = evidence.add(task, Path(args.file), args.kind, args.note or "", closeup=args.closeup)
-    nxt = ("Study it and write down what the result must match."
+    first = args.kind == "result" and not any(e["kind"] == "result" and e["n"] != item["n"]
+                                              for e in task.info().get("evidence", []))
+    nxt = ("Study it, then take from it with a tool what the result must match (measure, crop, extract, quote), "
+           "save those facts to a file and `autoharness evidence add <file> --kind facts`."
            if args.kind == "reference" else
+           "Build the first version as a block-in from these facts: the layout, proportions and main structure "
+           "right, no detail or polish yet. Add it as a result and run `autoharness critic` on it before you add "
+           "any detail: a wrong base costs every round after it."
+           if args.kind == "facts" else
+           "This is the base: run `autoharness critic` on it now, before any detail."
+           if first else
            "Review this result: record your own pass with `autoharness review --by self ...`, then get an "
            "independent one with `autoharness critic`.")
     if item.get("closeup"):
@@ -412,8 +437,23 @@ def cmd_evidence(args, project, catalog):
                "of result and the close-ups or parts added after it with `--closeup`"
                + (" (a crop smaller than the whole is taken as one)" if item.get("media") == "image" else "")
                + "; earlier versions are drafts it does not see. " + nxt)
+    if args.kind == "reference":
+        nxt = ("Check that it is the thing itself the task names (the original, as published or as it really "
+               "is), not someone's version of it (fan art, a remake, a mockup, an example from a blog): a "
+               "version is only a hint, find the original. A page that only shows it among other things (search "
+               "results, a gallery, a collage, thumbnails, a snippet) is not it either: open the thing itself and "
+               "keep it whole, at its own size. " + nxt)
+    if args.kind == "reference" and item.get("media") == "image":
+        nxt = ("Check that it shows everything the task names, whole and uncropped; if a part is cut off or "
+               "missing, find a reference that shows it and add it as well. " + nxt)
     warnings = ([f"this file is byte for byte the same as evidence #{item['same_as']}: a result must be what "
                  "you produced, not the reference itself; the critic is told"] if item.get("same_as") else [])
+    if small := evidence.small_reference(task):
+        ref, whole = small
+        nxt = (f"The best reference (#{ref['n']}, {ref['size'][0]}x{ref['size'][1]} px) is far smaller than the "
+               f"result (#{whole['n']}, {whole['size'][0]}x{whole['size'][1]} px): sizes, shapes and details cannot "
+               "be taken from it at the result's scale. Find a larger version of it and add it too. " + nxt)
+        warnings.append(f"reference #{ref['n']} is under half the size of result #{whole['n']}")
     out({"status": "ok", "evidence": item, "next": nxt} | ({"warnings": warnings} if warnings else {}))
     return 0
 
@@ -483,6 +523,13 @@ def cmd_review(args, project, catalog):
             worst = max(worst, quality["verdict"], key=evidence.SEVERITIES.index)
     elif getattr(args, "quality_file", None):
         raise HarnessError("--quality-file goes with the critic's --answer-file")
+    if answer and answer.get("accept", {}).get("accept") == "no" and worst not in evidence.BLOCKING:
+        # a list of small points can add up to work no one would hand over: the whole-work answer decides
+        why = answer["accept"]["why"] or "the critic would not hand it over as finished work"
+        diff += f"\nNot finished work as a whole (major, fixable): {why}"
+        warnings.append(f"the critic's VERDICT was {worst}, but it would not accept the work as finished: "
+                        "recorded as major")
+        worst = "major"
     if not answer:
         if not args.diff or not (args.worst or args.fixable):
             raise HarnessError("record a review with --diff and --worst, or a critic's answer with "
@@ -568,7 +615,10 @@ def cmd_review(args, project, catalog):
                      "\"<their words>\"`). Do not run another critic before they answer."})
         return EXIT_APPROVAL
     if item["fixable"]:
-        nxt = ("Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
+        nxt = (("First research each point your skills do not already teach: how that part is done well, from "
+                "sources you search and read, written into the skill with its source (the next result is refused "
+                "until a skill of this task changes). " if item["by"] == "critic" and task.skills_lock() else "")
+               + "Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
                "close-ups of the parts in question), and review again. If you believe a critic point is wrong, "
                "do not drop it yourself: add a close-up and run `autoharness critic --dispute \"<the point>\"`.")
     else:
@@ -747,6 +797,97 @@ def cmd_critic(args, project, catalog):
     return 0
 
 
+DOMAIN = re.compile(r"^(?P<area>[^:]+):\s*(?P<how>skill|mcp|create)\s+(?P<name>[\w@./-]+)[^(]*"
+                    r"\(\s*searched:\s*(?P<query>[^)]+)\)\s*$", re.IGNORECASE)
+MIN_DOMAINS = 2
+
+
+def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict]) -> str:
+    """The brief's areas of know-how, each covered by a skill or a server found by a search of this task, or by a
+    skill this task creates. Raises when an area is covered by nothing, or its search was never run."""
+    usage = ("--domains splits the task into the areas of know-how it takes, the way an engineer splits building "
+             "a machine into its disciplines, and says how each is covered: `<area>: skill <name> (searched: "
+             "<query>); <area>: mcp <name> (searched: <query>); <area>: create <skill-name> (searched: <query>)`. "
+             f"At least {MIN_DOMAINS} areas. For each, first run `autoharness search skill|mcp \"<query>\"` (and "
+             "`autoharness need`), then take what fits (`skill`/`mcp`, also named as `take` in --candidates) or, "
+             "when nothing fits, create the skill from the sources you read (`create`, also in --gaps). Knowing it "
+             "already is not a cover: what you know goes into the skill you create. The areas are what the work "
+             "itself is made of and takes skill in (for a picture: say figures, anatomy, light; for a service: say "
+             "its protocol, data model, concurrency), named as specifically as the task allows; how you check it "
+             "goes in --verify.")
+    entries = [e.strip() for e in (text or "").split(";") if e.strip()]
+    if len(entries) < MIN_DOMAINS:
+        raise HarnessError(usage)
+    run = {s["query"].strip().lower() for s in searches}
+    for entry in entries:
+        m = DOMAIN.match(entry)
+        if not m:
+            raise HarnessError(f"cannot read the area `{entry}`. " + usage)
+        how, name, query = m["how"].lower(), m["name"], m["query"].strip().lower()
+        if query not in run:
+            raise HarnessError(f"area `{m['area'].strip()}`: no search `{query}` was run in this task. Run "
+                               f"`autoharness search skill \"{query}\"` (or `mcp`), read what it finds, then record "
+                               "the brief again. " + ("Searches run: " + "; ".join(sorted(run)) if run else ""))
+        if how == "create" and name not in planned:
+            raise HarnessError(f"area `{m['area'].strip()}` creates `{name}`: name it in --gaps too "
+                               f"(`create {name}: <capability>`)")
+        found = next((s.get("results", []) for s in searches if s["query"].strip().lower() == query), [])
+        real = how == "skill" and library.exists(name) or any(
+            r.lower() == name.lower() or re.search(rf"[@/]{re.escape(name.lower())}$", r.lower()) for r in found)
+        if how in ("skill", "mcp") and not real:
+            raise HarnessError(f"area `{m['area'].strip()}`: `{name}` is not among what the search `{query}` found"
+                               + (" nor a skill in your library" if how == "skill" else "") + ": name a "
+                               f"{how} that search returned (" + (", ".join(found) or "it found nothing") + "), "
+                               "or create the skill (`create <skill-name>`)")
+        if how in ("skill", "mcp") and not re.search(rf"{re.escape(name)}\s*:\s*take\b", candidates, re.IGNORECASE):
+            raise HarnessError(f"area `{m['area'].strip()}` is covered by `{name}`: name it in --candidates as "
+                               f"`{name}: take, <why>`")
+    return "; ".join(entries)
+
+
+def _unresearched_review(task) -> str | None:
+    """Why the next result is refused yet: the latest critic found blocking problems in the latest result, and no
+    skill of this task has been changed since. A fix of what the work lacks know-how for, made from memory, comes
+    back as crude as the first try; the technique is looked up and written into a skill first."""
+    info = task.info()
+    reviews = [r for r in info.get("reviews", []) if r["by"] == "critic"]
+    if not reviews or reviews[-1]["worst"] not in evidence.BLOCKING:
+        return None
+    last = reviews[-1]
+    if any(e["kind"] == "result" and e["n"] > (last.get("result") or 0) for e in info.get("evidence", [])):
+        return None  # the round after this review already has its result
+    skills = [task.skills_dir / name / "SKILL.md" for name in task.skills_lock()]
+    if not skills:
+        return None
+    try:
+        since = time.mktime(time.strptime(last["time"], "%Y-%m-%dT%H:%M:%S"))
+    except (KeyError, ValueError):
+        return None
+    if any(p.is_file() and p.stat().st_mtime > since for p in skills):
+        return None
+    return ("the critic found blocking problems: before fixing them, find out how each is done well. For every "
+            "point your skills do not already teach (how to build that part, the technique, the known pitfalls), "
+            "search for it (the web, docs, worked examples, `autoharness search skill \"<query>\"`), read the best "
+            "sources and write the technique with its source into the skill it belongs to ("
+            + ", ".join(task.skills_lock()) + "), or a new one (`autoharness skill new`). Then fix by it and add "
+            "the result.")
+
+
+def _skills_not_installed(project, task) -> list[str]:
+    """The skills the brief's areas are covered by that are neither installed for this task, kept in the project,
+    nor in the user's library: an area is covered by a skill in use, not by its name."""
+    have = set(task.skills_lock()) | set(project.kept()["skills"])
+    missing = []
+    for entry in task.info().get("brief", {}).get("domains", "").split(";"):
+        m = DOMAIN.match(entry.strip())
+        if m and m["how"].lower() == "skill":
+            name = m["name"].split("@")[-1]
+            if name not in have and not library.exists(name):
+                missing.append(f"area `{m['area'].strip()}` is covered by skill `{m['name']}`, not installed: "
+                               f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`")
+    return missing
+
+
 def cmd_brief(args, project, catalog):
     from autoharness import verification
     task = project.task()
@@ -759,13 +900,23 @@ def cmd_brief(args, project, catalog):
                            "or start with `none:` and say why the tools at hand cover every capability")
     for name in planned:
         library.validate_name(name)
+    domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
+    method = args.method.strip()
+    if "searched:" not in method.lower() or not (re.search(r"https?://", method)
+                                                 or re.search(r"nothing usable", method, re.IGNORECASE)):
+        raise HarnessError(
+            "--method must say how this kind of work is done well, from sources you found and read before starting, "
+            "not from memory: `<technique or steps>: <url>; ...; searched: <queries>`. Search the web (and the docs, "
+            "papers, repos, tutorials of the field) for how others solved it: the algorithm, the workflow, the "
+            "pitfalls. Only if nothing usable turned up: `nothing usable; searched: <queries>`.")
     if evidence.requirements(catalog, task).get("media") and not (args.fidelity or "").strip():
         raise HarnessError(
             "this task is judged by eye: name the level it is judged at with --fidelity (e.g. \"stylised vector "
             "poster: composition, palette, mood and poses read at a glance; not photographic likeness\"). "
             "Without it a critic judges against the reference itself, which a different medium never reaches, "
             "and every round stays major")
-    task.record_brief({"goal": args.goal, "inputs": args.inputs, "constraints": args.constraints,
+    task.record_brief({"goal": args.goal, "domains": domains, "method": method, "inputs": args.inputs,
+                       "constraints": args.constraints,
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
@@ -795,7 +946,8 @@ def cmd_brief(args, project, catalog):
     items = runs.brief_items(task.info()["brief"])
     out({"status": "ok", "task_id": task.id, "planned_skills": planned, "warnings": warnings,
          "brief_items": [f"{i['id']}: {i['text']}" for i in items],
-         "next": "Install what you decided to take and get the missing inputs first." + owed + create
+         "next": "Install what you decided to take and get the missing inputs first. Then work by the method you "
+                 "found, step by step: the critic checks the result against it." + owed + create
                  + " Then do the work and verify it the way the brief says: a check that is a command (tests, a "
                    "build, a script) runs through `autoharness verify run \"<command>\" --for <brief item, e.g. B1>`, "
                    "so it counts as checked, not as reported. Teardown refuses while a planned "
@@ -1427,9 +1579,16 @@ def check_owner(project: Project, task_id: str | None) -> None:
     if not task_id:
         return
     task = Task(project, task_id)
-    owner, me = task.info().get("owner"), agents.session_id()
+    owner, me = task.info().get("owner"), my_session(project, task)
     if owner and me and owner != me and task.info().get("status") == "active":
         raise HarnessError(handoff(task, me))
+
+
+def my_session(project: Project, task: Task | None = None) -> str:
+    """The session id of the agent running this command: the one named with --agent, else the task's own agent,
+    so a command that leaves out --agent is not taken for the outer agent whose shell started this one."""
+    agent = project.agent_name or (task.info().get("agent") if task else None)
+    return agents.session_id(agent=agent if isinstance(agent, str) else None)
 
 
 def write_lock(project: Project):
@@ -1440,7 +1599,7 @@ def write_lock(project: Project):
 
 def cmd_claim(args, project, catalog):
     task = project.task()
-    me = args.session_id or agents.session_id()
+    me = args.session_id or my_session(project, task)
     if not me:
         raise HarnessError("no agent session id in the environment: pass it, `autoharness claim <session id>`")
     info = task.info()
@@ -1472,7 +1631,10 @@ def hook_context(catalog: Catalog, prompt: str, session_id: str = "") -> str | N
             "data), what the user's constraints are, and how the result will be verified." + gate)
 
 
-SMART_QUOTES = "‘’‚‛“”„"   # PowerShell reads these as quotes
+# PowerShell reads these as quotes: a single one ends a '...' string, a double one a "..." string, and inside
+# the other kind each is a plain character (`"Gosling’s"`), as it always is in Bash
+SMART_SINGLE, SMART_DOUBLE = "‘’‚‛", "“”„"
+SMART_QUOTES = SMART_SINGLE + SMART_DOUBLE
 SHELL_SPECIAL = set(";|&<>#(){}`\r\n")
 # stderr into the output the agent reads, and read-only filters of that output: harmless in both shells
 # an argument of such a filter: single-quoted, double-quoted with nothing either shell expands, or plain
@@ -1499,8 +1661,6 @@ def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
     or redirection outside quotes, `$'`, `@"`, and `$(` or a backtick anywhere but in single quotes, are
     refused outright), so that where the two disagree about quoting nothing slips through either. Only Bash
     gets `\\` line continuations and `\\"` inside double quotes; PowerShell reads a backslash literally."""
-    if any(q in command for q in SMART_QUOTES):
-        return None
     commands, words, word, quote = [], [], None, None
     i, n = 0, len(command)
     while i < n:
@@ -1508,11 +1668,15 @@ def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
         if quote == "'":
             if ch == "'":
                 quote = None
+            elif ch in SMART_SINGLE:
+                return None   # ends the string in PowerShell, not in Bash
             else:
                 word += ch
         elif quote == '"':
             if ch == '"':
                 quote = None
+            elif ch in SMART_DOUBLE:
+                return None   # ends the string in PowerShell, not in Bash
             elif ch == "\\" and bash and i + 1 < n:
                 word += command[i + 1]   # Bash escapes the next character, `\"` and `\$(` included
                 i += 1
@@ -1545,8 +1709,8 @@ def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
             commands.append(words)
             words, word = [], None
             i += 1 if ch == "&" else 0
-        elif ch in SHELL_SPECIAL:
-            return None
+        elif ch in SHELL_SPECIAL or ch in SMART_QUOTES:
+            return None   # outside quotes PowerShell starts a string at a smart quote; Bash does not
         else:
             word = (word or "") + ch
         i += 1
@@ -1602,7 +1766,15 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
     while tool == "Bash" and last and ENV_PREFIX.match(last[0]):
         last = last[1:]
     return (all(len(c) == 2 and c[0] == "cd" for c in prefix)
-            and last[:1] == ["autoharness"])
+            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last)))
+
+
+def _looks_up_autoharness(words: list[str]) -> bool:
+    """`Get-Command autoharness`, `which autoharness` and the like: they only say whether the CLI is there."""
+    lookup = [w for w in words if not w.startswith("-") and w.lower() not in ("silentlycontinue", "ignore")]
+    return (len(lookup) == 2 and lookup[1] == "autoharness"
+            and lookup[0].lower() in ("get-command", "gcm", "which", "where", "where.exe", "type")) \
+        or words == ["command", "-v", "autoharness"]
 
 
 # The task records under .autoharness/ are written by autoharness only (config.json is the user's to edit).
@@ -1858,6 +2030,12 @@ def cmd_hook(args, project, catalog):
                     {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                             "permissionDecisionReason": reason}})
                 return 0
+            if (state == "done" and active and not foreign and EDIT_TOOLS.match(tool)
+                    and (reason := _unchecked_edits(sid, active, task_info))):
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
             if state == "pending" and GATED_TOOLS.match(tool):
                 reason = handoff(Task(project, active), sid) if foreign else (
                     "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
@@ -1880,6 +2058,41 @@ def cmd_hook(args, project, catalog):
 
 
 REPEAT_LIMIT = 5   # the same call this many times in a row may pass; one more is a loop, not progress
+EDIT_TOOLS = re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit)$")
+# file edits after a review that found blocking problems, before an independent critic must see the work again:
+# an author fixing alone grades its own fixes, and in the end grades them "none"
+EDITS_BEFORE_CRITIC = 20
+
+
+def _unchecked_edits(sid: str, task_id: str, info: dict) -> str | None:
+    """Why this edit is denied when the author has edited the work EDITS_BEFORE_CRITIC times without a critic
+    seeing it: after the first result, before any critic, or after a review that found blocking problems; None
+    otherwise. Counted per session and reset by each critic review."""
+    reviews = info.get("reviews", [])
+    critics = sum(1 for r in reviews if r["by"] == "critic")
+    first = not critics and any(e["kind"] == "result" for e in info.get("evidence", []))
+    if not sid or not (first or reviews and reviews[-1]["worst"] in evidence.BLOCKING):
+        return None
+    counter = session_file(sid).with_suffix(".edits.json")
+    try:
+        seen = json.loads(counter.read_text("utf-8"))
+    except (OSError, ValueError):
+        seen = {}
+    if seen.get("task") != task_id or seen.get("critics") != critics:
+        seen = {"task": task_id, "critics": critics, "edits": 0}
+    seen["edits"] += 1
+    try:
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        counter.write_text(json.dumps(seen), "utf-8")
+    except OSError:
+        return None
+    if seen["edits"] <= EDITS_BEFORE_CRITIC:
+        return None
+    since = "the first result" if first else "a review found blocking problems"
+    return (f"{seen['edits'] - 1} edits since {since}, and no independent critic has seen "
+            "the work since: you are grading your own fixes. Record the current result (`autoharness evidence add "
+            "<file> --kind result`, or `autoharness evidence diff` for code), run `autoharness critic` and record its "
+            "answer; editing opens again with that review.")
 
 
 def _repeated(sid: str, tool: str, tool_input: dict) -> int:
@@ -2409,6 +2622,10 @@ def build_parser() -> argparse.ArgumentParser:
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
                        ("--goal", "what a good result looks like (the quality bar)"),
+                       ("--domains", "the areas of know-how the task takes, each covered: `<area>: skill|mcp|create "
+                                     "<name> (searched: <query>); ...`"),
+                       ("--method", "how this kind of work is done well, from sources found and read first: "
+                                    "`<technique or steps>: <url>; ...; searched: <queries>`"),
                        ("--inputs", "missing inputs and how you will get them (references, docs, data)"),
                        ("--constraints", "the user's constraints, verbatim"),
                        ("--verify", "how the result will be checked, and against what"),

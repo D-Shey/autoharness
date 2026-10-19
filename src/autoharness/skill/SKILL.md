@@ -51,7 +51,7 @@ In full mode, answer in writing before listing tools:
 
 1. **What does a good result look like, and how will I tell?** A quality bar and a check, not
    "it renders".
-2. **What input is missing?** The thing the result must match (the film still, the product
+2. **What input is missing?** The original the result must match, not someone's version of it (the film still, the product
    photo, the API's actual response, sample data), not a description of it. Working from memory
    when the real thing can be looked up is a capability gap, often the biggest. Get it first.
 3. **What are the user's constraints?** Verbatim ("no new dependencies", "must run offline").
@@ -80,10 +80,27 @@ autoharness search mcp|skill "<query>"            # MCP registry, skills.sh
 Prefer local skill → curated entry → high-trust result → nothing. Install only what beats the
 tools you have: a CLI (`gh`, `psql`, `npx playwright`) needs no MCP server.
 
+**Prepare like an engineer, not head-on.** Building an aircraft takes aerodynamics, materials,
+strength, control theory; every non-trivial task likewise splits into areas of know-how. List them
+(`--domains`), and for each ask: what do I actually know, what is known out there (skills, servers,
+docs, worked examples, algorithms), how will I test the hypothesis? Search each area
+(`autoharness search skill|mcp "<query>"`, `autoharness need`), take what fits, and where nothing
+fits create the skill yourself from what you read (`--gaps "create ..."`), filled before the first
+result. "I know how" is not a cover: what you know goes into that skill.
+
+**Research the method before you build.** Someone has usually solved this kind of task before:
+search the web, the field's docs, papers, repos and tutorials for how it is done well (the
+algorithm, the workflow, the known pitfalls), read the best two or three sources, and write the
+steps down. This is deep research, not a single query: it is the difference between doing the
+work from memory and doing it the way it is done well. The steps go into `--method`; reusable
+know-how goes into a skill (`--gaps "create ..."`).
+
 ## 3. Brief (full)
 
 ```bash
 autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get them>" \
+  --domains "<area>: skill|mcp|create <name> (searched: <query>); ..." \
+  --method "<technique or steps>: <url>; ...; searched: <queries>" \
   --constraints "<verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; ...; searched: <queries>" \
   --gaps "create <skill-name>: <capability>; ..."   # or "none: <why tools at hand cover it>"
@@ -142,10 +159,15 @@ thing you must check, guessing at an API whose docs you have not read, or drawin
 you have not looked at are gaps: `autoharness need <capability> --reason "<what blocked me>"`
 (after `mode full` in a light task), then resume.
 
+A browser tool that refuses `file://` (Playwright MCP does) opens a local page or file over
+`http://localhost` instead: serve the folder (`python -m http.server 8000`) in the background.
+
 Matching a reference (an API's response, a sample file, a layout, a picture, the old behaviour)?
 Take its facts from the reference itself with a tool, not from memory: field names and values,
-sizes, positions, timings, the exact output. Then check your result against the same facts, part
-by part, side by side.
+sizes, positions, timings, the exact output. Save them to a file and record it before the first
+result (`autoharness evidence add <file> --kind facts`); the critic checks the result against them.
+Build the first version as a block-in from these facts: layout, proportions and main structure,
+no detail yet, and run the critic on it before adding detail. A wrong base costs every later round.
 
 Found work outside this task (a bug next door, a critic point beyond the brief)? Do not fix it
 now and do not drop it: `autoharness followup add "<what, where>"`. `init` shows open follow-ups;
@@ -156,7 +178,7 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 1. **Verify against the quality bar and keep the evidence** (light mode: verify, then teardown).
 
    ```bash
-   autoharness evidence add <file> --kind reference|result   # the thing itself; the whole result, then close-ups
+   autoharness evidence add <file> --kind reference|facts|result   # the thing itself; the whole result, then close-ups
    autoharness evidence add <file> --kind result --closeup   # a close-up or part of the latest whole result
    autoharness verify run "<test command>" --for B1|preserve   # autoharness runs it: exit code decides
    autoharness evidence diff                                 # code: the whole working-tree diff
@@ -178,7 +200,11 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    `autoharness verify run --args-file <file> --for B1`. No subagents at hand (or the critic must
    be another model)? `critic --run <agent>` starts the reviewer itself.
 
-   Work in rounds: produce, add the result, compare it side by side with the reference, fix the most important
+   After a critic finds blocking problems, do not fix from memory what your skills do not teach:
+   research how that part is done well and write it into the skill first (the next result is refused
+   until a skill of the task changes), then fix by it.
+
+   Work in rounds: block in the base, add the result, run the critic, then compare each result side by side with the reference, fix the most important
    differences, repeat. `--worst` is the worst still-fixable difference: blocker (fails its
    purpose), major (clearly wrong at a glance), minor (polish, or beyond the brief's fidelity).
    **You are not the judge of your own work**: give the `critic` prompt
