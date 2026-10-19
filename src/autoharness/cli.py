@@ -947,8 +947,15 @@ def _check_constraints(text: str, task) -> None:
 def _skills_not_installed(project, task) -> list[str]:
     """The skills the brief's areas are covered by that are neither installed for this task, kept in the project,
     nor in the user's library: an area is covered by a skill in use, not by its name."""
-    have = set(task.skills_lock()) | set(project.kept()["skills"])
+    lock = task.skills_lock()
+    have = set(lock) | set(project.kept()["skills"])
     missing = []
+    for name, entry in lock.items():
+        skill_md = task.skills_dir / name / "SKILL.md"
+        if (entry.get("source") == "generated" and name not in task.info().get("planned_skills", [])
+                and skill_md.is_file() and library.FILL_MARKER in skill_md.read_text("utf-8")):
+            missing.append(f"skill `{name}` is still an unfilled template: fill in every section from the sources "
+                           "you read before it counts for an area")
     for entry in task.info().get("brief", {}).get("domains", "").split(";"):
         m = DOMAIN.match(entry.strip())
         if m and m["how"].lower() == "skill":
