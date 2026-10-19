@@ -275,11 +275,15 @@ def same_problem(a: str, b: str) -> bool:
 
 def issues(diff: str) -> list[str]:
     """The differences of a review that still block: every listed item except those tagged minor only."""
-    # `1 a; 2 b` or one point per line; a `;` inside a point (`too round; fringe wrong`) does not split it
-    items = re.split(r";\s*(?=\d+[.)]?\s)|\n|\s(?=\d+[.)]\s)", diff.strip())
+    # `1 a; 2 b` or one point per line; a `;` inside a point (`too round; fringe wrong`) does not split it, and
+    # in a list of one point per line neither does a number inside a point (`broken by the panel from point 1.`)
+    inline = "" if "\n" in diff.strip() else r"|\s(?=\d+[.)]\s)"
+    items = re.split(r";\s*(?=\d+[.)]?\s)|\n" + inline, diff.strip())
     out = []
     for raw in items:
         item = re.sub(r"^\s*\d+[.)]?\s*", "", raw).strip()
+        if not _content_stems(item):
+            continue  # only tags (`— major, fixable`): a piece of a point, not a problem of its own
         tags = set(re.findall(r"\b(minor|major|blocker)\b", item.lower()))
         if re.search(r"\bseverity\W{0,3}none\b", item.lower()):
             tags.add("none")  # a critic that lists a match as a point tags it "severity: none"
@@ -474,6 +478,14 @@ def listing(items: list[dict]) -> str:
             line += f" [byte for byte the same file as evidence #{e['same_as']}]"
         out.append(line)
     return "\n".join(out)
+
+
+# a passing exit code shows only that the command passed: whether it could fail when the item is not met
+# is a judgement, so the critic makes it and an empty check stops counting for its item
+RUNS_ASK = """Open each command (and the script it runs) and judge whether it checks what its item asks: one
+that only finds a name, an id or a string in a file, or asserts what holds whatever the result is, does
+not check it. Under the heading "Runs", give one line per run: `#1: checks` or `#1: does not check - why`.
+"""
 
 
 LABELS = ("Labels marked \"author's label\" say what a file shows. They are the author's words, not findings: "
@@ -897,9 +909,10 @@ the whole worse, that is a difference of its own. Then give your full list as be
     if ran:
         focused += ("\nautoharness itself ran these checks (the exit code decides; the whole output is in each log; "
                     "\"stale\": the code changed after the run):\n" + "\n".join(
-                        f"- `{r['command']}`: {'passed' if r['passed'] else 'failed'}"
+                        f"- #{r['n']}" + (f" for {r['for']}" if r.get("for") else "")
+                        + f" `{r['command']}`: {'passed' if r['passed'] else 'failed'}"
                         f"{'' if runs.is_fresh(r, task.project.root) is not False else ', stale'}: {r['log']}"
-                        for r in ran) + "\n")
+                        for r in ran) + "\n" + RUNS_ASK)
     settled_points = [p for r in critics for p in r.get("settled", [])]
     if settled_points:
         focused += ("\nEarlier critics settled these disputed points from measurements in the files. Do not raise "

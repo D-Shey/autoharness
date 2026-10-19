@@ -32,6 +32,8 @@ PREVIOUS = re.compile(HEADING % "previous review", re.MULTILINE | re.IGNORECASE)
 COVERAGE = re.compile(HEADING % "brief coverage", re.MULTILINE | re.IGNORECASE)
 UNREQUESTED = re.compile(HEADING % "unrequested", re.MULTILINE | re.IGNORECASE)
 COMPARISON = re.compile(HEADING % "comparison", re.MULTILINE | re.IGNORECASE)
+RUNS = re.compile(HEADING % "runs", re.MULTILINE | re.IGNORECASE)
+RUN_LINE = re.compile(r"^\W*#?(\d+)\W+(checks|does not check)\b", re.MULTILINE | re.IGNORECASE)
 COVERAGE_LINE = re.compile(r"^\W*([BP]\d+)\W+(met|partial|missing|contradicts)\b", re.MULTILINE | re.IGNORECASE)
 # "1. x", "1) x", "### 1. x", "**1.** x", "**1. x**"
 ITEM = re.compile(r"^\s{0,3}(?:#+\s*)?(?:\*\*)?(\d+)[.)](?:\*\*)?\s+(.*)$")
@@ -93,7 +95,7 @@ def read(task: Task, path: Path, kind: str, subject: str) -> dict:
     body = body[:VERDICT_LINE.search(body).start()] if VERDICT_LINE.search(body) else body
     found = sorted((m.start(), m.end(), name) for name, rx in
                    (("previous", PREVIOUS), ("coverage", COVERAGE), ("unrequested", UNREQUESTED),
-                    ("comparison", COMPARISON))
+                    ("comparison", COMPARISON), ("runs", RUNS))
                    if (m := rx.search(body)))
     sections = {name: body[end:(found[i + 1][0] if i + 1 < len(found) else len(body))].strip()
                 for i, (_, end, name) in enumerate(found)}
@@ -103,6 +105,7 @@ def read(task: Task, path: Path, kind: str, subject: str) -> dict:
     return {"id": nonce, "kind": kind, "text": text, "body": body.strip(), "items": items(body),
             "previous": sections.get("previous", ""),
             "coverage": {k.upper(): v.lower() for k, v in COVERAGE_LINE.findall(sections.get("coverage", ""))},
+            "runs": {int(n): v.lower() for n, v in RUN_LINE.findall(sections.get("runs", ""))},
             "unrequested": "" if re.fullmatch(r"\W*none\W*", unrequested, re.IGNORECASE) else unrequested,
             "verdict": words[0].lower(),
             "check": check[-1].strip() if check else "", "reason": reason[-1].strip() if reason else "",
