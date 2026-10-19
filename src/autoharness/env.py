@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from autoharness import agents, approvals, transactions
+from autoharness import agents, approvals, lang, transactions
 from autoharness.agents import Agent, AgentError
 from autoharness.trust import ScanFinding, is_blocking, scan_skill
 
@@ -144,7 +144,7 @@ def skill_dir(base: Path, name: str) -> Path:
     return base / name
 
 
-DEPS_HEADING = re.compile(r"^#{1,6}\s*(?:dependencies|requirements|prerequisites|зависимости|требования)\b",
+DEPS_HEADING = re.compile(r"^#{1,6}\s*(?:" + "|".join(map(re.escape, lang.listed("dependency_headings"))) + r")\b",
                           re.IGNORECASE)
 TOOL_NAME = re.compile(r"`([A-Za-z][\w.+-]{1,40})`")
 

@@ -20,7 +20,7 @@ autoharness = "autoharness.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-autoharness = ["data/*.json", "skill/*.md"]
+autoharness = ["data/*.json", "data/lang/*.json", "skill/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

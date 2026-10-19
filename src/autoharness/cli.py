@@ -1866,7 +1866,7 @@ def hook_context(catalog: Catalog, prompt: str, session_id: str = "") -> str | N
 
 
 # PowerShell reads these as quotes: a single one ends a '...' string, a double one a "..." string, and inside
-# the other kind each is a plain character (`"Gosling’s"`), as it always is in Bash
+# the other kind each is a plain character (`"the hero’s"`), as it always is in Bash
 SMART_SINGLE, SMART_DOUBLE = "‘’‚‛", "“”„"
 SMART_QUOTES = SMART_SINGLE + SMART_DOUBLE
 SHELL_SPECIAL = set(";|&<>#(){}`\r\n")

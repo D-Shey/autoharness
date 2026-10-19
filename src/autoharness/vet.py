@@ -13,16 +13,16 @@ import re
 import tempfile
 from pathlib import Path
 
-from autoharness import approvals
+from autoharness import approvals, lang
 from autoharness.env import HarnessError, Stager, Task, _hash_dir
 
 MAX_FILE = 6_000      # characters of one file shown to the reviewer
 MAX_TOTAL = 30_000    # characters of all files together
 VERDICTS = ("fits", "breaks")
-# "none", "none: <why>", "no constraints", "нет", "нет ограничений", "без ограничений", "n/a", "-";
-# only `none:` may carry an explanation; "нет: только офлайн" or "нет, но офлайн" is a constraint
-NO_CONSTRAINTS = re.compile(r"^\s*(?:none\s*(?::.*)?|(?:no constraints?|нет|нет ограничений|без ограничений|n/?a|-)\s*\.?)?\s*$",
-                            re.IGNORECASE | re.DOTALL)
+# "none", "none: <why>", or a language's way to say there are none ("no constraints", "n/a", "-");
+# only `none:` may carry an explanation: "no constraints: but offline only" is a constraint
+NO_CONSTRAINTS = re.compile(r"^\s*(?:none\s*(?::.*)?|(?:" + "|".join(map(re.escape, lang.listed("no_constraints")))
+                            + r")\s*\.?)?\s*$", re.IGNORECASE | re.DOTALL)
 
 
 def constraints(task: Task) -> str:

@@ -3,16 +3,18 @@
 No stemmer library (stdlib only), so two cheap rules stand in for one:
 
 - words of STEM letters or more compare by their first STEM letters
-  ("документация" / "документацию", "исследуй" / "исследовать"), as long as
+  ("documentation" / "documentations", "research" / "researching"), as long as
   the shared start covers all but the last SLACK letters of the keyword and
   the word is at most ENDING letters shorter than it, so a short word is not
   taken for a long keyword that merely starts with it ("light" is not
-  "lighthouse", "документ" is not "документация");
-- shorter keywords are written as stems in the catalog ("баз", "тест", "форм")
-  and match a word that is the stem plus a common English or Russian ending
-  ("базе", "тесты", "forms"), but not a longer word that merely starts with it
-  ("формат", "вебинар", "format");
-- keywords under three letters ("pr", "бд", "ci") match only as whole words.
+  "lighthouse", "document" is not "documentation");
+- shorter keywords are written as stems in the catalog ("test", "form")
+  and match a word that is the stem plus a common ending of any language
+  autoharness reads ("tests", "forms"), but not a longer word that merely
+  starts with it ("format");
+- keywords under three letters ("pr", "ci") match only as whole words.
+
+Stopwords and endings come from the language files (lang.py).
 """
 
 from __future__ import annotations
@@ -20,18 +22,14 @@ from __future__ import annotations
 import os
 import re
 
+from autoharness import lang
+
 WORD = re.compile(r"[^\W_]+", re.UNICODE)
 STEM = 5
 SLACK = 4
 ENDING = 2  # letters an inflected word may be shorter than its keyword
-STOP = {"the", "and", "for", "with", "from", "into", "this", "that", "please", "make", "should", "would",
-        "could", "there", "their", "about", "which", "using", "don't", "dont",
-        "для", "как", "что", "это", "или", "при", "без", "все", "под", "было", "была", "были", "будет",
-        "если", "надо", "нужно", "можно", "чтобы", "чтоб", "тогда", "вообще", "задумано", "сделай",
-        "сделать", "давай", "почему", "теперь", "всегда", "потом", "очень", "только", "также", "тоже"}
-ENDINGS = {"", "s", "es", "ed", "ing", "er", "ers",
-           "а", "я", "у", "ю", "е", "и", "ы", "ой", "ей", "ом", "ем", "ам", "ям", "ах", "ях",
-           "ов", "ев", "ами", "ями", "ет", "ют", "ит", "ят", "ут"}
+STOP = set(lang.listed("stopwords"))
+ENDINGS = set(lang.listed("endings")) | {""}
 
 
 def words(text: str) -> list[str]:
@@ -49,7 +47,7 @@ def _word_matches(keyword: str, word: str) -> bool:
     if len(keyword) >= STEM:
         shared = len(os.path.commonprefix([keyword, word]))
         # an ending changes a word by a letter or two; a word much shorter than the keyword is another
-        # word that happens to start it ("документ" is not "документация")
+        # word that happens to start it ("document" is not "documentation")
         return shared >= max(STEM, len(keyword) - SLACK) and len(word) >= len(keyword) - ENDING
     return word.startswith(keyword) and word[len(keyword):] in ENDINGS
 
