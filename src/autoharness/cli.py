@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 from pathlib import Path
 
@@ -118,25 +119,32 @@ def discovery_queries(catalog: Catalog, task_text: str) -> list[str]:
 def search_mcp_sources(catalog: Catalog, query: str, limit: int, timeout: float = 8.0) -> tuple[list[dict], list[str]]:
     """MCP servers for a query, as trust reports with a description: Anthropic's curated plugin marketplace
     first (one fast file), then the official registry, whose search can take longer than a budget allows.
-    One source failing leaves the other's results: (results, the errors)."""
+    Both sources, and each plugin's server file, are fetched at once; one source failing leaves the other's
+    results: (results, the errors)."""
     fetch = lambda url: registry.quick_get_json(url, timeout)  # noqa: E731
-    results, errors = [], []
-    try:
-        for plugin in registry.search_marketplace(query, limit=limit * 2, fetch=fetch):
-            if servers := registry.marketplace_servers(plugin, fetch):
-                rep = score_marketplace(registry.MARKETPLACE_PREFIX + plugin["name"], plugin, servers).to_dict()
-                results.append(rep | {"description": plugin.get("description", "")})
-            if len(results) >= limit:
-                break
-    except Exception as e:  # noqa: BLE001 - one failed source must not hide the other
-        errors.append(f"claude-plugins-official: {e}")
-    try:
+
+    def from_marketplace() -> list[dict]:
+        plugins = registry.search_marketplace(query, limit=limit * 2, fetch=fetch)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            servers = list(pool.map(lambda p: registry.marketplace_servers(p, fetch), plugins))
+        return [score_marketplace(registry.MARKETPLACE_PREFIX + p["name"], p, found).to_dict()
+                | {"description": p.get("description", "")} for p, found in zip(plugins, servers) if found][:limit]
+
+    def from_registry() -> list[dict]:
         found = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict()
                  | {"description": e["server"].get("description", "")}
                  for e in registry.search_mcp(query, limit=limit, fetch=fetch)]
-        results += sorted(found, key=lambda r: r["score"], reverse=True)
-    except Exception as e:  # noqa: BLE001
-        errors.append(f"registry.modelcontextprotocol.io: {e}")
+        return sorted(found, key=lambda r: r["score"], reverse=True)
+
+    results, errors = [], []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = [("claude-plugins-official", pool.submit(from_marketplace)),
+                ("registry.modelcontextprotocol.io", pool.submit(from_registry))]
+        for source, job in jobs:
+            try:
+                results += job.result()
+            except Exception as e:  # noqa: BLE001 - one failed source must not hide the other
+                errors.append(f"{source}: {e}")
     return results, errors
 
 
