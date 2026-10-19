@@ -399,7 +399,7 @@ def cmd_evidence(args, project, catalog):
         raise HarnessError(why)
     if (args.action == "diff" or args.kind == "result") \
             and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
-            and (unready := task.planned_skill_problems()[0]):
+            and (unready := task.planned_skill_problems()[0] + _skills_not_installed(project, task)):
         raise HarnessError("prepare before the first result: the skills the brief creates hold the know-how the "
                            "work is built on, from the sources you read. " + "; ".join(unready))
     if args.action == "diff":
@@ -805,7 +805,10 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
              f"At least {MIN_DOMAINS} areas. For each, first run `autoharness search skill|mcp \"<query>\"` (and "
              "`autoharness need`), then take what fits (`skill`/`mcp`, also named as `take` in --candidates) or, "
              "when nothing fits, create the skill from the sources you read (`create`, also in --gaps). Knowing it "
-             "already is not a cover: what you know goes into the skill you create.")
+             "already is not a cover: what you know goes into the skill you create. The areas are what the work "
+             "itself is made of and takes skill in (for a picture: say figures, anatomy, light; for a service: say "
+             "its protocol, data model, concurrency), named as specifically as the task allows; how you check it "
+             "goes in --verify.")
     entries = [e.strip() for e in (text or "").split(";") if e.strip()]
     if len(entries) < MIN_DOMAINS:
         raise HarnessError(usage)
@@ -822,10 +825,33 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
         if how == "create" and name not in planned:
             raise HarnessError(f"area `{m['area'].strip()}` creates `{name}`: name it in --gaps too "
                                f"(`create {name}: <capability>`)")
+        found = next((s.get("results", []) for s in searches if s["query"].strip().lower() == query), [])
+        real = how == "skill" and library.exists(name) or any(
+            r.lower() == name.lower() or re.search(rf"[@/]{re.escape(name.lower())}$", r.lower()) for r in found)
+        if how in ("skill", "mcp") and not real:
+            raise HarnessError(f"area `{m['area'].strip()}`: `{name}` is not among what the search `{query}` found"
+                               + (" nor a skill in your library" if how == "skill" else "") + ": name a "
+                               f"{how} that search returned (" + (", ".join(found) or "it found nothing") + "), "
+                               "or create the skill (`create <skill-name>`)")
         if how in ("skill", "mcp") and not re.search(rf"{re.escape(name)}\s*:\s*take\b", candidates, re.IGNORECASE):
             raise HarnessError(f"area `{m['area'].strip()}` is covered by `{name}`: name it in --candidates as "
                                f"`{name}: take, <why>`")
     return "; ".join(entries)
+
+
+def _skills_not_installed(project, task) -> list[str]:
+    """The skills the brief's areas are covered by that are neither installed for this task, kept in the project,
+    nor in the user's library: an area is covered by a skill in use, not by its name."""
+    have = set(task.skills_lock()) | set(project.kept()["skills"])
+    missing = []
+    for entry in task.info().get("brief", {}).get("domains", "").split(";"):
+        m = DOMAIN.match(entry.strip())
+        if m and m["how"].lower() == "skill":
+            name = m["name"].split("@")[-1]
+            if name not in have and not library.exists(name):
+                missing.append(f"area `{m['area'].strip()}` is covered by skill `{m['name']}`, not installed: "
+                               f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`")
+    return missing
 
 
 def cmd_brief(args, project, catalog):
