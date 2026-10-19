@@ -200,6 +200,10 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    `autoharness verify run --args-file <file> --for B1`. No subagents at hand (or the critic must
    be another model)? `critic --run <agent>` starts the reviewer itself.
 
+   After a critic finds blocking problems, do not fix from memory what your skills do not teach:
+   research how that part is done well and write it into the skill first (the next result is refused
+   until a skill of the task changes), then fix by it.
+
    Work in rounds: block in the base, add the result, run the critic, then compare each result side by side with the reference, fix the most important
    differences, repeat. `--worst` is the worst still-fixable difference: blocker (fails its
    purpose), major (clearly wrong at a glance), minor (polish, or beyond the brief's fidelity).

@@ -397,6 +397,9 @@ def cmd_evidence(args, project, catalog):
             and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
             and (why := evidence.needs_facts(catalog, task)):
         raise HarnessError(why)
+    if (args.action == "diff" or args.kind == "result") and not args.closeup \
+            and (why := _unresearched_review(task)):
+        raise HarnessError(why)
     if (args.action == "diff" or args.kind == "result") \
             and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
             and (unready := task.planned_skill_problems()[0] + _skills_not_installed(project, task)):
@@ -612,7 +615,10 @@ def cmd_review(args, project, catalog):
                      "\"<their words>\"`). Do not run another critic before they answer."})
         return EXIT_APPROVAL
     if item["fixable"]:
-        nxt = ("Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
+        nxt = (("First research each point your skills do not already teach: how that part is done well, from "
+                "sources you search and read, written into the skill with its source (the next result is refused "
+                "until a skill of this task changes). " if item["by"] == "critic" and task.skills_lock() else "")
+               + "Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
                "close-ups of the parts in question), and review again. If you believe a critic point is wrong, "
                "do not drop it yourself: add a close-up and run `autoharness critic --dispute \"<the point>\"`.")
     else:
@@ -837,6 +843,34 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
             raise HarnessError(f"area `{m['area'].strip()}` is covered by `{name}`: name it in --candidates as "
                                f"`{name}: take, <why>`")
     return "; ".join(entries)
+
+
+def _unresearched_review(task) -> str | None:
+    """Why the next result is refused yet: the latest critic found blocking problems in the latest result, and no
+    skill of this task has been changed since. A fix of what the work lacks know-how for, made from memory, comes
+    back as crude as the first try; the technique is looked up and written into a skill first."""
+    info = task.info()
+    reviews = [r for r in info.get("reviews", []) if r["by"] == "critic"]
+    if not reviews or reviews[-1]["worst"] not in evidence.BLOCKING:
+        return None
+    last = reviews[-1]
+    if any(e["kind"] == "result" and e["n"] > (last.get("result") or 0) for e in info.get("evidence", [])):
+        return None  # the round after this review already has its result
+    skills = [task.skills_dir / name / "SKILL.md" for name in task.skills_lock()]
+    if not skills:
+        return None
+    try:
+        since = time.mktime(time.strptime(last["time"], "%Y-%m-%dT%H:%M:%S"))
+    except (KeyError, ValueError):
+        return None
+    if any(p.is_file() and p.stat().st_mtime > since for p in skills):
+        return None
+    return ("the critic found blocking problems: before fixing them, find out how each is done well. For every "
+            "point your skills do not already teach (how to build that part, the technique, the known pitfalls), "
+            "search for it (the web, docs, worked examples, `autoharness search skill \"<query>\"`), read the best "
+            "sources and write the technique with its source into the skill it belongs to ("
+            + ", ".join(task.skills_lock()) + "), or a new one (`autoharness skill new`). Then fix by it and add "
+            "the result.")
 
 
 def _skills_not_installed(project, task) -> list[str]:
