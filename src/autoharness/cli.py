@@ -412,6 +412,10 @@ def cmd_evidence(args, project, catalog):
                "of result and the close-ups or parts added after it with `--closeup`"
                + (" (a crop smaller than the whole is taken as one)" if item.get("media") == "image" else "")
                + "; earlier versions are drafts it does not see. " + nxt)
+    if args.kind == "reference":
+        nxt = ("Check that it is the thing itself the task names (the original, as published or as it really "
+               "is), not someone's version of it (fan art, a remake, a mockup, an example from a blog): a "
+               "version is only a hint, find the original. " + nxt)
     if args.kind == "reference" and item.get("media") == "image":
         nxt = ("Check that it shows everything the task names, whole and uncropped; if a part is cut off or "
                "missing, find a reference that shows it and add it as well. " + nxt)

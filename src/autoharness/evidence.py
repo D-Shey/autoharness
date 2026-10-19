@@ -976,6 +976,10 @@ Target fidelity: {fidelity}. Judge at that level: detail beyond it ({beyond}) is
 Open and study these files yourself:
 Reference:
 {ref_lines}
+First check the reference itself: is it the original the task names (as published, or as it really is),
+or someone's version of it (fan art, a remake, a mockup, an example), or a different subject? If it is not
+the original, or it does not show what the task describes, say so as your first difference, a blocker:
+work matched to the wrong reference fails the task however close it is.
 Result to judge{whole}:
 {listing(results)}
 {LABELS}

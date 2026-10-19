@@ -51,7 +51,7 @@ In full mode, answer in writing before listing tools:
 
 1. **What does a good result look like, and how will I tell?** A quality bar and a check, not
    "it renders".
-2. **What input is missing?** The thing the result must match (the film still, the product
+2. **What input is missing?** The original the result must match, not someone's version of it (the film still, the product
    photo, the API's actual response, sample data), not a description of it. Working from memory
    when the real thing can be looked up is a capability gap, often the biggest. Get it first.
 3. **What are the user's constraints?** Verbatim ("no new dependencies", "must run offline").
