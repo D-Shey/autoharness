@@ -5,10 +5,32 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autoharness"
 version = "0.1.0"
-description = "Meta-harness: assemble a task-scoped set of skills and MCP servers for a coding agent, then tear it down."
+description = "Engineering discipline for coding agents: prepare before building, check against the original, let an independent critic judge the result."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+license = { text = "MIT" }
+authors = [{ name = "Denis Sheychenko" }]
+keywords = ["ai-agents", "coding-agents", "mcp", "model-context-protocol", "claude-code", "codex", "gemini-cli", "agent-skills", "llm", "developer-tools"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/D-Shey/autoharness"
+Documentation = "https://github.com/D-Shey/autoharness/tree/main/docs"
+Issues = "https://github.com/D-Shey/autoharness/issues"
+Changelog = "https://github.com/D-Shey/autoharness/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

@@ -1,14 +1,12 @@
 # Generated Skills Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Let the agent turn what it learned during a task into a skill, check it for leaks, save it to a local library with the user's consent, and install it in other projects as `local:<name>`.
 
 **Architecture:** A new `library.py` owns the library on disk (`~/.autoharness/skills/`), the leak/format checks and a stager that installs from the library. `env.py` gets `Task.new_skill`, `local:` spec parsing and teardown handling of unsaved generated skills. `cli.py` gets the `skill new|save|list|delete` command and `local:` support in `add`, `need`, `teardown`.
 
 **Tech Stack:** Python 3.10+, stdlib only, pytest.
 
-**Spec:** `docs/superpowers/specs/2026-09-21-generated-skills-design.md`
+**Spec:** `docs/design/specs/2026-09-21-generated-skills-design.md`
 
 ## Global Constraints
 

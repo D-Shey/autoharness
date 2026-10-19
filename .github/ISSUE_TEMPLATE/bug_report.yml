@@ -1,0 +1,45 @@
+name: Bug report
+description: AutoHarness did something wrong or failed
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you or the agent ran, what AutoHarness answered, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence of `autoharness` commands (or agent prompt) that shows it.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: AutoHarness version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options: [Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands, None (CLI only)]
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options: [Linux, macOS, Windows]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: The JSON AutoHarness printed, or `autoharness status --full`. Remove tokens and other secrets first.
+      render: json

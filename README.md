@@ -1,8 +1,37 @@
+<div align="center">
+
 # AutoHarness
 
-**AutoHarness keeps an agent from taking on a task unprepared. The agent works out what the task
-needs, gathers the know-how and tools for it, and an independent critic checks the result until the
-quality is acceptable.**
+**Engineering discipline for coding agents.**<br>
+Prepare before building. Check against the original. Let someone else judge the result.
+
+[![Tests](https://github.com/D-Shey/autoharness/actions/workflows/tests.yml/badge.svg)](https://github.com/D-Shey/autoharness/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
+![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+Works with **Claude Code** · **Codex CLI** · **Gemini CLI** · **Antigravity CLI** · **Qwen Code** · **GigaCode** · **Strands**
+
+[How it works](#the-process) · [Quick start](#quick-start) · [Example](#example) · [Security](docs/security.md) · [Reference](docs/reference.md)
+
+</div>
+
+---
+
+AutoHarness keeps an agent from taking on a task unprepared. The agent works out what the task needs,
+gathers the know-how and tools for it, and an independent critic checks the result until the quality
+is acceptable.
+
+| An agent on its own | The same agent with AutoHarness |
+|---|---|
+| Writes from memory | Gets the original first: the real API response, the data sample, the mockup |
+| Guesses how the work is done | Finds and reads how it is done well, and cites it |
+| Installs whatever looks right | Installs only what passes a trust check and the user's constraints |
+| Fills open questions with its own habits | Picks what the person who asked would expect, and writes it down |
+| Marks its own work "done" | A fresh reviewer that did not do the work rules on it |
+| Loops on the same fix | Changes approach, then asks an arbiter, then the user |
+| Forgets everything after the session | Keeps what it learned as skills and recipes for the next task |
 
 A coding agent (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands)
 usually goes at a task head-on. It writes from memory without looking at what the result has to
@@ -16,10 +45,18 @@ disciplines (aerodynamics, materials, strength, control), what is already known 
 up, hypotheses are checked on models, and only then is it built. AutoHarness brings that order to
 the agent:
 
-```
-analysis → preparation → brief → install → base → review → learn → … → teardown
-              │ areas of know-how, skills and MCP servers, method, reference, facts
-              └─ what is missing: find it, and if there is nothing to find, write a skill
+```mermaid
+flowchart LR
+    A[Analysis<br><code>init</code>] --> P[Preparation<br>areas · method · reference · facts]
+    P --> B[Brief<br>the plan, recorded]
+    B --> I[Install<br>trust · constraints]
+    I --> S[Base<br>block-in first]
+    S --> R{Review<br>independent critic}
+    R -- blocking --> L[Learn<br>update the skill, then fix]
+    L --> R
+    R -- minor or none --> T[Teardown<br>skills · recipes · lessons]
+    P -. nothing fits .-> W[Write a skill<br>from the sources read]
+    W --> B
 ```
 
 The two sides split the work: **the agent thinks, the CLI keeps count and guards the order**. The
@@ -305,6 +342,8 @@ and give it a task.
 - [docs/installation.md](docs/installation.md): installing for every agent, the gateway, the hook,
   uninstalling.
 - [docs/security.md](docs/security.md): how each protection works and where it ends.
+- [docs/design/](docs/design/): the specs and plans features were built from.
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 
