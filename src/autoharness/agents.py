@@ -355,13 +355,16 @@ def detect(environ: dict | None = None) -> str | None:
 
 
 # The id of the agent session a shell command runs in, the same id its hooks receive as session_id
-_SESSION = ("CLAUDE_CODE_SESSION_ID", "ANTIGRAVITY_CONVERSATION_ID", "CODEX_THREAD_ID")
+_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID"}
 
 
-def session_id(environ: dict | None = None) -> str:
-    """The agent session running this command, or "" outside one (the user's own terminal)."""
+def session_id(environ: dict | None = None, agent: str | None = None) -> str:
+    """The agent session running this command, or "" outside one (the user's own terminal). An agent started
+    from another agent's shell inherits that one's id as well: the agent named for the command comes first."""
     environ = os.environ if environ is None else environ
-    return next((environ[v] for v in _SESSION if environ.get(v)), "")
+    if agent in _SESSION and environ.get(_SESSION[agent]):
+        return environ[_SESSION[agent]]
+    return next((environ[v] for v in _SESSION.values() if environ.get(v)), "")
 
 
 def get(name: str | None) -> Agent:

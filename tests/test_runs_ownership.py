@@ -855,3 +855,14 @@ def test_min_mode_raises_a_lighter_choice(project, capsys, monkeypatch):
     monkeypatch.setenv("AUTOHARNESS_MIN_MODE", "any")
     code, res = ah(capsys, project, "init", "fix the yearly report", "--mode", "light")
     assert res["mode"] == "light" and "mode_raised" not in res
+
+
+def test_an_agent_started_from_another_agents_shell_is_its_own_session(project, capsys, monkeypatch):
+    from autoharness import agents
+    env = {"CLAUDE_CODE_SESSION_ID": "outer", "ANTIGRAVITY_CONVERSATION_ID": "inner"}
+    assert agents.session_id(env, agent="agy") == "inner" and agents.session_id(env) == "outer"
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "outer")
+    monkeypatch.setenv("ANTIGRAVITY_CONVERSATION_ID", "inner")
+    code = cli.main(["--agent", "agy", "--project", str(project.root), "init", "fix the quarterly report"])
+    capsys.readouterr()
+    assert code == 0 and Project(project.root, "agy").task().info()["owner"] == "inner"

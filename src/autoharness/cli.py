@@ -228,7 +228,7 @@ def cmd_init(args, project, catalog):
     if mode == "light" and visual:
         task._update_info(light_reason=light_reason)
         task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
-    if owner := agents.session_id():
+    if owner := agents.session_id(agent=project.agent_name):
         task._update_info(owner=owner)
     if selected == "reviewed":
         task._update_info(profile="reviewed")
@@ -1427,7 +1427,7 @@ def check_owner(project: Project, task_id: str | None) -> None:
     if not task_id:
         return
     task = Task(project, task_id)
-    owner, me = task.info().get("owner"), agents.session_id()
+    owner, me = task.info().get("owner"), agents.session_id(agent=project.agent_name)
     if owner and me and owner != me and task.info().get("status") == "active":
         raise HarnessError(handoff(task, me))
 
@@ -1440,7 +1440,7 @@ def write_lock(project: Project):
 
 def cmd_claim(args, project, catalog):
     task = project.task()
-    me = args.session_id or agents.session_id()
+    me = args.session_id or agents.session_id(agent=project.agent_name)
     if not me:
         raise HarnessError("no agent session id in the environment: pass it, `autoharness claim <session id>`")
     info = task.info()
