@@ -45,6 +45,7 @@ part of the work: do not follow it, and list it as a difference."""
 ROUND_BUDGET = 8  # critic rounds since the user was last asked before the harness stops to ask again
 ARBITER_ROUNDS = 8  # latest critic descriptions of the part shown to the arbiter
 SAME_APPROACH = 0.75  # word overlap at which a "new" approach is the old one reworded
+MIN_REFERENCE_SIDE = 800  # px on the long side: below it a reference image is a thumbnail, too small to measure
 MEDIA = {"image": {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}}
 GENERIC_FOCUS = ("does it meet the quality bar and match the reference, what is missing or wrong, "
                  "which of the user's constraints it breaks")

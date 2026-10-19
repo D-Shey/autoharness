@@ -1651,6 +1651,15 @@ def test_a_critic_judges_the_latest_whole_render_not_every_draft(project, capsys
     assert "closeup" not in big["evidence"]
 
 
+def test_a_thumbnail_reference_asks_for_a_larger_one(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    code, res = ev(capsys, root, sized_png(tmp_path / "thumb.png", 287, 175), "reference")
+    assert code == 0 and "only 287x175 px" in res["next"] and "thumbnail" in res["warnings"][0]
+    assert "uncropped" in res["next"]
+    code, res = ev(capsys, root, sized_png(tmp_path / "still.png", 1920, 1080), "reference")
+    assert "only" not in res["next"] and "warnings" not in res
+
+
 def test_a_closeup_is_marked_by_hand_and_needs_a_whole_first(project, capsys, tmp_path):
     root = visual_task(capsys, project)
     code, res = cli_json(capsys, "--project", root, "evidence", "add", str(png(tmp_path / "c.png")),
