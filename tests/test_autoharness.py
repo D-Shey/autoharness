@@ -1640,9 +1640,9 @@ def test_a_critic_judges_the_latest_whole_render_not_every_draft(project, capsys
     root = visual_task(capsys, project)
     ev(capsys, root, png(tmp_path / "still.png"), "reference")
     drafts = [ev(capsys, root, sized_png(tmp_path / f"r{i}.png", 1600, 900), "result")[1] for i in (1, 2, 3)]
-    assert not any(d["evidence"].get("closeup") for d in drafts) and "whole view" in drafts[-1]["next"]
+    assert not any(d["evidence"].get("closeup") for d in drafts) and "new version of the whole" in drafts[-1]["next"]
     code, crop = ev(capsys, root, sized_png(tmp_path / "face.png", 400, 400), "result")
-    assert crop["evidence"]["closeup"] == drafts[-1]["evidence"]["n"] and "close-up of result" in crop["next"]
+    assert crop["evidence"]["closeup"] == drafts[-1]["evidence"]["n"] and "close-up or part of result" in crop["next"]
     code, res = cli_json(capsys, "--project", root, "critic")
     assert res["results"] == [drafts[-1]["evidence"]["file"], crop["evidence"]["file"]]
     assert drafts[0]["evidence"]["file"] not in res["prompt"]
@@ -2579,6 +2579,29 @@ def test_evidence_diff_includes_untracked_files(project, capsys):
     assert "+x = 2" in patch and "new_module.py" in patch and "+def f():" in patch
     assert ".autoharness" not in patch
     assert [p.name for p in (project.task().dir / "evidence").iterdir()] == [Path(res["evidence"]["file"]).name]
+
+
+def test_a_critic_of_code_sees_the_latest_diff_its_parts_and_proofs_not_older_diffs(project, capsys, tmp_path):
+    git_repo(project.root)
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "t")
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    _, old = cli_json(capsys, "--project", root, "evidence", "diff")
+    (project.root / "a.py").write_text("x = 3\n", "utf-8")
+    _, new = cli_json(capsys, "--project", root, "evidence", "diff")
+    assert "new version of the whole result" in new["next"]
+    log = tmp_path / "pytest.log"
+    log.write_text("3 passed", "utf-8")
+    _, part = cli_json(capsys, "--project", root, "evidence", "add", str(log), "--kind", "result", "--part")
+    assert part["evidence"]["closeup"] == new["evidence"]["n"]
+    proof = tmp_path / "api.json"
+    proof.write_text("{}", "utf-8")
+    cli_json(capsys, "--project", root, "verify", "record", "api", "--passed", "yes", "--evidence", str(proof))
+    code, res = cli_json(capsys, "--project", root, "critic")
+    files = [e["file"] for e in project.task().info()["evidence"]]
+    assert res["results"] == files[1:]               # the new diff, its log, then the check's proof
+    assert old["evidence"]["file"] not in res["prompt"]
+    assert "not how well it is made" in res["prompt"] and "passes without checking anything" in res["prompt"]
 
 
 def test_evidence_diff_refuses_an_empty_change(project, capsys):

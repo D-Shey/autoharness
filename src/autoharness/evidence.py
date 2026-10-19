@@ -94,8 +94,18 @@ def _is_closeup(size: tuple[int, int] | None, whole: dict | None) -> bool:
 
 
 def wholes(items: list[dict]) -> list[dict]:
-    """The results that are whole views: every result that is not a close-up of another."""
+    """The results that are whole: every result that is not a close-up or a part of another."""
     return [e for e in items if e["kind"] == "result" and not e.get("closeup")]
+
+
+def version_of(e: dict) -> str:
+    """What sort of result this is a version of: a later whole result of the same sort (the next diff, the
+    next render, the next draft of the report) replaces it; a check's proof stands beside the work."""
+    if e.get("proof"):
+        return "proof:" + e["proof"]
+    if "tree_state" in e:
+        return "diff"
+    return e.get("media") or Path(e.get("source") or e["file"]).suffix.lower() or "file"
 
 
 def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = None,
@@ -106,11 +116,14 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
         raise HarnessError(f"no such file: {path}")
     items = task.info().get("evidence", [])
     if closeup and kind != "result":
-        raise HarnessError("--closeup marks a close-up of a result: use it with --kind result")
+        raise HarnessError("--closeup marks a close-up or part of a result: use it with --kind result")
     media = media_of(path.name)
-    whole = next((e for e in reversed(wholes(items)) if e.get("media") == media), None)
-    if closeup and not whole:
-        raise HarnessError("a close-up needs the whole result first: add it without --closeup")
+    whole = next((e for e in reversed(wholes(items)) if e.get("media") == media and not e.get("proof")), None)
+    if closeup:
+        # a part named by hand may be of another sort than its whole (a test log beside the diff)
+        whole = whole or next((e for e in reversed(wholes(items)) if not e.get("proof")), None)
+        if not whole:
+            raise HarnessError("a close-up or part needs the whole result first: add it without --closeup")
     dest_dir = task.dir / "evidence"
     dest_dir.mkdir(exist_ok=True)
     dest = dest_dir / f"{len(items) + 1:02d}-{kind}-{path.name}"
@@ -118,13 +131,12 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
     item = {"n": len(items) + 1, "kind": kind, "file": str(dest), "source": str(path), "note": note,
             "media": media, "sha256": hashlib.sha256(dest.read_bytes()).hexdigest(),
             "added": time.strftime("%Y-%m-%dT%H:%M:%S")} | (extra or {})
-    if media == "image":
-        size = image_size(dest)
-        if size:
-            item["size"] = list(size)
-        # a round of images is one whole view and its close-ups; the author may not say which is which
-        if kind == "result" and (closeup or _is_closeup(size, whole)):
-            item["closeup"] = whole["n"]
+    size = image_size(dest) if media == "image" else None
+    if size:
+        item["size"] = list(size)
+    # a round is one whole result and its close-ups or parts; with images the author may not say which is which
+    if kind == "result" and (closeup or (not item.get("proof") and _is_closeup(size, whole))):
+        item["closeup"] = whole["n"]
     # a result byte for byte the same as a reference may be the reference handed in as the result:
     # recorded, so the author is warned and the critic is told, not refused (a faithful copy can be)
     other = "reference" if kind == "result" else "result"
@@ -681,15 +693,22 @@ VERDICT: blocker | major | minor | none"""
 
 
 def _one_view(results: list[dict], fresh: list[dict]) -> list[dict]:
-    """Of the image results in `fresh`, the latest whole view and the close-ups after it: earlier whole
-    renders of the round are drafts the author went past, not close-ups of the result. With only close-ups
-    in `fresh`, the whole view they belong to comes first."""
-    if not any(e.get("media") == "image" for e in fresh):
-        return fresh
-    whole = next((e for e in reversed(wholes(results)) if e["n"] <= fresh[-1]["n"]), None)
-    if not whole:
-        return fresh
-    return [whole] + [e for e in fresh if e["n"] > whole["n"] and e.get("closeup")]
+    """Of `fresh`, the latest whole result of each sort, each followed by its close-ups or parts: an earlier
+    diff, render or draft of the round is one the author went past, not a part of the result. A close-up
+    whose whole came before `fresh` brings that whole along; the work comes before any check's proof."""
+    by_n = {e["n"]: e for e in results}
+    kept: dict[str, dict] = {}
+    for e in fresh:
+        if not e.get("closeup"):
+            kept[version_of(e)] = e
+    for e in fresh:
+        whole = by_n.get(e.get("closeup"))
+        if whole:
+            kept.setdefault(version_of(whole), whole)
+    out = []
+    for whole in sorted(kept.values(), key=lambda w: (bool(w.get("proof")), w["n"])):
+        out += [whole] + [e for e in fresh if e.get("closeup") == whole["n"]]
+    return out or fresh
 
 
 def round_results(task: Task) -> list[dict]:
@@ -815,14 +834,17 @@ versions equally good as a whole. Then one sentence why.
 """
     beyond = ("for example photographic detail in a stylised drawing" if visual else
               "for example polish or cases the quality bar does not ask for")
-    # a lower fidelity owes less detail, not worse work: without this a critic files broken parts under "style"
-    craft = ("""
-The target fidelity lowers how much detail is owed, not how well it is made. At any fidelity, what a
-skilled maker working at that level would not let through is major: broken structure or proportions,
-parts that do not read as what they are, misaligned or clipped elements, a crude or unfinished look.
-A simpler or stylised level is never a reason to rate those minor. Judge the result as a piece of work,
-part by part, not only against the reference.
-""" if visual else "")
+    # a lower fidelity owes less, not worse work: without this a critic files a broken part under "beyond the bar"
+    broken = ("broken structure or proportions, parts that do not read as what they are, misaligned or clipped "
+              "elements, a crude or unfinished look" if visual else
+              "behaviour that is wrong on inputs the work will meet, errors left unhandled, a check or test that "
+              "passes without checking anything, output that is wrong or unreadable where it is used")
+    craft = f"""
+The target fidelity lowers how much is owed, not how well it is made. At any fidelity, what a skilled
+maker working at that level would not let through is major: {broken}. A simpler level or a smaller scope
+is never a reason to rate those minor. Judge the result as a piece of work, part by part, not only
+against the reference and the brief.
+"""
     whole = " (the whole result, then any close-ups of it)" if visual else ""
     see = ("Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up."
            if visual else "Describe what the files show and what running the result does, not what you expect.")

@@ -392,8 +392,9 @@ def cmd_evidence(args, project, catalog):
     if args.action == "diff":
         item = evidence.add_diff(task, project.root, args.base, args.note or "")
         out({"status": "ok", "evidence": item,
-             "next": "Review this diff: record your own pass with `autoharness review --by self ...`, then get an "
-                     "independent one with `autoharness critic`."})
+             "next": "Recorded as a new version of the whole result: the critic sees the latest diff, not earlier "
+                     "ones. Review this diff: record your own pass with `autoharness review --by self ...`, then get "
+                     "an independent one with `autoharness critic`."})
         return 0
     if not args.file or not args.kind:
         raise HarnessError("usage: autoharness evidence add <file> --kind reference|result [--note ...]")
@@ -403,11 +404,14 @@ def cmd_evidence(args, project, catalog):
            "Review this result: record your own pass with `autoharness review --by self ...`, then get an "
            "independent one with `autoharness critic`.")
     if item.get("closeup"):
-        nxt = (f"Recorded as a close-up of result #{item['closeup']}: the critic sees it with that whole view. If it "
-               "is a new whole render, it is not: add it again without --closeup, at the canvas size. " + nxt)
-    elif item.get("media") == "image" and args.kind == "result":
-        nxt = ("Recorded as a whole view: the critic judges the latest whole view and the close-ups added after "
-               "it (`--closeup`; a crop smaller than the whole is taken as one). " + nxt)
+        nxt = (f"Recorded as a close-up or part of result #{item['closeup']}: the critic sees it with that whole "
+               "result. If it is a new version of the whole, add it again without --closeup"
+               + (", at the full size" if item.get("media") == "image" else "") + ". " + nxt)
+    elif args.kind == "result":
+        nxt = ("Recorded as a new version of the whole result: the critic judges the latest version of each sort "
+               "of result and the close-ups or parts added after it with `--closeup`"
+               + (" (a crop smaller than the whole is taken as one)" if item.get("media") == "image" else "")
+               + "; earlier versions are drafts it does not see. " + nxt)
     warnings = ([f"this file is byte for byte the same as evidence #{item['same_as']}: a result must be what "
                  "you produced, not the reference itself; the critic is told"] if item.get("same_as") else [])
     out({"status": "ok", "evidence": item, "next": nxt} | ({"warnings": warnings} if warnings else {}))
@@ -2163,7 +2167,7 @@ def cmd_verify(args, project, catalog):
     if not args.passed or not args.evidence:
         raise HarnessError("verify record requires --passed yes|no and --evidence <file>")
     task = project.task()
-    proof = evidence.add(task, Path(args.evidence), "result", f"{args.kind} verification")
+    proof = evidence.add(task, Path(args.evidence), "result", f"{args.kind} verification", {"proof": args.kind})
     checks = task.info().get("checks", [])
     check = {"kind": args.kind, "passed": args.passed == "yes", "evidence": proof["n"]}
     task._update_info(checks=checks + [check])
@@ -2353,8 +2357,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--kind", choices=list(evidence.KINDS))
     s.add_argument("--base", default="HEAD", help="for `diff`: the revision to compare the working tree with")
     s.add_argument("--note", help="what it shows; reviewers see it as your label, not as a finding")
-    s.add_argument("--closeup", action="store_true",
-                   help="with --kind result: a close-up of part of the latest whole result, not a new whole")
+    s.add_argument("--closeup", "--part", dest="closeup", action="store_true",
+                   help="with --kind result: a close-up or another part of the latest whole result (a crop, a "
+                        "log beside the diff), not a new version of it")
     s = sub.add_parser("review",help="record one review round of the latest result")
     s.add_argument("--answer-file", help="with --by critic: the critic's answer, saved unedited; autoharness reads "
                                          "its list and VERDICT")
