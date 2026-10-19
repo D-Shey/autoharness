@@ -147,8 +147,10 @@ A browser tool that refuses `file://` (Playwright MCP does) opens a local page o
 
 Matching a reference (an API's response, a sample file, a layout, a picture, the old behaviour)?
 Take its facts from the reference itself with a tool, not from memory: field names and values,
-sizes, positions, timings, the exact output. Then check your result against the same facts, part
-by part, side by side.
+sizes, positions, timings, the exact output. Save them to a file and record it before the first
+result (`autoharness evidence add <file> --kind facts`); the critic checks the result against them.
+Build the first version as a block-in from these facts: layout, proportions and main structure,
+no detail yet, and run the critic on it before adding detail. A wrong base costs every later round.
 
 Found work outside this task (a bug next door, a critic point beyond the brief)? Do not fix it
 now and do not drop it: `autoharness followup add "<what, where>"`. `init` shows open follow-ups;
@@ -159,7 +161,7 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 1. **Verify against the quality bar and keep the evidence** (light mode: verify, then teardown).
 
    ```bash
-   autoharness evidence add <file> --kind reference|result   # the thing itself; the whole result, then close-ups
+   autoharness evidence add <file> --kind reference|facts|result   # the thing itself; the whole result, then close-ups
    autoharness evidence add <file> --kind result --closeup   # a close-up or part of the latest whole result
    autoharness verify run "<test command>" --for B1|preserve   # autoharness runs it: exit code decides
    autoharness evidence diff                                 # code: the whole working-tree diff
@@ -181,7 +183,7 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    `autoharness verify run --args-file <file> --for B1`. No subagents at hand (or the critic must
    be another model)? `critic --run <agent>` starts the reviewer itself.
 
-   Work in rounds: produce, add the result, compare it side by side with the reference, fix the most important
+   Work in rounds: block in the base, add the result, run the critic, then compare each result side by side with the reference, fix the most important
    differences, repeat. `--worst` is the worst still-fixable difference: blocker (fails its
    purpose), major (clearly wrong at a glance), minor (polish, or beyond the brief's fidelity).
    **You are not the judge of your own work**: give the `critic` prompt

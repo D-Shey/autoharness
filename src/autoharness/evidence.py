@@ -29,7 +29,9 @@ from pathlib import Path
 from autoharness import rulings, text
 from autoharness.env import HarnessError, Task
 
-KINDS = ("reference", "result")
+# facts: what the result must match, taken from a reference with a tool (measured, cropped, extracted, quoted),
+# written down before the first result so the work is built from them, not from memory
+KINDS = ("reference", "facts", "result")
 # worst difference still fixable in a review; the task may stop once it is at most "minor"
 SEVERITIES = ("none", "minor", "major", "blocker")
 BLOCKING = ("major", "blocker")
@@ -648,6 +650,22 @@ def _caps(catalog, task: Task) -> list:
     return [catalog.capabilities[n] for n in sorted(names) if n in catalog.capabilities]
 
 
+def needs_facts(catalog, task: Task) -> str | None:
+    """Why a result is refused yet: the task must match a reference, and no facts were taken from it."""
+    if not requirements(catalog, task).get("reference"):
+        return None
+    items = task.info().get("evidence", [])
+    if any(e["kind"] == "facts" for e in items):
+        return None
+    if not any(e["kind"] == "reference" for e in items):
+        return ("this task must match a reference: add the original first (`autoharness evidence add <file> --kind "
+                "reference`), then the facts you take from it (`--kind facts`)")
+    return ("before the first result, write down the facts the result must match, taken from the reference with a "
+            "tool, not by eye: sizes, positions and proportions of its main parts (crops, a grid, coordinates), "
+            "names, values and formats (quoted or extracted), whatever the task is judged on. Save them to a file "
+            "and `autoharness evidence add <file> --kind facts`; then build from them")
+
+
 def requirements(catalog, task: Task) -> dict:
     """Merged `requires` of the task's capabilities, plus what the brief opted into."""
     need: dict = {}
@@ -847,6 +865,14 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
                            "technique>\"`, rebuild that part, and add the new result with a close-up of it")
     focus = "; ".join(c.review for c in _caps(catalog, task) if c.review) or GENERIC_FOCUS
     ref_lines = listing(refs) or "- none: judge against the task and the quality bar only"
+    facts = [e for e in info.get("evidence", []) if e["kind"] == "facts"]
+    facts_text = "" if not facts else (
+        "Facts the author took from the reference (check a few of them against the reference yourself: a wrong "
+        "fact is a difference of its own). Check the result against each fact:\n" + listing(facts) + "\n")
+    if refs and not any(r["by"] == "critic" for r in info.get("reviews", [])):
+        facts_text += ("This is the first critic round, on the base of the work: judge the layout, proportions and "
+                       "main structure against the reference and the facts. Missing detail and polish are at most "
+                       "minor this round; a wrong base is major.\n")
     fidelity = brief.get("fidelity") or "the level the quality bar implies"
     # images are judged as a whole view plus close-ups; code, text and data by what the files hold. The work is
     # visual when the task needs images or has to match an image, not because a render of a document is attached
@@ -986,7 +1012,7 @@ Target fidelity: {fidelity}. Judge at that level: detail beyond it ({beyond}) is
 Open and study these files yourself:
 Reference:
 {ref_lines}
-First check the reference itself: is it the original the task names (as published, or as it really is),
+{facts_text}First check the reference itself: is it the original the task names (as published, or as it really is),
 or someone's version of it (fan art, a remake, a mockup, an example), or a different subject? If it is not
 the original, or it does not show what the task describes, say so as your first difference, a blocker:
 work matched to the wrong reference fails the task however close it is.

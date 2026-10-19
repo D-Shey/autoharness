@@ -389,6 +389,10 @@ def cmd_evidence(args, project, catalog):
     if args.action == "list":
         out({"evidence": task.info().get("evidence", []), "reviews": task.info().get("reviews", [])})
         return 0
+    if (args.action == "diff" or args.kind == "result") and not args.closeup \
+            and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
+            and (why := evidence.needs_facts(catalog, task)):
+        raise HarnessError(why)
     if args.action == "diff":
         item = evidence.add_diff(task, project.root, args.base, args.note or "")
         out({"status": "ok", "evidence": item,
@@ -397,10 +401,19 @@ def cmd_evidence(args, project, catalog):
                      "an independent one with `autoharness critic`."})
         return 0
     if not args.file or not args.kind:
-        raise HarnessError("usage: autoharness evidence add <file> --kind reference|result [--note ...]")
+        raise HarnessError("usage: autoharness evidence add <file> --kind reference|facts|result [--note ...]")
     item = evidence.add(task, Path(args.file), args.kind, args.note or "", closeup=args.closeup)
-    nxt = ("Study it and write down what the result must match."
+    first = args.kind == "result" and not any(e["kind"] == "result" and e["n"] != item["n"]
+                                              for e in task.info().get("evidence", []))
+    nxt = ("Study it, then take from it with a tool what the result must match (measure, crop, extract, quote), "
+           "save those facts to a file and `autoharness evidence add <file> --kind facts`."
            if args.kind == "reference" else
+           "Build the first version as a block-in from these facts: the layout, proportions and main structure "
+           "right, no detail or polish yet. Add it as a result and run `autoharness critic` on it before you add "
+           "any detail: a wrong base costs every round after it."
+           if args.kind == "facts" else
+           "This is the base: run `autoharness critic` on it now, before any detail."
+           if first else
            "Review this result: record your own pass with `autoharness review --by self ...`, then get an "
            "independent one with `autoharness critic`.")
     if item.get("closeup"):
@@ -1933,13 +1946,14 @@ EDITS_BEFORE_CRITIC = 20
 
 
 def _unchecked_edits(sid: str, task_id: str, info: dict) -> str | None:
-    """Why this edit is denied when the last review found blocking problems and the author has edited the work
-    EDITS_BEFORE_CRITIC times since without a critic seeing it; None otherwise. Counted per session and reset
-    by each critic review."""
+    """Why this edit is denied when the author has edited the work EDITS_BEFORE_CRITIC times without a critic
+    seeing it: after the first result, before any critic, or after a review that found blocking problems; None
+    otherwise. Counted per session and reset by each critic review."""
     reviews = info.get("reviews", [])
-    if not sid or not reviews or reviews[-1]["worst"] not in evidence.BLOCKING:
-        return None
     critics = sum(1 for r in reviews if r["by"] == "critic")
+    first = not critics and any(e["kind"] == "result" for e in info.get("evidence", []))
+    if not sid or not (first or reviews and reviews[-1]["worst"] in evidence.BLOCKING):
+        return None
     counter = session_file(sid).with_suffix(".edits.json")
     try:
         seen = json.loads(counter.read_text("utf-8"))
@@ -1955,7 +1969,8 @@ def _unchecked_edits(sid: str, task_id: str, info: dict) -> str | None:
         return None
     if seen["edits"] <= EDITS_BEFORE_CRITIC:
         return None
-    return (f"{seen['edits'] - 1} edits since a review found blocking problems, and no independent critic has seen "
+    since = "the first result" if first else "a review found blocking problems"
+    return (f"{seen['edits'] - 1} edits since {since}, and no independent critic has seen "
             "the work since: you are grading your own fixes. Record the current result (`autoharness evidence add "
             "<file> --kind result`, or `autoharness evidence diff` for code), run `autoharness critic` and record its "
             "answer; editing opens again with that review.")
