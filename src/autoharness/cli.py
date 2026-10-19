@@ -23,7 +23,7 @@ from autoharness import (__version__, agents, answers, approvals, config, egress
 from autoharness.catalog import Catalog
 from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
                              npx_stage_skill, parse_skill_spec, skill_dir)
-from autoharness.trust import curated_report, score_registry_entry, score_skill
+from autoharness.trust import curated_report, score_marketplace, score_registry_entry, score_skill
 
 EXIT_APPROVAL = 3
 VERIFY_KINDS = ("browser", "api", "api-client", "logs", "database")
@@ -42,9 +42,15 @@ def need_approval(what: str, report: dict) -> int:
 # --- resolution helpers -----------------------------------------------------
 
 def resolve_mcp(catalog: Catalog, name: str) -> tuple[dict, str]:
-    """Curated short names win; otherwise the name must be an exact MCP registry server name."""
+    """Curated short names win; then `claude-plugins-official/<plugin>` from Anthropic's marketplace;
+    otherwise the name must be an exact MCP registry server name."""
     if name in catalog.mcp_servers:
         return curated_report(name, catalog.mcp_servers[name]).to_dict(), "catalog"
+    if name.startswith(registry.MARKETPLACE_PREFIX):
+        found = registry.get_marketplace(name)
+        if not found:
+            raise HarnessError(f"{name!r} is not in Anthropic's plugin marketplace: `autoharness search mcp <query>`")
+        return score_marketplace(name, found["plugin"], found["servers"]).to_dict(), "claude-plugins-official"
     entry = registry.get_mcp(name)
     if not entry:
         raise HarnessError(f"{name!r} is neither a curated server ({', '.join(catalog.mcp_servers)}) nor in the MCP registry")
@@ -109,21 +115,46 @@ def discovery_queries(catalog: Catalog, task_text: str) -> list[str]:
     return list(dict.fromkeys(q for q in queries if q.strip()))[:DISCOVERY_QUERIES]
 
 
+def search_mcp_sources(catalog: Catalog, query: str, limit: int, timeout: float = 8.0) -> tuple[list[dict], list[str]]:
+    """MCP servers for a query, as trust reports with a description: Anthropic's curated plugin marketplace
+    first (one fast file), then the official registry, whose search can take longer than a budget allows.
+    One source failing leaves the other's results: (results, the errors)."""
+    fetch = lambda url: registry.quick_get_json(url, timeout)  # noqa: E731
+    results, errors = [], []
+    try:
+        for plugin in registry.search_marketplace(query, limit=limit * 2, fetch=fetch):
+            if servers := registry.marketplace_servers(plugin, fetch):
+                rep = score_marketplace(registry.MARKETPLACE_PREFIX + plugin["name"], plugin, servers).to_dict()
+                results.append(rep | {"description": plugin.get("description", "")})
+            if len(results) >= limit:
+                break
+    except Exception as e:  # noqa: BLE001 - one failed source must not hide the other
+        errors.append(f"claude-plugins-official: {e}")
+    try:
+        found = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict()
+                 | {"description": e["server"].get("description", "")}
+                 for e in registry.search_mcp(query, limit=limit, fetch=fetch)]
+        results += sorted(found, key=lambda r: r["score"], reverse=True)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"registry.modelcontextprotocol.io: {e}")
+    return results, errors
+
+
 def _search(catalog: Catalog, kind: str, query: str) -> dict:
-    fetch = lambda url: registry.http_get_json(url, timeout=8, retries=0)  # noqa: E731
+    fetch = lambda url: registry.quick_get_json(url, 8)  # noqa: E731
     try:
         if kind == "skill":
             found = [score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict() | {"installs": r["installs"]}
                      for r in registry.search_skills(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
             found.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
             results = [{"name": r["name"], "score": r["score"], "level": r["level"], "installs": r["installs"]} for r in found]
-        else:
-            results = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict()
-                       | {"description": e["server"].get("description", "")[:140]}
-                       for e in registry.search_mcp(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
-            results = [{"name": r["name"], "score": r["score"], "level": r["level"], "description": r["description"]}
-                       for r in sorted(results, key=lambda r: r["score"], reverse=True)]
-        return {"kind": kind, "query": query, "results": results}
+            return {"kind": kind, "query": query, "results": results}
+        found, errors = search_mcp_sources(catalog, query, DISCOVERY_RESULTS)
+        if errors and not found:
+            return {"kind": kind, "query": query, "error": "; ".join(errors)}
+        results = [{"name": r["name"], "score": r["score"], "level": r["level"], "description": r["description"][:140]}
+                   for r in found]
+        return {"kind": kind, "query": query, "results": results} | ({"partial": errors} if errors else {})
     except Exception as e:  # noqa: BLE001 - one failed source must not stop init
         return {"kind": kind, "query": query, "error": str(e)}
 
@@ -389,11 +420,13 @@ def cmd_need(args, project, catalog):
 
 def cmd_search(args, project, catalog):
     if args.kind == "mcp":
-        results = [score_registry_entry(e, catalog.trusted_mcp_publishers, catalog.trusted_mcp_namespaces).to_dict() | {"description": e["server"].get("description", "")}
-                   for e in registry.search_mcp(args.query, limit=args.limit)]
+        found, errors = search_mcp_sources(catalog, args.query, args.limit, timeout=20)
+        if errors and not found:
+            raise HarnessError("; ".join(errors))
         curated = [curated_report(n, e).to_dict() for n, e in catalog.mcp_servers.items() if args.query.lower() in n]
-        results = curated + sorted(results, key=lambda r: r["score"], reverse=True)
+        results = curated + found
     else:
+        errors = []
         results = []
         for r in registry.search_skills(args.query, limit=args.limit):
             rep = score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict()
@@ -401,7 +434,7 @@ def cmd_search(args, project, catalog):
         results.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
     if project.active_id():
         project.task().note_search(args.kind, args.query, [r["name"] for r in results[:DISCOVERY_RESULTS]])
-    out({"query": args.query, "kind": args.kind, "results": results})
+    out({"query": args.query, "kind": args.kind, "results": results} | ({"partial": errors} if errors else {}))
     return 0
 
 
