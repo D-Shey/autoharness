@@ -548,6 +548,8 @@ def cmd_review(args, project, catalog):
     pair = task.info().get("comparisons", {}).get(answer["id"]) if answer else None
     if pair and (cmp := evidence.compared(pair, answer["closer"])):
         extra["compared"] = cmp
+    if args.by == "critic":
+        extra["skill_sources"] = sorted(_skill_sources(task))  # what the skills cited when this review came in
     item = evidence.review(task, diff, worst, args.by, args.settled, extra | ({"warnings": warnings} if warnings else {}))
     for point in item.get("settled", []):
         rulings.add(project, point, "critic", task.id)   # later tasks in the project are told as well
@@ -616,8 +618,9 @@ def cmd_review(args, project, catalog):
         return EXIT_APPROVAL
     if item["fixable"]:
         nxt = (("First research each point your skills do not already teach: how that part is done well, from "
-                "sources you search and read, written into the skill with its source (the next result is refused "
-                "until a skill of this task changes). " if item["by"] == "critic" and task.skills_lock() else "")
+                "pages you search and read, written into the skill with the page's address; and, with a reference, "
+                "measure the parts the critic names from it and add that as facts (the next result is refused "
+                "until a skill cites a new page and the new facts are in). " if item["by"] == "critic" else "")
                + "Fix the blocker and major differences first, produce the result again, `evidence add` it (plus "
                "close-ups of the parts in question), and review again. If you believe a critic point is wrong, "
                "do not drop it yourself: add a close-up and run `autoharness critic --dispute \"<the point>\"`.")
@@ -856,21 +859,40 @@ def _unresearched_review(task) -> str | None:
     last = reviews[-1]
     if any(e["kind"] == "result" and e["n"] > (last.get("result") or 0) for e in info.get("evidence", [])):
         return None  # the round after this review already has its result
-    skills = [task.skills_dir / name / "SKILL.md" for name in task.skills_lock()]
-    if not skills:
+    owed = []
+    if task.skills_lock() and "skill_sources" in last and not (_skill_sources(task) - set(last["skill_sources"])):
+        owed.append(
+            "find out how each point is done well before fixing it. For every point your skills do not already teach "
+            "(how to build that part, the technique, the known pitfalls), search for it (the web, docs, worked "
+            "examples, `autoharness search skill \"<query>\"`), read the best sources and write the technique into "
+            "the skill it belongs to (" + ", ".join(task.skills_lock()) + ") or a new one (`autoharness skill new`), "
+            "with the address of the page you took it from (a page, not a site's front page). The critic's words "
+            "restated as rules are not research: a skill counts as changed when it cites a source it did not cite "
+            "at the review")
+    refs = [e["n"] for e in info.get("evidence", []) if e["kind"] == "reference"]
+    if refs and not any(e["kind"] == "facts" and e["n"] > (last.get("result") or 0)
+                        for e in info.get("evidence", [])):
+        owed.append(
+            "take the parts the critic names from the reference itself before you rebuild them: for each, measure "
+            "it with a tool (crop it, lay a grid over it, read off the coordinates of its outline and key points, "
+            "its proportions; for data or code, the exact values and output), save that to a file and `autoharness "
+            "evidence add <file> --kind facts`, then build the part through those points, not by eye")
+    if not owed:
         return None
-    try:
-        since = time.mktime(time.strptime(last["time"], "%Y-%m-%dT%H:%M:%S"))
-    except (KeyError, ValueError):
-        return None
-    if any(p.is_file() and p.stat().st_mtime > since for p in skills):
-        return None
-    return ("the critic found blocking problems: before fixing them, find out how each is done well. For every "
-            "point your skills do not already teach (how to build that part, the technique, the known pitfalls), "
-            "search for it (the web, docs, worked examples, `autoharness search skill \"<query>\"`), read the best "
-            "sources and write the technique with its source into the skill it belongs to ("
-            + ", ".join(task.skills_lock()) + "), or a new one (`autoharness skill new`). Then fix by it and add "
-            "the result.")
+    return "the critic found blocking problems. Before the next result: " + "; and ".join(owed) + "."
+
+
+SOURCE = re.compile(r"https?://[^\s/)\]>\"'`]+/[^\s)\]>\"'`]*[\w-][^\s)\]>\"'`]*")
+
+
+def _skill_sources(task) -> set[str]:
+    """The page addresses the task's skills cite (a page: a site's front page alone cites nothing)."""
+    found: set[str] = set()
+    for name in task.skills_lock():
+        md = task.skills_dir / name / "SKILL.md"
+        if md.is_file():
+            found |= {u.rstrip(".,;:") for u in SOURCE.findall(md.read_text("utf-8", errors="replace"))}
+    return found
 
 
 def _skills_not_installed(project, task) -> list[str]:
@@ -902,11 +924,12 @@ def cmd_brief(args, project, catalog):
         library.validate_name(name)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
     method = args.method.strip()
-    if "searched:" not in method.lower() or not (re.search(r"https?://", method)
+    if "searched:" not in method.lower() or not (SOURCE.search(method)
                                                  or re.search(r"nothing usable", method, re.IGNORECASE)):
         raise HarnessError(
             "--method must say how this kind of work is done well, from sources you found and read before starting, "
-            "not from memory: `<technique or steps>: <url>; ...; searched: <queries>`. Search the web (and the docs, "
+            "not from memory: `<technique or steps>: <url of the page you read, not a site's front page>; ...; "
+            "searched: <queries>`. Search the web (and the docs, "
             "papers, repos, tutorials of the field) for how others solved it: the algorithm, the workflow, the "
             "pitfalls. Only if nothing usable turned up: `nothing usable; searched: <queries>`.")
     if evidence.requirements(catalog, task).get("media") and not (args.fidelity or "").strip():

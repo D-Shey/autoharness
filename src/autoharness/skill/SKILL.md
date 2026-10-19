@@ -201,8 +201,11 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    be another model)? `critic --run <agent>` starts the reviewer itself.
 
    After a critic finds blocking problems, do not fix from memory what your skills do not teach:
-   research how that part is done well and write it into the skill first (the next result is refused
-   until a skill of the task changes), then fix by it.
+   research how that part is done well and write it into the skill with the address of the page you
+   took it from; with a reference, measure the parts the critic names from it and add that as facts
+   (`--kind facts`). Then build them through those measurements, not by eye. The next result is
+   refused until a skill cites a new page and the new facts are in. The critic's words restated as
+   rules are not research.
 
    Work in rounds: block in the base, add the result, run the critic, then compare each result side by side with the reference, fix the most important
    differences, repeat. `--worst` is the worst still-fixable difference: blocker (fails its
