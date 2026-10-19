@@ -1627,7 +1627,15 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
     while tool == "Bash" and last and ENV_PREFIX.match(last[0]):
         last = last[1:]
     return (all(len(c) == 2 and c[0] == "cd" for c in prefix)
-            and last[:1] == ["autoharness"])
+            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last)))
+
+
+def _looks_up_autoharness(words: list[str]) -> bool:
+    """`Get-Command autoharness`, `which autoharness` and the like: they only say whether the CLI is there."""
+    lookup = [w for w in words if not w.startswith("-") and w.lower() not in ("silentlycontinue", "ignore")]
+    return (len(lookup) == 2 and lookup[1] == "autoharness"
+            and lookup[0].lower() in ("get-command", "gcm", "which", "where", "where.exe", "type")) \
+        or words == ["command", "-v", "autoharness"]
 
 
 # The task records under .autoharness/ are written by autoharness only (config.json is the user's to edit).
