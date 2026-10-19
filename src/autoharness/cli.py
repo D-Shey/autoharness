@@ -212,6 +212,12 @@ def cmd_init(args, project, catalog):
     raised = floor != "any" and LEVELS.index(selected) < LEVELS.index(floor)
     if raised:
         selected = floor   # the user's setting, not the agent's judgement, sets the lowest level
+    # the same task started again: it does not restart below the level it was started at, or a brief that is
+    # hard to write is escaped by ending the task and starting it light
+    before = _earlier_level(project, args.task)
+    restarted = before and LEVELS.index(selected) < LEVELS.index(before)
+    if restarted:
+        selected = before
     mode = "light" if selected == "light" else "full"
     checked = [c.name for c, _ in classified if c.requires]
     # an image to match is the case agents skip most (drawing from memory): light mode has to be argued for
@@ -236,6 +242,10 @@ def cmd_init(args, project, catalog):
     if raised:
         result["mode_raised"] = f"to {floor} by the min_mode setting ({floor_source})"
         task.log(f"mode raised to {floor} by the min_mode setting ({floor_source})")
+    if restarted:
+        result["mode_raised"] = (f"to {before}: this task was started at that level before, and starting it again "
+                                 "does not lower it. Do what the earlier start asked for (its brief) instead")
+        task.log(f"mode raised to {before}: the same task was started at that level before")
     if mode == "light":
         # everything else init prints serves discovery: light mode does none, so it would only fill the context
         if classified:
@@ -1886,6 +1896,22 @@ def _autoharness_words(tool: str, tool_input: dict) -> list[str]:
 
 
 # Flags that end a task on the user's word: the agent may pass them only after the user said something in the task
+def _earlier_level(project, text: str) -> str | None:
+    """The highest level this project started the same task text at before, if it did."""
+    found = None
+    for info_path in (project.state / "tasks").glob("*/task.json"):
+        try:
+            info = json.loads(info_path.read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        if info.get("task", "").strip() != text.strip():
+            continue
+        level = "reviewed" if info.get("profile") == "reviewed" else info.get("mode", "full")
+        if level in LEVELS and (found is None or LEVELS.index(level) > LEVELS.index(found)):
+            found = level
+    return found
+
+
 USER_FLAGS = ("--accepted", "--force")
 
 
