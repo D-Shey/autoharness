@@ -2070,6 +2070,9 @@ def _unchecked_edits(sid: str, task_id: str, info: dict) -> str | None:
     otherwise. Counted per session and reset by each critic review."""
     reviews = info.get("reviews", [])
     critics = sum(1 for r in reviews if r["by"] == "critic")
+    if any(a["kind"] == "critic" and not a.get("used") and not a.get("retired")
+           for a in info.get("answer_ids", {}).values()):
+        return None  # a critic prompt is out: its answer has to be saved to a file to be recorded
     first = not critics and any(e["kind"] == "result" for e in info.get("evidence", []))
     if not sid or not (first or reviews and reviews[-1]["worst"] in evidence.BLOCKING):
         return None
