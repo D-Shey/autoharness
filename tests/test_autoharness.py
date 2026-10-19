@@ -3149,6 +3149,11 @@ BRIEF_AS_DOCUMENTED = ('autoharness brief --goal "report matches the ledger" --i
     ("Bash", "autoharness \\' ; rm x ; \\'", False),
     ("Bash", "autoharness $'a\\' ' ; rm x ; '", False),
     ("PowerShell", 'autoharness "a\u201c ; rm x ; \u201cb"', False),
+    # a typographic apostrophe in a task text is a plain character inside "...", in both shells
+    ("PowerShell", 'autoharness --agent agy init "Gosling\u2019s character. Don\'t use x" --mode full', True),
+    ("Bash", 'autoharness init "Gosling\u2019s character"', True),
+    ("PowerShell", "autoharness init 'a\u2019 ; rm x ; \u2019b'", False),   # ends '...' in PowerShell
+    ("PowerShell", "autoharness init a\u2019s", False),                     # starts a string in PowerShell
     ("PowerShell", 'autoharness @"\nx\n"@ ; rm x', False),
     ("Bash", "autoharness-evil init", False),
     ("Bash", "cd x && rm -rf y && autoharness init", False),

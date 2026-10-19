@@ -1472,7 +1472,10 @@ def hook_context(catalog: Catalog, prompt: str, session_id: str = "") -> str | N
             "data), what the user's constraints are, and how the result will be verified." + gate)
 
 
-SMART_QUOTES = "‘’‚‛“”„"   # PowerShell reads these as quotes
+# PowerShell reads these as quotes: a single one ends a '...' string, a double one a "..." string, and inside
+# the other kind each is a plain character (`"Gosling’s"`), as it always is in Bash
+SMART_SINGLE, SMART_DOUBLE = "‘’‚‛", "“”„"
+SMART_QUOTES = SMART_SINGLE + SMART_DOUBLE
 SHELL_SPECIAL = set(";|&<>#(){}`\r\n")
 # stderr into the output the agent reads, and read-only filters of that output: harmless in both shells
 # an argument of such a filter: single-quoted, double-quoted with nothing either shell expands, or plain
@@ -1499,8 +1502,6 @@ def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
     or redirection outside quotes, `$'`, `@"`, and `$(` or a backtick anywhere but in single quotes, are
     refused outright), so that where the two disagree about quoting nothing slips through either. Only Bash
     gets `\\` line continuations and `\\"` inside double quotes; PowerShell reads a backslash literally."""
-    if any(q in command for q in SMART_QUOTES):
-        return None
     commands, words, word, quote = [], [], None, None
     i, n = 0, len(command)
     while i < n:
@@ -1508,11 +1509,15 @@ def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
         if quote == "'":
             if ch == "'":
                 quote = None
+            elif ch in SMART_SINGLE:
+                return None   # ends the string in PowerShell, not in Bash
             else:
                 word += ch
         elif quote == '"':
             if ch == '"':
                 quote = None
+            elif ch in SMART_DOUBLE:
+                return None   # ends the string in PowerShell, not in Bash
             elif ch == "\\" and bash and i + 1 < n:
                 word += command[i + 1]   # Bash escapes the next character, `\"` and `\$(` included
                 i += 1
@@ -1545,8 +1550,8 @@ def _plain_commands(command: str, bash: bool) -> list[list[str]] | None:
             commands.append(words)
             words, word = [], None
             i += 1 if ch == "&" else 0
-        elif ch in SHELL_SPECIAL:
-            return None
+        elif ch in SHELL_SPECIAL or ch in SMART_QUOTES:
+            return None   # outside quotes PowerShell starts a string at a smart quote; Bash does not
         else:
             word = (word or "") + ch
         i += 1
