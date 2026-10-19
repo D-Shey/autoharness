@@ -496,6 +496,13 @@ def cmd_review(args, project, catalog):
             worst = max(worst, quality["verdict"], key=evidence.SEVERITIES.index)
     elif getattr(args, "quality_file", None):
         raise HarnessError("--quality-file goes with the critic's --answer-file")
+    if answer and answer.get("accept", {}).get("accept") == "no" and worst not in evidence.BLOCKING:
+        # a list of small points can add up to work no one would hand over: the whole-work answer decides
+        why = answer["accept"]["why"] or "the critic would not hand it over as finished work"
+        diff += f"\nNot finished work as a whole (major, fixable): {why}"
+        warnings.append(f"the critic's VERDICT was {worst}, but it would not accept the work as finished: "
+                        "recorded as major")
+        worst = "major"
     if not answer:
         if not args.diff or not (args.worst or args.fixable):
             raise HarnessError("record a review with --diff and --worst, or a critic's answer with "
@@ -755,7 +762,9 @@ def cmd_critic(args, project, catalog):
         "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
                 "elsewhere a new session), unchanged: paste it, or tell the subagent to read `prompt_file` and "
                 "follow it. Do not add your own opinion to it. Save its answer unedited to a file and record it: "
-                "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT."
+                "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT. "
+                "A model is mild with work like its own: if another agent's CLI is installed, let that one judge "
+                "(`autoharness critic --run claude|codex|agy`, not the agent you are)."
                 + two + settle})
     return 0
 

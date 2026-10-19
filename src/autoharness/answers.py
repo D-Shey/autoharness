@@ -21,6 +21,7 @@ KINDS = ("critic", "quality", "arbiter", "vet")
 ID_LINE = re.compile(r"^\W*ANSWER-ID:\s*(ah-[0-9a-f]{12})\b", re.MULTILINE | re.IGNORECASE)
 VERDICT_LINE = re.compile(r"^\W*VERDICT:(.*)$", re.MULTILINE | re.IGNORECASE)
 CHECK_LINE = re.compile(r"^\W*CHECK:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+ACCEPT_LINE = re.compile(r"^\W*ACCEPT:\W*(yes|no)\b\W*(.*)$", re.MULTILINE | re.IGNORECASE)
 CLOSER_LINE = re.compile(r"^\W*CLOSER:\W*(A|B|same)\b", re.MULTILINE | re.IGNORECASE)
 REASON_LINE = re.compile(r"^\W*REASON:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
 # the critic's account of the previous review is a section of its own after its list: a heading line
@@ -110,6 +111,8 @@ def read(task: Task, path: Path, kind: str, subject: str) -> dict:
             "verdict": words[0].lower(),
             "check": check[-1].strip() if check else "", "reason": reason[-1].strip() if reason else "",
             "closer": closer[-1] if closer else "",
+            "accept": (lambda m: {"accept": m[-1][0].lower(), "why": m[-1][1].strip()} if m else {})(
+                ACCEPT_LINE.findall(text)),
             "source": str(path)}
 
 

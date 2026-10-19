@@ -493,6 +493,16 @@ def listing(items: list[dict]) -> str:
     return "\n".join(out)
 
 
+# a critic grades each point against the reference, and a long way from it every point looks like "detail beyond
+# the fidelity": one question about the whole, apart from the list, catches work no one would hand over
+ACCEPT_ASK = """
+Last, judge the work as a whole, apart from your list: would a skilled practitioner working at the
+target fidelity hand it to the user as finished? The bar is not the reference's level of detail but
+competent, finished work at that fidelity; crude or broken work is "no" however short your list is.
+Give one line: `ACCEPT: yes` or `ACCEPT: no - <what keeps it from being finished>`.
+"""
+
+
 # a passing exit code shows only that the command passed: whether it could fail when the item is not met
 # is a judgement, so the critic makes it and an empty check stops counting for its item
 RUNS_ASK = """Open each command (and the script it runs) and judge whether it checks what its item asks: one
@@ -1000,7 +1010,7 @@ Tag each one:
 {see}
 Give each difference the severity it has, without praise: the task may end once the worst fixable one is
 minor. Do not suggest changing the constraints.
-{coverage}{previous}{comparison}
+{coverage}{previous}{comparison}{ACCEPT_ASK}
 End with exactly one line naming the worst severity among the FIXABLE differences:
 VERDICT: blocker | major | minor | none"""
     return {"prompt": prompt, "result": result["file"], "results": [e["file"] for e in results],
