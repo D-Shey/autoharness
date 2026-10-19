@@ -762,9 +762,7 @@ def cmd_critic(args, project, catalog):
         "next": "Give `prompt` to a fresh subagent that did not make this work (Claude Code: the Agent tool; "
                 "elsewhere a new session), unchanged: paste it, or tell the subagent to read `prompt_file` and "
                 "follow it. Do not add your own opinion to it. Save its answer unedited to a file and record it: "
-                "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT. "
-                "A model is mild with work like its own: if another agent's CLI is installed, let that one judge "
-                "(`autoharness critic --run claude|codex|agy`, not the agent you are)."
+                "`autoharness review --by critic --answer-file <file>`; autoharness reads the list and the VERDICT."
                 + two + settle})
     return 0
 
