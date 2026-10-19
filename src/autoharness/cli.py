@@ -22,8 +22,8 @@ from pathlib import Path
 from autoharness import (__version__, agents, answers, approvals, config, egress, evidence, followups, history, lessons,
                          library, recipes, registry, reviewers, rulings, runs, text, vet)
 from autoharness.catalog import Catalog
-from autoharness.env import (ContentChanged, HarnessError, Project, SkillRejected, Task, missing_tools,
-                             npx_stage_skill, parse_skill_spec, skill_dir)
+from autoharness.env import (GATEWAY_NAME, ContentChanged, HarnessError, Project, SkillRejected, Task,
+                             missing_tools, npx_stage_skill, parse_skill_spec, skill_dir)
 from autoharness.trust import curated_report, score_marketplace, score_registry_entry, score_skill
 
 EXIT_APPROVAL = 3
@@ -997,14 +997,14 @@ def _check_constraints(text: str, task) -> None:
                 "use or avoid, offline, a deadline), or `none` if they set none.")
 
 
-def _skills_not_installed(project, task) -> list[str]:
+def _skills_not_installed(project, task, templates: bool = True) -> list[str]:
     """The skills and MCP servers the brief's areas are covered by that are not installed (for this task, kept in
     the project, in the user's library, or already in the agent's config): an area is covered by what is in use,
-    not by its name."""
+    not by its name. `templates` also names generated skills still left unfilled."""
     lock = task.skills_lock()
     have = set(lock) | set(project.kept()["skills"]) | {p.parent.name for p in _agent_skills(project)}
     missing = []
-    for name, entry in lock.items():
+    for name, entry in (lock.items() if templates else ()):
         skill_md = task.skills_dir / name / "SKILL.md"
         if (entry.get("source") == "generated" and name not in task.info().get("planned_skills", [])
                 and skill_md.is_file() and library.FILL_MARKER in skill_md.read_text("utf-8")):
@@ -1014,7 +1014,7 @@ def _skills_not_installed(project, task) -> list[str]:
         m = DOMAIN.match(entry.strip())
         if m and m["how"].lower() == "skill":
             name = m["name"].split("@")[-1]
-            if name not in have and not library.exists(name):
+            if name not in have and not library.exists(name) and name not in task.info().get("planned_skills", []):
                 missing.append(f"area `{m['area'].strip()}` is covered by skill `{m['name']}`, not installed: "
                                f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`; if it "
                                "cannot be installed or vetting rejects it, record the brief again with another "
@@ -1029,6 +1029,31 @@ def _skills_not_installed(project, task) -> list[str]:
                                "use it (through harness_call when it was added through the gateway); if it cannot "
                                "be installed, record the brief again with another server from your searches")
     return missing
+
+
+def _mcp_not_used(project, task) -> list[str]:
+    """The MCP servers the brief covers an area with that were installed but never called since this task added
+    them (or, for one it found installed, since the task started): installing a server to pass teardown is not
+    using it. Calls are counted by the gateway and, for servers in the agent's own config, by the hook."""
+    from autoharness.gateway import calls
+    made, lock, info = calls(project.root), task.mcp_lock(), task.info()
+    unused = []
+    for entry in info.get("brief", {}).get("domains", "").split(";"):
+        m = DOMAIN.match(entry.strip())
+        if not (m and m["how"].lower() == "mcp"):
+            continue
+        name = local_mcp_name(m["name"])
+        stores = [project.agent.mcp_store(project.root), project.agent.user_mcp_store()]
+        if not (name in lock or name in project.kept()["mcp"] or any(s is not None and s.has(name) for s in stores)):
+            continue   # not installed at all: _skills_not_installed says so
+        since = lock.get(name, {}).get("added") or info.get("created", "")
+        if made.get(name, {}).get("last", "") < since:
+            unused.append(f"area `{m['area'].strip()}` is covered by MCP server `{m['name']}`, which was never called "
+                          "in this task: do the work for that area with it (" +
+                          ("harness_tools, then harness_call" if lock.get(name, {}).get("via") == "gateway" else
+                           "its own tools") + ") and check the result again; if it cannot do the job, say why and "
+                          "record the brief again with another server")
+    return unused
 
 
 def cmd_brief(args, project, catalog):
@@ -1384,6 +1409,7 @@ def cmd_teardown(args, project, catalog):
     if info.get("mode", "full") != "light" and info.get("brief"):
         # what the brief said covers each area is in use, whether or not a result was ever recorded
         blocking += [p for p in _skills_not_installed(project, task) if p not in blocking]
+        blocking += _mcp_not_used(project, task)
     blocking += runs.problems(task)
     if args.accepted:
         task._update_info(accepted_by_user=args.accepted)
@@ -2297,6 +2323,18 @@ def cmd_hook(args, project, catalog):
                     {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                             "permissionDecisionReason": reason}})
                 return 0
+            if active and not foreign and (server := MCP_TOOL.match(tool)) and server[1] != GATEWAY_NAME:
+                from autoharness.gateway import note_call
+                note_call(project.root, server[1])   # the gateway counts its own servers' calls
+            if (state == "done" and active and not foreign and task_info.get("mode", "full") != "light"
+                    and task_info.get("brief") and GATED_TOOLS.match(tool) and not MCP_TOOL.match(tool)
+                    and (missing := _skills_not_installed(project, Task(project, active), templates=False))):
+                reason = ("Install what the brief covers its areas with before doing the work, so the work is done "
+                          "with it, not around it: " + "; ".join(missing) + ". Reading files stays open.")
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
             if (state == "done" and active and not foreign and EDIT_TOOLS.match(tool)
                     and (reason := _unchecked_edits(sid, active, task_info))):
                 out({"decision": "deny", "reason": reason} if agy else
@@ -2326,6 +2364,7 @@ def cmd_hook(args, project, catalog):
 
 REPEAT_LIMIT = 5   # the same call this many times in a row may pass; one more is a loop, not progress
 EDIT_TOOLS = re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit)$")
+MCP_TOOL = re.compile(r"^mcp__(.+?)__")
 # file edits after a review that found blocking problems, before an independent critic must see the work again:
 # an author fixing alone grades its own fixes, and in the end grades them "none"
 EDITS_BEFORE_CRITIC = 20
