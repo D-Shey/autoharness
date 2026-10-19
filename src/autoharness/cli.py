@@ -1898,6 +1898,12 @@ def cmd_hook(args, project, catalog):
                     {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                             "permissionDecisionReason": reason}})
                 return 0
+            if (state == "done" and active and not foreign and EDIT_TOOLS.match(tool)
+                    and (reason := _unchecked_edits(sid, active, task_info))):
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
             if state == "pending" and GATED_TOOLS.match(tool):
                 reason = handoff(Task(project, active), sid) if foreign else (
                     "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
@@ -1920,6 +1926,39 @@ def cmd_hook(args, project, catalog):
 
 
 REPEAT_LIMIT = 5   # the same call this many times in a row may pass; one more is a loop, not progress
+EDIT_TOOLS = re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit)$")
+# file edits after a review that found blocking problems, before an independent critic must see the work again:
+# an author fixing alone grades its own fixes, and in the end grades them "none"
+EDITS_BEFORE_CRITIC = 20
+
+
+def _unchecked_edits(sid: str, task_id: str, info: dict) -> str | None:
+    """Why this edit is denied when the last review found blocking problems and the author has edited the work
+    EDITS_BEFORE_CRITIC times since without a critic seeing it; None otherwise. Counted per session and reset
+    by each critic review."""
+    reviews = info.get("reviews", [])
+    if not sid or not reviews or reviews[-1]["worst"] not in evidence.BLOCKING:
+        return None
+    critics = sum(1 for r in reviews if r["by"] == "critic")
+    counter = session_file(sid).with_suffix(".edits.json")
+    try:
+        seen = json.loads(counter.read_text("utf-8"))
+    except (OSError, ValueError):
+        seen = {}
+    if seen.get("task") != task_id or seen.get("critics") != critics:
+        seen = {"task": task_id, "critics": critics, "edits": 0}
+    seen["edits"] += 1
+    try:
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        counter.write_text(json.dumps(seen), "utf-8")
+    except OSError:
+        return None
+    if seen["edits"] <= EDITS_BEFORE_CRITIC:
+        return None
+    return (f"{seen['edits'] - 1} edits since a review found blocking problems, and no independent critic has seen "
+            "the work since: you are grading your own fixes. Record the current result (`autoharness evidence add "
+            "<file> --kind result`, or `autoharness evidence diff` for code), run `autoharness critic` and record its "
+            "answer; editing opens again with that review.")
 
 
 def _repeated(sid: str, tool: str, tool_input: dict) -> int:
