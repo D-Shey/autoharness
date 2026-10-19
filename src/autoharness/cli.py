@@ -1255,6 +1255,13 @@ def cmd_vet(args, project, catalog):
     if not vet.constraints(task):
         raise HarnessError("the brief records no constraints to vet against; record `autoharness brief "
                            "--constraints \"<the user's words>\"` first (or there is nothing to vet)")
+    if args.verdict and not args.answer_file and project.agent.name in reviewers.AGENTS \
+            and shutil.which(project.agent.name):
+        # a retold verdict cannot be told from the author's own: where a reviewer can be started, it answers itself
+        raise HarnessError(f"the vet verdict comes from a reviewer that did not pick this candidate, not from you: "
+                           f"`autoharness vet {args.kind} {args.name} --run {project.agent.name}` starts one and records "
+                           "its answer (or give the prompt to a fresh subagent and pass its saved answer with "
+                           "--answer-file)")
     if args.answer_file or args.verdict:
         subject = f"{args.kind}:{args.name}"
         answer = read_answer(task, args.answer_file, "vet", vet.VERDICTS, subject) if args.answer_file else None
