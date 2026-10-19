@@ -164,7 +164,8 @@ def score_registry_entry(entry: dict, trusted_publishers: set[str] = frozenset()
 
 SKILL_PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("high", "pipes a download into a shell", re.compile(r"(curl|wget|iwr|Invoke-WebRequest)[^\n|]*\|\s*(ba|z)?sh|\|\s*iex", re.I)),
-    ("high", "reads credential stores", re.compile(r"~/\.ssh|id_rsa|\.aws/credentials|\.netrc|\.git-credentials|Login Data|keychain", re.I)),
+    ("high", "reads credential stores", re.compile(r"~/\.ssh|id_rsa|\.aws/credentials|\.netrc|\.git-credentials|Login Data|\.keychain(?:-db)?\b"
+                                            r"|security\s+(?:find-(?:generic|internet)-password|dump-keychain)", re.I)),
     ("high", "destructive recursive delete of home/root", re.compile(r"rm\s+-rf\s+(/|~|\$HOME)(\s|$)", re.I)),
     ("high", "instructs the agent to hide actions", re.compile(r"(do not|don't|never) (tell|inform|mention to) the user|without (telling|asking) the user", re.I)),
     ("medium", "decodes obfuscated payloads", re.compile(r"base64\s+(-d|--decode)|FromBase64String|atob\(", re.I)),
