@@ -952,7 +952,7 @@ def _skills_not_installed(project, task) -> list[str]:
     """The skills the brief's areas are covered by that are neither installed for this task, kept in the project,
     nor in the user's library: an area is covered by a skill in use, not by its name."""
     lock = task.skills_lock()
-    have = set(lock) | set(project.kept()["skills"])
+    have = set(lock) | set(project.kept()["skills"]) | {p.parent.name for p in _agent_skills(project)}
     missing = []
     for name, entry in lock.items():
         skill_md = task.skills_dir / name / "SKILL.md"
@@ -1992,14 +1992,25 @@ def _earlier_level(project, text: str) -> str | None:
     return found
 
 
+def _agent_skills(project, plugins: bool = True) -> list[Path]:
+    """The SKILL.md files the agent loads on its own: the project's and the user's skills, and its plugins'."""
+    agent = agents.get(project.agent_name)
+    found = [p for d in (agent.skills_path(project.root), agent.user_skills_path()) if d.is_dir()
+             for p in d.glob("*/SKILL.md")]
+    plugin_dir = agent.user_skills_path().parent / "plugins"
+    if plugins and plugin_dir.is_dir():
+        found += [p for p in plugin_dir.rglob("SKILL.md") if p.parent.parent.name == "skills"]
+    return found
+
+
 def _routine(project, text: str) -> str | None:
     """Why a task is a routine the agent already knows how to do, or None: a skill it has is named in the task
     text, or this project ran the same task (times and other numbers aside) in light mode before."""
-    agent = agents.get(project.agent_name)
-    for skills in (agent.skills_path(project.root), agent.user_skills_path(), library.root()):
-        for skill_md in skills.glob("*/SKILL.md") if skills.is_dir() else ():
-            if re.search(rf"(?<![\w-]){re.escape(skill_md.parent.name)}(?![\w-])", text, re.IGNORECASE):
-                return f"it names the skill `{skill_md.parent.name}` the agent has"
+    # plugins bring generic skills (`pdf`, `debugging`) a task names in passing; the user's own are routines
+    for skill_md in _agent_skills(project, plugins=False) + (list(library.root().glob("*/SKILL.md"))
+                                                             if library.root().is_dir() else []):
+        if re.search(rf"(?<![\w-]){re.escape(skill_md.parent.name)}(?![\w-])", text, re.IGNORECASE):
+            return f"it names the skill `{skill_md.parent.name}` the agent has"
     same = re.sub(r"\d+", "#", " ".join(text.split()).lower())
     for info_path in (project.state / "tasks").glob("*/task.json"):
         try:
