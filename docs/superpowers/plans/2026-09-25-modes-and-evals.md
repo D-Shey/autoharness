@@ -1,32 +1,58 @@
-# Режимы работы и сравнение прогонов AutoHarness
+# AutoHarness modes and run comparison
 
-**Цель:** уменьшить стоимость процедуры для простых задач и получить измеримые данные о пользе AutoHarness.
+**Goal:** lower the cost of the procedure for simple tasks and get measurable data on AutoHarness's
+benefit.
 
-**Дизайн:** существующий полный цикл остаётся режимом по умолчанию. `init --mode light` пропускает автоматический поиск и обязательный brief; `--mode auto` выбирает полный цикл при совпадении с известными capabilities. При нехватке инструмента задача переходит в полный режим через `mode full`. CLI записывает время и исход собственных команд без аргументов и секретов. Отдельные команды `eval record` и `eval compare` принимают измерения законченных прогонов и считают результаты только для пар одной задачи.
+**Design:** the existing full cycle stays the default mode. `init --mode light` skips the automatic
+search and the mandatory brief; `--mode auto` picks the full cycle when the task matches known
+capabilities. When a tool is missing, the task moves to the full mode with `mode full`. The CLI
+records the time and outcome of its own commands without arguments or secrets. Separate `eval record`
+and `eval compare` commands take the measurements of finished runs and count results only for pairs of
+the same task.
 
-**Границы:** AutoHarness не получает токены модели или итоговую оценку автоматически, если агент или пользователь их не передал. Сравнение показывает наблюдаемые значения и не делает причинных выводов без контролируемого набора задач.
+**Limits:** AutoHarness does not get the model's tokens or the final score automatically unless the
+agent or the user passes them. The comparison shows observed values and draws no causal conclusions
+without a controlled task set.
 
-## Задачи
+## Tasks
 
-- [x] Закрепить тестами режимы `full`, `light`, `auto`, повышение до `full`, поведение hook и завершения задачи.
-- [x] Реализовать режимы с сохранением старого поведения `init` без флага.
-- [x] Закрепить тестами запись событий CLI без аргументов и вычисление длительности задачи.
-- [x] Реализовать безопасный журнал событий задач.
-- [x] Закрепить тестами ввод данных оценки, сопоставление пар, отсутствие деления на ноль и пропущенные пары.
-- [x] Реализовать `eval record` и `eval compare` с JSON-результатами и проверкой входных значений.
-- [x] Обновить bootstrap skill, README и справочник команд; показать короткий сценарий обоих режимов и пример сравнения.
-- [x] Выполнить адресные тесты, полный pytest и сборку пакета.
+- [x] Pin down with tests the `full`, `light`, `auto` modes, raising to `full`, the hook's behaviour
+  and ending a task.
+- [x] Implement the modes, keeping the old behaviour of `init` without the flag.
+- [x] Pin down with tests recording CLI events without arguments and computing a task's duration.
+- [x] Implement a safe task event log.
+- [x] Pin down with tests the eval input, pair matching, no division by zero and missing pairs.
+- [x] Implement `eval record` and `eval compare` with JSON results and input validation.
+- [x] Update the bootstrap skill, README and the command reference; show a short scenario of both
+  modes and an example comparison.
+- [x] Run the targeted tests, the full pytest and the package build.
 
-## Продолжение: остальные идеи из сравнения harness
+## Continued: the remaining ideas from the harness comparison
 
-**Цель:** сделать оставшиеся предложения проверяемыми возможностями CLI, сохранив совместимость существующих задач.
+**Goal:** turn the remaining proposals into checkable CLI capabilities while keeping existing tasks
+compatible.
 
-**Архитектура:** профили задают режим и требование независимой проверки при `init`. Журнал решений хранится отдельно от журнала вызовов CLI и фиксирует происхождение и отпечатки инструментов. Пакетная оценка запускает внешний агентский runner на одинаковых именованных случаях, получает от него результат JSON и измеряет время. Каталог проверок даёт готовые шаги и сохраняет факт выполнения с доказательством. Python 3.10+, без новых обязательных зависимостей.
+**Architecture:** profiles set the mode and the requirement of an independent check at `init`. The
+decision log is kept apart from the CLI call log and records the origin and fingerprints of tools.
+Batch evaluation runs an external agent runner on the same named cases, gets a JSON result from it
+and measures the time. The check catalog gives ready steps and records that a check ran, with
+evidence. Python 3.10+, no new required dependencies.
 
-**Граница измерений:** вызовы инструментов модели, токены и стоимость могут поступать только от внешнего runner либо через явную запись; AutoHarness не видит их автоматически во всех агентах. Непроверенные данные не выдаются за измеренные.
+**Measurement limits:** the model's tool calls, tokens and cost can come only from an external runner
+or an explicit record; AutoHarness does not see them automatically in every agent. Unverified data is
+not passed off as measured.
 
-- [x] **Профили (Deep Agents):** добавить `quick`, `standard`, `reviewed` с явными правилами режима, разрешения установки и требования критика; сохранить старое поведение без `--profile`. Проверить выбор и запрет обхода правил.
-- [x] **Измерения (mini-SWE-agent):** добавить запись количества вызовов инструментов от runner и пакетный прогон именованных случаев через внешнюю команду; проверить изоляцию случаев, ошибки runner и парное сравнение.
-- [x] **Журнал решений (OpenHands SDK):** фиксировать выбор/отклонение кандидата, установку с источником и отпечатком, проверку, удаление с причиной; дать команду просмотра. Не записывать конфигурации инструментов и аргументы команд.
-- [x] **Шаблоны проверки (подход OpenAI):** дать конкретные шаги для браузера, API, логов и БД; связать их с `brief`/результатом и доказательством; проверить шаблоны и запись исхода.
-- [x] Обновить README, справочник CLI и bootstrap skill; провести адресные тесты, полный pytest и сборку.
+- [x] **Profiles (Deep Agents):** add `quick`, `standard`, `reviewed` with explicit rules for the
+  mode, install permission and the critic requirement; keep the old behaviour without `--profile`.
+  Check the choice and that the rules cannot be bypassed.
+- [x] **Measurements (mini-SWE-agent):** record the number of tool calls from the runner and batch
+  runs of named cases through an external command; check case isolation, runner errors and the pair
+  comparison.
+- [x] **Decision log (OpenHands SDK):** record choosing/rejecting a candidate, installing with origin
+  and fingerprint, checking, removing with a reason; add a command to view it. Do not record tool
+  configs or command arguments.
+- [x] **Check templates (OpenAI's approach):** give concrete steps for a browser, an API, logs and a
+  database; tie them to the `brief`/result and evidence; check the templates and recording the
+  outcome.
+- [x] Update README, the CLI reference and the bootstrap skill; run targeted tests, the full pytest
+  and the build.

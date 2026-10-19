@@ -1,18 +1,19 @@
-# Установка
+# Installation
 
-Что такое autoharness и как он работает — в [README](../README.md). Здесь — только установка.
+What autoharness is and how it works is in the [README](../README.md). This page covers installation
+only.
 
-Установка состоит из трёх шагов: поставить CLI (один раз на машину), положить skill агенту
-(в проект или глобально) и, по желанию, подключить gateway, чтобы новые MCP-серверы работали
-без перезапуска агента. Для Claude Code есть ещё четвёртый, необязательный шаг — хук.
+Installation has three steps: install the CLI (once per machine), give the agent the skill (in the
+project or globally), and optionally connect the gateway so new MCP servers work without restarting
+the agent. Claude Code and Antigravity CLI have an optional fourth step: the hook.
 
-## 1. CLI `autoharness`
+## 1. The `autoharness` CLI
 
-Ставится через [uv](https://docs.astral.sh/uv/) как отдельный инструмент: uv сам берёт
-подходящий Python (3.11+) и кладёт команду `autoharness` в свою папку для исполняемых файлов.
-Внешних зависимостей нет.
+It is installed with [uv](https://docs.astral.sh/uv/) as a standalone tool: uv picks a suitable
+Python (3.11+) itself and puts the `autoharness` command into its folder for executables. There are
+no external dependencies.
 
-Если uv ещё не стоит:
+If uv is not installed yet:
 
 ```bash
 # Linux/macOS
@@ -21,31 +22,27 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Установка autoharness прямо из GitHub:
+Install autoharness straight from GitHub:
 
 ```bash
 uv tool install git+https://github.com/D-Shey/autoharness
-autoharness agents        # проверка: печатает поддерживаемых агентов и обнаруженного
+autoharness agents        # check: prints the supported agents and the one detected
 ```
 
-Репозиторий приватный: uv берёт доступ из настроек git, поэтому сначала войдите, например,
-через `gh auth login` (он настраивает git на ваш аккаунт).
+The `autoharness` command must be on `PATH`: both the agent and the gateway call it. uv puts it into
+`~/.local/bin` (on Windows `%USERPROFILE%\.local\bin`; the exact path is `uv tool dir --bin`). If
+`autoharness agents` answers "command not found", run `uv tool update-shell` and open a new
+terminal. Start the agent from a new terminal as well, or it will not see the updated `PATH`.
 
-Команда `autoharness` должна находиться через `PATH`: её вызывают и агент, и gateway. uv кладёт
-её в `~/.local/bin` (на Windows — `%USERPROFILE%\.local\bin`; точный путь — `uv tool dir --bin`).
-Если `autoharness agents` отвечает «command not found», выполните `uv tool update-shell` и
-откройте новый терминал. Агента после этого тоже запускайте из нового терминала, иначе он не
-увидит обновлённый `PATH`.
-
-Обновление и удаление:
+Upgrading and uninstalling:
 
 ```bash
-uv tool upgrade autoharness       # подтянуть последний коммит из GitHub
+uv tool upgrade autoharness       # pull the latest commit from GitHub
 uv tool uninstall autoharness
 ```
 
-Если вы правите сам autoharness, ставьте из локальной копии в режиме редактирования — изменения
-в коде сразу видны команде `autoharness`:
+If you work on autoharness itself, install it from a local clone in editable mode, so changes to the
+code are seen by the `autoharness` command right away:
 
 ```bash
 git clone https://github.com/D-Shey/autoharness.git
@@ -53,152 +50,153 @@ cd autoharness
 uv tool install -e .
 ```
 
-Для большинства skills и MCP-серверов из каталога нужен ещё Node.js (`npx`, в том числе
-`npx skills` для установки skills); Python-серверы запускаются через `uvx`, который ставится
-вместе с uv.
+Most skills and MCP servers in the catalog also need Node.js (`npx`, including `npx skills` for
+installing skills); Python servers run through `uvx`, which comes with uv.
 
-## 2. Skill для агента
+## 2. The skill for the agent
 
-Skill — это `SKILL.md`, из которого агент узнаёт, как пользоваться autoharness. В каждый агент
-кладётся свой вариант: с правильным именем агента, путём к MCP-конфигу и подсказкой о перезапуске.
-Поэтому **агент надо указывать явно**: в обычном терминале autoharness не знает, для кого
-ставит, и по умолчанию берёт `claude`.
+The skill is a `SKILL.md` from which the agent learns how to use autoharness. Each agent gets its own
+version: with the right agent name, the path to its MCP config and the hint about restarting. That
+is why **the agent has to be named explicitly**: in a plain terminal autoharness does not know whom
+it installs for and defaults to `claude`.
 
-`--agent` — глобальный флаг, он пишется **до** подкоманды:
+`--agent` is a global flag and goes **before** the subcommand:
 
 ```bash
-cd /path/to/your/project                       # команды работают с текущей папкой (или --project)
+cd /path/to/your/project                       # commands work on the current folder (or --project)
 
-autoharness --agent claude   install-skill     # в проект: .claude/skills/autoharness/SKILL.md
-autoharness --agent codex    install-skill --user   # глобально: ~/.agents/skills/autoharness/SKILL.md
-autoharness install-skill --all                # в проект, сразу для всех агентов
+autoharness --agent claude   install-skill     # into the project: .claude/skills/autoharness/SKILL.md
+autoharness --agent codex    install-skill --user   # globally: ~/.agents/skills/autoharness/SKILL.md
+autoharness install-skill --all                # into the project, for every agent at once
 ```
 
-| Агент | `--agent` | Skill в проекте | Skill глобально (`--user`) |
+| Agent | `--agent` | Skill in the project | Skill globally (`--user`) |
 |---|---|---|---|
 | Claude Code | `claude` | `.claude/skills/autoharness/` | `~/.claude/skills/autoharness/` |
 | Codex CLI | `codex` | `.agents/skills/autoharness/` | `~/.agents/skills/autoharness/` |
 | Gemini CLI | `gemini` | `.gemini/skills/autoharness/` | `~/.gemini/skills/autoharness/` |
 | Qwen Code | `qwen` | `.qwen/skills/autoharness/` | `~/.qwen/skills/autoharness/` |
 | GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
-| Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (сам strands его не читает: передайте путь в `create_harness(skills=...)`) |
+| Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (strands does not read it by itself: pass the path to `create_harness(skills=...)`) |
 | Antigravity CLI | `agy` | `.agents/skills/autoharness/` | `~/.gemini/config/skills/autoharness/` |
 
-Codex и Antigravity CLI читают один и тот же `.agents/skills`, поэтому `SKILL.md` в проекте у
-них общий: в нём указаны `--agent` и MCP-конфиг для каждого из двух агентов. Глобальные
-skills у них разные: `~/.agents/skills` agy не читает. В `/skills` agy 1.4.0 предлагает для
-глобальных skills `~/.gemini/antigravity-cli/skills`, но загружает их только из
-`~/.gemini/config/skills` — поэтому `--user` пишет туда.
+Codex and Antigravity CLI read the same `.agents/skills`, so they share the project's `SKILL.md`: it
+names `--agent` and the MCP config for each of the two agents. Their global skills differ: agy does
+not read `~/.agents/skills`. In `/skills`, agy 1.4.0 suggests `~/.gemini/antigravity-cli/skills` for
+global skills but loads them only from `~/.gemini/config/skills`, so `--user` writes there.
 
-В проект или глобально:
+Project or global:
 
-- **в проект** — skill работает только в этом проекте, его можно закоммитить, и он будет
-  у всей команды;
-- **глобально (`--user`)** — skill есть в любом проекте на этой машине.
+- **in the project**: the skill works only in this project; it can be committed and the whole team
+  gets it;
+- **globally (`--user`)**: the skill is there in every project on this machine.
 
-Агенты читают skills при старте сессии: после установки начните новую сессию.
-Повторный `install-skill` перезаписывает `SKILL.md` — так он обновляется после
-обновления autoharness. `init` предупреждает, если установленный `SKILL.md` устарел.
+Agents read skills when a session starts: start a new session after installing. Running
+`install-skill` again overwrites `SKILL.md`, which is how it is updated after autoharness is
+upgraded. `init` warns when an installed `SKILL.md` is out of date.
 
-## 3. Gateway (по желанию, но рекомендуется)
+## 3. The gateway (optional, recommended)
 
-Без gateway каждый новый MCP-сервер пишется прямо в конфиг агента, и агента нужно
-перезапускать. С gateway первый перезапуск нужен после установки самого gateway
-(как он устроен — в [README](../README.md#gateway-серверы-без-перезапуска)):
+Without the gateway every new MCP server is written straight into the agent's config, and the agent
+has to be restarted. With the gateway only one restart is needed, after the gateway itself is
+installed (how it works is in the [README](../README.md#gateway-servers-without-a-restart)):
 
 ```bash
-autoharness --agent claude gateway install     # пишет сервер `autoharness` в конфиг агента
-autoharness --agent claude gateway status      # установлен ли, какие серверы запущены
+autoharness --agent claude gateway install     # writes the `autoharness` server into the agent's config
+autoharness --agent claude gateway status      # whether it is installed and which servers run
 ```
 
-Gateway ставится в проект и **отдельно для каждого агента**: у `gateway install` нет `--all`,
-повторите команду с нужным `--agent`. `add mcp` идёт через gateway только для того агента,
-у которого gateway установлен.
+The gateway is installed into the project and **separately for each agent**: `gateway install` has no
+`--all`, so repeat the command with each `--agent`. `add mcp` goes through the gateway only for an
+agent that has the gateway installed. `--user` installs it into the agent's own config for every
+project (agy, Gemini, Qwen, GigaCode).
 
-Для Codex возможен дополнительный перезапуск, если новому серверу нужна ещё не
-передаваемая gateway переменная окружения. `add` и `gateway approve` сообщают об этом
-и записывают её имя в `env_vars`; значение нужно задать в окружении запуска Codex.
+Codex may need one more restart when a new server needs an environment variable the gateway does not
+pass yet. `add` and `gateway approve` say so and write its name into `env_vars`; set the value in the
+environment Codex is started from.
 
-Что сделать после `gateway install` в каждом агенте:
+What to do in each agent after `gateway install`:
 
-| Агент | Куда пишется gateway | Как агенту его подхватить |
+| Agent | Where the gateway is written | How the agent picks it up |
 |---|---|---|
-| Claude Code | `.mcp.json` | перезапустить Claude Code (или `/mcp`) и **одобрить** проектный сервер `autoharness` |
-| Codex CLI | `.codex/config.toml` | перезапустить Codex; проектный конфиг читается, только если проект помечен **trusted** |
-| Gemini CLI | `.gemini/settings.json` | перезапустить или выполнить `/mcp refresh` |
-| Qwen Code | `.qwen/settings.json` | перезапустить или выполнить `/mcp refresh` |
-| GigaCode CLI | `.gigacode/settings.json` | перезапустить или выполнить `/mcp refresh` |
-| Strands harness | `.agent/mcp.json` | передать `create_harness(mcp_servers=".agent/mcp.json")` и пересоздать агента |
-| Antigravity CLI | `.agents/mcp_config.json` | перезапустить `agy` |
+| Claude Code | `.mcp.json` | restart Claude Code (or `/mcp`) and **approve** the project server `autoharness` |
+| Codex CLI | `.codex/config.toml` | restart Codex; the project config is read only if the project is marked **trusted** |
+| Gemini CLI | `.gemini/settings.json` | restart or run `/mcp refresh` |
+| Qwen Code | `.qwen/settings.json` | restart or run `/mcp refresh` |
+| GigaCode CLI | `.gigacode/settings.json` | restart or run `/mcp refresh` |
+| Strands harness | `.agent/mcp.json` | pass `create_harness(mcp_servers=".agent/mcp.json")` and create the agent again |
+| Antigravity CLI | `.agents/mcp_config.json` | restart `agy` |
 
-Проверка: в агенте должны появиться инструменты `harness_tools` и `harness_call`. В Claude Code
-они могут прийти отложенными — их находит поиск инструментов.
+Check: the tools `harness_tools` and `harness_call` should appear in the agent. In Claude Code they
+may arrive deferred; tool search finds them.
 
-В конфиг записываются полный путь к текущему Python и команда
-`-m autoharness --project <абсолютный путь проекта> gateway serve`. Это исключает
-случайный запуск другой установки из `PATH` и выбор другого проекта по cwd. Это работает,
-пока этот Python на месте: после `uv tool uninstall` или переустановки выполните
-`gateway install` заново, уже с `autoharness` в `PATH`.
+The config gets the full path to the current Python and the command
+`-m autoharness --project <absolute project path> gateway serve`. That rules out starting another
+installation from `PATH` by accident, or picking another project by the working directory. It works
+as long as that Python is there: after `uv tool uninstall` or a reinstall, run `gateway install`
+again, with `autoharness` on `PATH`.
 
-## 4. Хук для Claude Code и Antigravity CLI (по желанию)
+## 4. The hook for Claude Code and Antigravity CLI (optional)
 
-Без хука агент идёт через autoharness, когда сам решит, что skill подходит. Хук делает это
-обязательным: на первый содержательный запрос сессии он напоминает агенту вызвать skill и до
-записанного brief запрещает инструменты, которые что-то меняют (`Write`, `Edit`, `Bash`,
-`PowerShell`, MCP). Чтение файлов остаётся открытым.
+Without the hook the agent goes through autoharness when it decides by itself that the skill fits.
+The hook makes it mandatory: on the first real request of a session it reminds the agent to call the
+skill, and until a brief is recorded it denies the tools that change things (`Write`, `Edit`, shell
+commands that write, MCP tools). Reading files, and shell commands that only list or read (`ls`,
+`cat`, `git status`, `Get-ChildItem`), stay open.
 
-Ещё хук:
+The hook also:
 
-- всегда запрещает писать в записи задачи `.autoharness/` — инструментами записи и очевидными
-  shell-командами (`>`, `tee`, `sed -i`, `Set-Content`, `Out-File`, `cp`/`mv`/`rm`, запись из
-  `python -c`) — и трогать ключ `integrity.key`. Исключение — `.autoharness/config.json`, это
-  настройки пользователя. Это защита от коротких путей, а не песочница: то, что пройдёт мимо,
-  поймает подпись `task.json` на teardown;
-- останавливает петлю: шестой подряд точно такой же вызов инструмента (та же команда, тот же
-  ввод) запрещается. Агенту предлагается изменить вызов, найти недостающее
-  (`autoharness need`) или спросить пользователя. Любой другой вызов сбрасывает счёт;
-- в Claude Code (событие `Stop`) возвращает агента, если он заканчивает ход, а его собственная
-  задача ещё открыта: доделать проверку, критика и `teardown` или сказать пользователю, что ждёт
-  его. Возвращает один раз на каждое состояние задачи. Если агент остановился снова и ничего не
-  изменилось, ход заканчивается — так вопрос пользователю всё равно доходит. У agy такого
-  события нет.
+- always denies writes to the task records in `.autoharness/`, by write tools and by the obvious
+  shell commands (`>`, `tee`, `sed -i`, `Set-Content`, `Out-File`, `cp`/`mv`/`rm`, writes from
+  `python -c`), and any tool's access to the `integrity.key`. The exception is
+  `.autoharness/config.json`, the user's settings. This guards against shortcuts; it is not a
+  sandbox: what gets past it is caught by the signature of `task.json` at teardown;
+- stops a loop: the sixth identical tool call in a row (the same command, the same input) is denied.
+  The agent is told to change the call, find what is missing (`autoharness need`) or ask the user.
+  Any other call resets the count;
+- leaves alone a subagent that was given a review prompt of the task (a critic or a vet reviewer): it
+  reviews, it does not own the task and cannot claim it;
+- in Claude Code (the `Stop` event) sends the agent back when it ends its turn while its own task is
+  still open: to finish the check, the critic and `teardown`, or to tell the user what it is waiting
+  for. It sends it back once per state of the task. If the agent stops again and nothing changed, the
+  turn ends, so a question to the user still gets through. agy has no such event.
 
 ```bash
-autoharness install-hook            # в .claude/settings.json проекта
-autoharness install-hook --user     # в ~/.claude/settings.json, для всех проектов
-autoharness install-hook --remove   # убрать
+autoharness install-hook            # into the project's .claude/settings.json
+autoharness install-hook --user     # into ~/.claude/settings.json, for every project
+autoharness install-hook --remove   # take it out
 ```
 
-Действует в новых сессиях (или откройте `/hooks` в текущей). Пропустить autoharness в одной
-сессии, если пользователь так сказал: `autoharness waive <session id> --reason "<его слова>"`.
+It applies in new sessions (or open `/hooks` in the current one). To skip autoharness in one session
+because the user said so: `autoharness waive <session id> --reason "<their words>"`.
 
 ### Antigravity CLI (agy)
 
 ```bash
-autoharness --agent agy install-hook          # в .agents/hooks.json проекта
-autoharness --agent agy install-hook --user   # в ~/.gemini/config/hooks.json, для всех проектов
+autoharness --agent agy install-hook          # into the project's .agents/hooks.json
+autoharness --agent agy install-hook --user   # into ~/.gemini/config/hooks.json, for every project
 autoharness --agent agy install-hook --remove
 ```
 
-Своего события на запрос пользователя у agy нет, поэтому напоминание приходит из `PreInvocation`
-на первом вызове модели в ходе (`invocationNum` 0): текст запроса хук берёт из transcript, а
-ответ отдаёт как `ephemeralMessage`. `PreToolUse` закрывает `write_to_file`,
-`replace_file_content`, `run_command`, `call_mcp_tool` и т. п. ответом `{"decision": "deny"}`.
-Сессия — это `conversationId`, `waive` принимает его. agy запускает хук через `cmd /c` в папке
-`hooks.json`, проект берётся из `workspacePaths`. Важно: если хук не запустился (нет
-`autoharness` в `PATH`, ошибка запуска), agy запрещает вызов инструмента, а пустой `{}` от хука
-тоже считает запретом. Если инструменты agy вдруг все отклоняются с `pre-tool hook`, проверьте
-`autoharness hook` в той же консоли или снимите хук через `--remove`. Действует после
-перезапуска agy; проектный `hooks.json` загружается, когда папке доверяют.
+agy has no event for the user's request, so the reminder comes from `PreInvocation` on the first
+model call of a turn (`invocationNum` 0): the hook takes the request's text from the transcript and
+answers with an `ephemeralMessage`. `PreToolUse` closes `write_to_file`, `replace_file_content`,
+`run_command`, `call_mcp_tool` and the like with `{"decision": "deny"}`. A session is a
+`conversationId`; `waive` takes it. agy runs the hook through `cmd /c` in the folder of `hooks.json`,
+and the project comes from `workspacePaths`. Note: if the hook did not run (no `autoharness` on
+`PATH`, a start error), agy denies the tool call, and it treats an empty `{}` from the hook as a
+denial too. If every agy tool is suddenly refused with `pre-tool hook`, check `autoharness hook` in
+the same console or remove the hook with `--remove`. It applies after agy restarts; a project
+`hooks.json` is loaded once the folder is trusted.
 
-## Проверка целиком
+## Checking the whole setup
 
-Попросите агента в новой сессии: «запусти autoharness init для задачи „прочитай
-https://example.com“ и добавь fetch». Ожидаемо: агент вызывает `autoharness init`, затем
-`autoharness add mcp fetch`; с gateway ответ содержит `"via": "gateway"`, и страница читается
-через `harness_call` без перезапуска.
+Ask the agent in a new session: "run autoharness init for the task 'read https://example.com' and add
+fetch". Expected: the agent calls `autoharness init`, then `autoharness add mcp fetch`; with the
+gateway the answer contains `"via": "gateway"`, and the page is read through `harness_call` without a
+restart.
 
-## Несколько агентов в одном проекте
+## Several agents in one project
 
 ```bash
 autoharness install-skill --all
@@ -206,17 +204,16 @@ autoharness --agent claude gateway install
 autoharness --agent codex  gateway install
 ```
 
-Задачи и gateway у агентов общие (`.autoharness/`), а конфиги у каждого свои. Внутри сессии
-агент определяется сам — по переменным окружения, которые он ставит своим командам
-(`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, `ANTIGRAVITY_AGENT`, …). `ANTIGRAVITY_AGENT`
-проверяется первым: agy, запущенный из Claude Code, наследует его `CLAUDECODE`. Порядок выбора: `--agent`, затем
-`$AUTOHARNESS_AGENT`, затем автоопределение, иначе `claude`; агент запоминается в задаче при
-`init`. Если определение не сработало, задайте `AUTOHARNESS_AGENT=<агент>` в окружении, из
-которого запускаете агента.
+Tasks and the gateway are shared by the agents (`.autoharness/`); the configs are each agent's own.
+Inside a session the agent is detected by the environment variables it sets for its commands
+(`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, `ANTIGRAVITY_AGENT`, …). `ANTIGRAVITY_AGENT` is
+checked first: agy started from Claude Code inherits its `CLAUDECODE`. The order is `--agent`, then
+`$AUTOHARNESS_AGENT`, then detection, else `claude`; the agent is stored in the task at `init`. If
+detection fails, set `AUTOHARNESS_AGENT=<agent>` in the environment you start the agent from.
 
-## Как autoharness пишет в конфиги разных агентов
+## How autoharness writes the configs of different agents
 
-| `--agent` | MCP-конфиг проекта | Skills проекта |
+| `--agent` | Project MCP config | Project skills |
 |---|---|---|
 | `claude` (Claude Code) | `.mcp.json` | `.claude/skills` |
 | `codex` (Codex CLI) | `.codex/config.toml` | `.agents/skills` |
@@ -226,23 +223,23 @@ autoharness --agent codex  gateway install
 | `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
 | `agy` (Antigravity CLI) | `.agents/mcp_config.json` | `.agents/skills` |
 
-Lockfiles и recipes хранят конфиг в одном каноническом виде (формат `.mcp.json`,
-секреты как `${VAR}`), адаптер переводит его при записи: для Gemini-семейства
-remote-серверы становятся `httpUrl`/`url`, для Codex секреты уходят в `env_vars`,
-`bearer_token_env_var`, `env_http_headers`. Codex не раскрывает `${VAR}` в `args`;
-в этом случае `add` возвращает `warnings`. Antigravity CLI тоже не раскрывает `${VAR}`, но
-передаёт серверам своё окружение: `"K": "${K}"` просто не записывается, remote-серверы
-становятся `serverUrl`, а для `${VAR}` в заголовках, `args` и переименованных переменных
-`add` возвращает `warnings`. Проектный `.codex/config.toml` Codex читает
-только для trusted-проектов. Правки в TOML обёрнуты маркерами `# >>> autoharness:<name>`,
-так что комментарии и остальной конфиг пользователя не трогаются.
+Lockfiles and recipes keep a config in one canonical form (the `.mcp.json` format, secrets as
+`${VAR}`), and the adapter translates it on write: for the Gemini family remote servers become
+`httpUrl`/`url`; for Codex secrets go to `env_vars`, `bearer_token_env_var`, `env_http_headers`.
+Codex does not expand `${VAR}` in `args`; then `add` returns `warnings`. Antigravity CLI does not
+expand `${VAR}` either, but passes its environment to servers: `"K": "${K}"` is simply not written,
+remote servers become `serverUrl`, and for `${VAR}` in headers, `args` and renamed variables `add`
+returns `warnings`. Codex reads the project `.codex/config.toml` only for trusted projects. Edits to
+TOML are wrapped in `# >>> autoharness:<name>` markers, so comments and the rest of the user's config
+are left alone.
 
-## Удаление
+## Uninstalling
 
 ```bash
-autoharness --agent claude gateway uninstall   # убирает `autoharness` из конфига агента
-autoharness install-hook --remove              # убирает хук
-autoharness prune                              # снимает всё, что задачи оставили в проекте
+autoharness --agent claude gateway uninstall   # removes `autoharness` from the agent's config
+autoharness install-hook --remove              # removes the hook
+autoharness prune                              # removes everything tasks left in the project
 ```
 
-Skill удаляется вместе с папкой `autoharness` в каталоге skills (таблица выше). CLI — `uv tool uninstall autoharness`.
+The skill is removed with the `autoharness` folder in the skills directory (table above). The CLI:
+`uv tool uninstall autoharness`.

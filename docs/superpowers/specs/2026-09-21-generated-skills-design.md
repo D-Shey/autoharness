@@ -1,54 +1,55 @@
-# Генерация собственных skills — дизайн
+# Generating your own skills: design
 
-Дата: 2026-09-21. Статус: на ревью.
+Date: 2026-09-21. Status: in review.
 
-## Зачем
+## Why
 
-Агент по ходу задачи узнаёт вещи, которых нет ни в одном поставленном skill: как собрать
-именно этот проект, как проверить результат доступными средствами (например, выгрузить
-слайды .pptx в PNG через PowerPoint COM, когда нет LibreOffice), какие у API особенности.
-Сейчас это знание пропадает вместе с сессией.
+During a task the agent learns things no installed skill has: how to build this particular project,
+how to check the result with the means at hand (for example, exporting .pptx slides to PNG through
+PowerPoint COM when there is no LibreOffice), what an API's quirks are. Today that knowledge is lost
+with the session.
 
-Цель — **перенос опыта**: в конце задачи агент записывает выученное в skill, skill
-попадает в библиотеку autoharness и ставится в других проектах вместе с recipe.
+The goal is **carrying experience over**: at the end of a task the agent writes what it learned into
+a skill, the skill goes into the autoharness library and is installed in other projects together with
+a recipe.
 
-Пишет skill агент: у autoharness нет LLM. autoharness даёт заготовку, проверки,
-учёт в lockfile, согласие пользователя и хранение.
+The agent writes the skill: autoharness has no LLM. autoharness gives the template, the checks, the
+lockfile records, the user's consent and the storage.
 
-Вне рамок: публикация на skills.sh, синхронизация библиотеки между машинами,
-генерация skill посреди задачи вместо ненайденного (механизм тот же, но инструкции
-агенту описывают только сценарий «в конце задачи»).
+Out of scope: publishing on skills.sh, syncing the library between machines, generating a skill in
+the middle of a task in place of one not found (the mechanism is the same, but the agent's
+instructions describe only the "at the end of a task" scenario).
 
-## Термины
+## Terms
 
-- **Библиотека** — `~/.autoharness/skills/<name>/` (`AUTOHARNESS_HOME` переопределяет корень).
-- **Сгенерированный skill** — skill, созданный `skill new` в текущей задаче.
-- **Локальный spec** — `local:<name>`, ссылка на skill из библиотеки. Живёт рядом с
-  `owner/repo@skill` в lockfile, `kept.json` и recipes.
+- **The library**: `~/.autoharness/skills/<name>/` (`AUTOHARNESS_HOME` overrides the root).
+- **A generated skill**: a skill created by `skill new` in the current task.
+- **A local spec**: `local:<name>`, a reference to a skill in the library. It lives next to
+  `owner/repo@skill` in lockfiles, `kept.json` and recipes.
 
-## Команды
+## Commands
 
-Все печатают JSON; код выхода `3` — нужно согласие пользователя.
+All print JSON; exit code `3` means the user's consent is needed.
 
-| Команда | Нужна активная задача | Что делает |
+| Command | Needs an active task | What it does |
 |---|---|---|
-| `skill new <name> --description "<текст>"` | да | заготовка в папке skills агента + запись в lockfile |
-| `skill save <name> [--approve]` | нет | проверки; с `--approve` — копия в библиотеку |
-| `skill list` | нет | содержимое библиотеки |
-| `skill delete <name>` | нет | удаление из библиотеки |
-| `add skill local:<name>` | да | установка из библиотеки |
+| `skill new <name> --description "<text>"` | yes | a template in the agent's skills folder + a lockfile entry |
+| `skill save <name> [--approve]` | no | checks; with `--approve`, a copy into the library |
+| `skill list` | no | the library's contents |
+| `skill delete <name>` | no | removal from the library |
+| `add skill local:<name>` | yes | install from the library |
 
 ### `skill new`
 
-- Имя: `^[a-z0-9][a-z0-9-]{1,63}$`. Ошибка, если папка с таким именем уже есть в skills
-  проекта или skill с таким именем есть в библиотеке (перезапись библиотеки — только через
-  `skill save` уже установленного `local:` skill, см. ниже).
-- Пишет `<skills_dir>/<name>/SKILL.md`:
+- The name: `^[a-z0-9][a-z0-9-]{1,63}$`. An error if a folder with that name already exists in the
+  project's skills or a skill with that name is in the library (the library is overwritten only by
+  `skill save` of an installed `local:` skill, see below).
+- Writes `<skills_dir>/<name>/SKILL.md`:
 
   ```markdown
   ---
   name: <name>
-  description: <описание>
+  description: <description>
   ---
 
   # <name>
@@ -63,111 +64,113 @@
   <!-- autoharness: fill in -->
   ```
 
-- Запись в `skills.lock.json` задачи: `spec: "local:<name>"`, `source: "generated"`,
-  `sha256` заготовки, `trust: {"level": "high", "score": 100}`, `findings: []`.
-  Дальше этот skill для teardown, `keep`/`remove`, `status` ничем не отличается от других.
+- An entry in the task's `skills.lock.json`: `spec: "local:<name>"`, `source: "generated"`, the
+  template's `sha256`, `trust: {"level": "high", "score": 100}`, `findings: []`. From then on this
+  skill is like any other for teardown, `keep`/`remove` and `status`.
 
 ### `skill save`
 
-Ищет skill по имени: сначала в lockfile активной задачи, затем в `kept.json` проекта.
-Сохранять можно только skill со spec `local:<name>` (созданный `skill new` или
-поставленный из библиотеки). Иначе ошибка: чужие skills в библиотеку не копируются.
+Looks the skill up by name: first in the active task's lockfile, then in the project's `kept.json`.
+Only a skill with the spec `local:<name>` (created by `skill new` or installed from the library) can
+be saved. Otherwise it is an error: other people's skills are not copied into the library.
 
-Проверки по порядку; первая группа, давшая результат, определяет ответ:
+The checks in order; the first group that finds something decides the answer:
 
-1. **Формат** → `status: "invalid"`, код 1.
-   Нет `SKILL.md`; нет frontmatter; `name` ≠ имя папки; пустой `description`;
-   в любом файле остался маркер `<!-- autoharness: fill in -->`.
-2. **Секреты** → `status: "blocked"`, код 1. Согласие не помогает, агент должен убрать.
-   Паттерны: `ghp_[A-Za-z0-9]{20,}`, `github_pat_`, `sk-[A-Za-z0-9_-]{20,}`, `AKIA[0-9A-Z]{16}`,
+1. **Format** → `status: "invalid"`, code 1.
+   No `SKILL.md`; no frontmatter; `name` ≠ the folder name; an empty `description`; the marker
+   `<!-- autoharness: fill in -->` left in any file.
+2. **Secrets** → `status: "blocked"`, code 1. Consent does not help; the agent must remove them.
+   Patterns: `ghp_[A-Za-z0-9]{20,}`, `github_pat_`, `sk-[A-Za-z0-9_-]{20,}`, `AKIA[0-9A-Z]{16}`,
    `xox[abpr]-`, `-----BEGIN [A-Z ]*PRIVATE KEY-----`,
    `(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*['"]?[^\s'"$<{]{8,}`
-   (значения вида `${VAR}` и `<...>` не считаются).
-3. **Статический скан** (`trust.scan_skill`) → high-находки: `status: "blocked"`, код 1.
-4. **Приватность** → не блокирует, попадает в `warnings`:
-   абсолютные пути `[A-Za-z]:\\Users\\[^\\\s]+`, `/home/[^/\s]+/`, `/Users/[^/\s]+/`;
-   email-адреса. Medium/low-находки скана тоже идут в `warnings`.
+   (values like `${VAR}` and `<...>` do not count).
+3. **Static scan** (`trust.scan_skill`) → high findings: `status: "blocked"`, code 1.
+4. **Privacy** → does not block, goes into `warnings`: absolute paths `[A-Za-z]:\\Users\\[^\\\s]+`,
+   `/home/[^/\s]+/`, `/Users/[^/\s]+/`; email addresses. Medium/low scan findings also go into
+   `warnings`.
 
-Если блокирующего нет:
+If nothing blocks:
 
-- без `--approve` → `status: "approval_required"`, код 3, в ответе `name`, `description`,
-  `files`, `warnings`, `overwrites` (true, если skill с таким именем уже в библиотеке),
-  `next`: показать пользователю и повторить с `--approve` только после его «да»;
-- с `--approve` → копия (без `RUNTIME_JUNK`) в `~/.autoharness/skills/<name>/`, прежняя
-  версия заменяется целиком. Рядом `~/.autoharness/skills/<name>.meta.json`:
-  `{"name", "description", "capabilities", "task", "project", "saved", "sha256"}`,
-  где `capabilities` — capabilities задачи на момент сохранения. В лог задачи (если она есть)
-  пишется строка о сохранении.
+- without `--approve` → `status: "approval_required"`, code 3, the answer has `name`, `description`,
+  `files`, `warnings`, `overwrites` (true if a skill with that name is already in the library), and
+  `next`: show it to the user and repeat with `--approve` only after their "yes";
+- with `--approve` → a copy (without `RUNTIME_JUNK`) into `~/.autoharness/skills/<name>/`, the previous
+  version is replaced entirely. Next to it, `~/.autoharness/skills/<name>.meta.json`:
+  `{"name", "description", "capabilities", "task", "project", "saved", "sha256"}`, where
+  `capabilities` are the task's capabilities at the time of saving. A line about the save goes into
+  the task's log (if there is a task).
 
-`meta.json` лежит рядом с папкой, а не внутри, чтобы не попадать в сам skill при установке.
+`meta.json` lies next to the folder, not inside it, so it does not end up in the skill itself when
+installed.
 
 ### `add skill local:<name>`
 
-- Нет в библиотеке → ошибка с подсказкой `skill list`.
-- Trust-отчёт: `score 100, level high`, причина «saved to the local library with the user's
-  approval»; согласия не требует.
-- Установка идёт тем же `Task.add_skill` с другим stager: он копирует папку из библиотеки
-  вместо `npx skills`. Статический скан выполняется как обычно.
-- Уже сохранённый в проекте (`kept.json`) → `already_installed`, как для любых skills.
+- Not in the library → an error with the hint `skill list`.
+- The trust report: `score 100, level high`, the reason "saved to the local library with the user's
+  approval"; no consent needed.
+- The install goes through the same `Task.add_skill` with another stager: it copies the folder from
+  the library instead of `npx skills`. The static scan runs as usual.
+- Already kept in the project (`kept.json`) → `already_installed`, as for any skill.
 
 ### `skill list`, `skill delete`
 
-- `list`: `[{name, description, capabilities, saved}]` из `*.meta.json`.
-- `delete <name>`: удаляет папку и `meta.json`. Копии, уже поставленные в проекты, не трогает.
-  Нет такого → ошибка.
+- `list`: `[{name, description, capabilities, saved}]` from `*.meta.json`.
+- `delete <name>`: removes the folder and `meta.json`. Copies already installed into projects are
+  left alone. Not found → an error.
 
-## Связь с остальным
+## How it connects to the rest
 
-- **`parse_skill_spec`** принимает `local:<name>` и возвращает `("local", name)`.
-- **Recipes.** `recipes.save` уже берёт specs из lockfile, `local:<name>` попадёт туда сам.
-  `teardown --save-recipe` добавляет в ответ `warnings`, если в recipe есть `local:<name>`,
-  которого нет в библиотеке.
-- **Teardown.** Для skill с `source: "generated"`, которого нет в библиотеке:
-  - `keep` — остаётся в проекте, в ответе `unsaved_generated: [name]`;
-  - `remove` — перед удалением копия в `.autoharness/tasks/<id>/generated-skills/<name>/`,
-    в ответе `unsaved_generated` с путём копии.
-- **`need <capability>`** добавляет `local: [{name, description}]` — skills библиотеки,
-  у которых эта capability есть в `meta.json`.
-- **`SKILL.md` autoharness**, шаг 6, новый пункт перед teardown: если узнал переиспользуемое,
-  чего нет в поставленных skills, — `skill new` → заполнить → `skill save` → показать
-  пользователю → `--approve` после «да»; писать обобщённо, без абсолютных путей, секретов и
-  имён людей и клиентов. Шаг 2: сначала `need`, он показывает и библиотеку.
-- **README**: раздел «Свои skills», строка в таблице команд, убрать пункт из «Ограничений MVP».
+- **`parse_skill_spec`** accepts `local:<name>` and returns `("local", name)`.
+- **Recipes.** `recipes.save` already takes specs from the lockfile, so `local:<name>` gets there by
+  itself. `teardown --save-recipe` adds `warnings` to the answer if the recipe has a `local:<name>`
+  that is not in the library.
+- **Teardown.** For a skill with `source: "generated"` that is not in the library:
+  - `keep`: it stays in the project, the answer has `unsaved_generated: [name]`;
+  - `remove`: before removal, a copy goes to `.autoharness/tasks/<id>/generated-skills/<name>/`, and
+    the answer has `unsaved_generated` with the copy's path.
+- **`need <capability>`** adds `local: [{name, description}]`: library skills whose `meta.json` has
+  that capability.
+- **autoharness's `SKILL.md`**, step 6, a new item before teardown: if you learned something reusable
+  that the installed skills do not have, `skill new` → fill it in → `skill save` → show it to the
+  user → `--approve` after a "yes"; write it in general terms, without absolute paths, secrets or the
+  names of people and clients. Step 2: `need` first, it shows the library as well.
+- **README**: a "Your own skills" section, a row in the command table, remove the item from "MVP
+  limitations".
 
-## Размещение в коде
+## Where it goes in the code
 
-- `src/autoharness/library.py` — новый модуль: пути библиотеки, `save(src_dir, meta)`,
-  `list_skills()`, `delete(name)`, `stage_from_library(repo, skill, stage_dir)` (stager),
-  `check(skill_dir) -> CheckResult` (формат, секреты, скан, приватность).
-- `env.py` — `Task.new_skill(name, description)`; `parse_skill_spec` для `local:`;
-  в `teardown` — обработка несохранённых generated.
-- `cli.py` — подкоманды `skill new|save|list|delete`, ветка `local:` в `resolve_skill`
-  и выборе stager в `cmd_add`, `local` в `need`, предупреждения recipe в `teardown`.
-- `trust.py` не меняется, проверки секретов и приватности живут в `library.py`: у них другая
-  цель (утечка из проекта, а не угроза для агента).
+- `src/autoharness/library.py`, a new module: library paths, `save(src_dir, meta)`, `list_skills()`,
+  `delete(name)`, `stage_from_library(repo, skill, stage_dir)` (a stager),
+  `check(skill_dir) -> CheckResult` (format, secrets, scan, privacy).
+- `env.py`: `Task.new_skill(name, description)`; `parse_skill_spec` for `local:`; handling unsaved
+  generated skills in `teardown`.
+- `cli.py`: the subcommands `skill new|save|list|delete`, the `local:` branch in `resolve_skill` and
+  the stager choice in `cmd_add`, `local` in `need`, recipe warnings in `teardown`.
+- `trust.py` does not change; the secret and privacy checks live in `library.py`: they serve another
+  purpose (a leak out of the project, not a threat to the agent).
 
-## Ошибки
+## Errors
 
-| Ситуация | Ответ |
+| Situation | Answer |
 |---|---|
-| `skill new` без активной задачи | ошибка «no active task» (как у `add`) |
-| имя невалидно или занято | ошибка с причиной |
-| `skill save` для не-`local:` skill | ошибка «only skills created with `skill new` or installed from the library» |
-| skill не найден ни в задаче, ни в `kept.json` | ошибка |
-| повреждённый `meta.json` | `skill list` пропускает запись и добавляет её в `warnings` |
+| `skill new` without an active task | the error "no active task" (as for `add`) |
+| the name is invalid or taken | an error with the reason |
+| `skill save` for a non-`local:` skill | the error "only skills created with `skill new` or installed from the library" |
+| the skill is found neither in the task nor in `kept.json` | an error |
+| a damaged `meta.json` | `skill list` skips the entry and adds it to `warnings` |
 
-## Тесты
+## Tests
 
-1. Полный цикл: `skill new` → заполнить → `skill save` (код 3, `approval_required`) →
-   `skill save --approve` → в другом проекте `add skill local:<name>` ставит его, lockfile
-   содержит `local:<name>`.
-2. Незаполненная заготовка → `invalid`, код 1.
-3. Секрет (`ghp_…`) → `blocked`, код 1, даже с `--approve`.
-4. Абсолютный путь → `approval_required` с `warnings`.
-5. Повторное сохранение → `overwrites: true`, после `--approve` версия в библиотеке новая.
-6. Recipe с несохранённым `local:` → `warnings` в ответе teardown.
-7. `teardown --remove` с несохранённым generated → копия в `generated-skills/`,
-   `unsaved_generated` в ответе.
-8. `need` показывает skill из библиотеки с подходящей capability.
-9. `skill delete` удаляет из библиотеки, поставленная копия в проекте остаётся.
-10. `skill save` для обычного `owner/repo@skill` → ошибка.
+1. The full cycle: `skill new` → fill in → `skill save` (code 3, `approval_required`) →
+   `skill save --approve` → in another project `add skill local:<name>` installs it, and the lockfile
+   has `local:<name>`.
+2. An unfilled template → `invalid`, code 1.
+3. A secret (`ghp_…`) → `blocked`, code 1, even with `--approve`.
+4. An absolute path → `approval_required` with `warnings`.
+5. Saving again → `overwrites: true`; after `--approve` the library has the new version.
+6. A recipe with an unsaved `local:` → `warnings` in the teardown answer.
+7. `teardown --remove` with an unsaved generated skill → a copy in `generated-skills/`,
+   `unsaved_generated` in the answer.
+8. `need` shows a library skill with a matching capability.
+9. `skill delete` removes it from the library; the copy installed in a project stays.
+10. `skill save` for an ordinary `owner/repo@skill` → an error.

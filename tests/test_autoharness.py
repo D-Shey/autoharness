@@ -608,7 +608,7 @@ def test_check_blocks_high_scan_findings(tmp_path):
 
 def test_check_warns_about_paths_and_emails(tmp_path):
     res = library.check(write_skill(tmp_path, "pptx-qa",
-                                    FILLED + "\nSee C:\\Users\\rda44\\deck and ask dev@example.com\n"))
+                                    FILLED + "\nSee C:\\Users\\alice\\deck and ask dev@example.com\n"))
     assert res.status == "ok"
     assert any("path" in w for w in res.warnings) and any("email" in w for w in res.warnings)
 
@@ -742,7 +742,7 @@ def test_cli_generated_skill_full_cycle(tmp_path, lib_home, capsys):
     code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
     assert code == 1 and res["status"] == "invalid"
 
-    skill_md.write_text(FILLED + "\nTried on C:\\Users\\rda44\\deck\n", "utf-8")
+    skill_md.write_text(FILLED + "\nTried on C:\\Users\\alice\\deck\n", "utf-8")
     code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
     assert code == 3 and res["status"] == "approval_required" and res["overwrites"] is False
     assert any("path" in w for w in res["warnings"]) and not library.exists("pptx-qa")

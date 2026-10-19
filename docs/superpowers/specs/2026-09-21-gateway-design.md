@@ -1,58 +1,58 @@
-# Gateway-MCP — дизайн
+# Gateway MCP: design
 
-Дата: 2026-09-21. Статус: на ревью.
+Date: 2026-09-21. Status: in review.
 
-## Зачем
+## Why
 
-Агенты читают MCP-серверы из своего конфига только при старте сессии, поэтому после
-`autoharness add mcp` нужен перезапуск. Gateway снимает это ограничение: autoharness сам
-становится MCP-сервером, который регистрируется в агенте один раз и дальше запускает
-добавленные серверы у себя, без перезапуска агента.
+Agents read MCP servers from their config only when a session starts, so `autoharness add mcp` needs a
+restart. The gateway removes that limit: autoharness itself becomes an MCP server that is registered
+in the agent once and from then on runs the added servers inside itself, without restarting the
+agent.
 
-### Почему не только `tools/list_changed`
+### Why not just `tools/list_changed`
 
-Протокол MCP позволяет серверу сообщить агенту, что список инструментов изменился. На сентябрь
-2026 на это нельзя полагаться:
+The MCP protocol lets a server tell the agent that its tool list changed. As of September 2026 this
+cannot be relied on:
 
-| Агент | Состояние |
+| Agent | State |
 |---|---|
-| Claude Code | документация заявляет поддержку с 2.1.0, но новые инструменты не попадают в отложенный поиск инструментов — issue anthropics/claude-code#77314 (2.1.198), закрыт как not planned |
-| Codex | не перезапрашивает `tools/list` после уведомления — openai/codex#33266 (0.144.1), открыт |
-| Gemini CLI | код влит, но не работает — google-gemini/gemini-cli#19509, открыт, P1 |
-| Qwen Code, GigaCode | данных нет; Qwen Code — форк Gemini CLI |
+| Claude Code | the docs claim support since 2.1.0, but new tools do not reach deferred tool search: issue anthropics/claude-code#77314 (2.1.198), closed as not planned |
+| Codex | does not request `tools/list` again after the notification: openai/codex#33266 (0.144.1), open |
+| Gemini CLI | the code is merged but does not work: google-gemini/gemini-cli#19509, open, P1 |
+| Qwen Code, GigaCode | no data; Qwen Code is a fork of Gemini CLI |
 
-Поэтому основной путь — **неизменный набор мета-инструментов**, которые работают в любом агенте.
-Родные инструменты с уведомлением — дополнение там, где агент его обработает.
+So the main path is **a fixed set of meta-tools** that work in any agent. Native tools with the
+notification are an addition where the agent handles it.
 
-## Вне рамок
+## Out of scope
 
-- OAuth-вход для удалённых серверов (такие серверы идут в конфиг агента, как сейчас).
-- Устаревший SSE-транспорт (`type: "sse"`) — тоже напрямую в конфиг агента.
-- Уведомления от HTTP-серверов (GET-поток Streamable HTTP): gateway их не слушает;
-  `list_changed` принимается только от stdio-серверов.
-- Запросы дочерних серверов к клиенту (`sampling`, `roots/list`, `elicitation`): ответ
+- OAuth sign-in for remote servers (such servers go into the agent's config, as now).
+- The legacy SSE transport (`type: "sse"`): also straight into the agent's config.
+- Notifications from HTTP servers (the Streamable HTTP GET stream): the gateway does not listen for
+  them; `list_changed` is accepted from stdio servers only.
+- Requests from child servers to the client (`sampling`, `roots/list`, `elicitation`): the answer is
   `-32601 Method not found`.
-- Отмена вызовов и прогресс.
+- Call cancellation and progress.
 
-## Установка gateway
+## Installing the gateway
 
-`autoharness gateway install` (для агента проекта, `--agent` как обычно):
+`autoharness gateway install` (for the project's agent, `--agent` as usual):
 
-1. Пишет в MCP-конфиг агента сервер с именем `autoharness`:
-   - `{"command": "autoharness", "args": ["gateway", "serve"]}`, если `autoharness` есть в `PATH`;
-   - иначе `{"command": "<sys.executable>", "args": ["-m", "autoharness", "gateway", "serve"]}`.
-   Если сервер `autoharness` уже есть в конфиге и не записан autoharness — ошибка, как для
-   любого чужого сервера.
-2. Создаёт или обновляет `.autoharness/gateway.json`: `installed` получает имя агента.
-3. Ответ: `next` — попросить пользователя перезапустить агента (последний раз) и одобрить
-   проектный сервер.
+1. Writes a server named `autoharness` into the agent's MCP config:
+   - `{"command": "autoharness", "args": ["gateway", "serve"]}` if `autoharness` is on `PATH`;
+   - otherwise `{"command": "<sys.executable>", "args": ["-m", "autoharness", "gateway", "serve"]}`.
+   If an `autoharness` server is already in the config and autoharness did not write it, it is an
+   error, as for any foreign server.
+2. Creates or updates `.autoharness/gateway.json`: `installed` gets the agent's name.
+3. The answer: `next` asks the user to restart the agent (one last time) and approve the project
+   server.
 
-`gateway uninstall` — обратное; серверы из `gateway.json` остаются записанными, но пока gateway
-не установлен, `add mcp` снова пишет в конфиг агента.
-`gateway status` — установлен ли gateway для агента, какие серверы в `gateway.json`,
-ошибки из последнего запуска (если gateway писал `gateway.state.json`, см. ниже).
+`gateway uninstall` is the reverse; the servers in `gateway.json` stay recorded, but while the gateway
+is not installed, `add mcp` writes into the agent's config again.
+`gateway status`: whether the gateway is installed for the agent, which servers are in
+`gateway.json`, errors from the last run (if the gateway wrote `gateway.state.json`, see below).
 
-`.autoharness/.gitignore` пропускает и `gateway.json` (как `config.json` и `kept.json`).
+`.autoharness/.gitignore` lets `gateway.json` through as well (like `config.json` and `kept.json`).
 
 ## `.autoharness/gateway.json`
 
@@ -67,49 +67,50 @@
 }
 ```
 
-Конфиги — в каноническом виде (формат `.mcp.json`, секреты `${VAR}`), тот же, что в lockfile.
-Кто владеет записью, по-прежнему знают lockfile задачи и `kept.json`; `gateway.json` — только
-«что должно быть запущено».
+Configs are in the canonical form (the `.mcp.json` format, secrets as `${VAR}`), the same as in the
+lockfile. Who owns an entry is still known by the task's lockfile and `kept.json`; `gateway.json` only
+says "what should be running".
 
-## Маршрут `add mcp`
+## The `add mcp` route
 
-Сервер идёт через gateway, если одновременно:
+A server goes through the gateway when all of these hold:
 
-- `.autoharness/gateway.json` содержит текущего агента в `installed` **и** в конфиге агента есть
-  сервер `autoharness`;
-- конфиг проксируемый: есть `command` (stdio) **или** `type == "http"` с непустыми `headers`
-  (удалённый сервер без заголовков может требовать OAuth — он идёт напрямую);
-- не передан `--direct`.
+- `.autoharness/gateway.json` has the current agent in `installed` **and** the agent's config has the
+  `autoharness` server;
+- the config can be proxied: it has `command` (stdio) **or** `type == "http"` with non-empty `headers`
+  (a remote server without headers may need OAuth and goes direct);
+- `--direct` was not passed.
 
-Тогда:
+Then:
 
-- запись добавляется в `gateway.json["servers"]`, в конфиг агента ничего не пишется;
-- запись lockfile получает `"via": "gateway"`;
-- ответ `add`: `"via": "gateway"`, `next`: сервер доступен сейчас — вызвать `harness_tools`,
-  затем `harness_call` (или родные `<server>__<tool>`, если агент их показал); перезапуск не нужен.
-  Если нужны секреты — указать переменные и то, что их должен видеть процесс агента.
+- the entry is added to `gateway.json["servers"]`, nothing is written to the agent's config;
+- the lockfile entry gets `"via": "gateway"`;
+- `add` answers `"via": "gateway"`, and `next`: the server is available now; call `harness_tools`,
+  then `harness_call` (or the native `<server>__<tool>` if the agent shows them); no restart is
+  needed. If secrets are needed, it names the variables and says the agent's process must see them.
 
-Иначе поведение прежнее, а если gateway не установлен, `next` добавляет подсказку: один раз
-предложить пользователю `autoharness gateway install`, чтобы следующие серверы не требовали
-перезапуска.
+Otherwise the behaviour is as before, and if the gateway is not installed, `next` adds a hint: offer
+the user `autoharness gateway install` once, so later servers need no restart.
 
-`remove_mcp`, `teardown` (`remove`), `Project.remove_kept`, `prune` для записей с
-`via: gateway` удаляют сервер из `gateway.json` вместо конфига агента. `keep` оставляет
-его в `gateway.json`. Проверка «уже есть и не наш» для имени учитывает и `gateway.json`.
+`remove_mcp`, `teardown` (`remove`), `Project.remove_kept` and `prune` remove a server from
+`gateway.json` instead of the agent's config for entries with `via: gateway`. `keep` leaves it in
+`gateway.json`. The "already there and not ours" check for a name takes `gateway.json` into account
+too.
 
 ## `gateway serve`
 
-MCP-сервер на stdio (построчный JSON-RPC 2.0, по одному сообщению в строке, UTF-8).
+An MCP server on stdio (line-delimited JSON-RPC 2.0, one message per line, UTF-8).
 
-**Поиск проекта.** От текущего каталога вверх до первого, где есть `.autoharness/gateway.json`;
-нет — работает с пустым набором и сообщает об этом в `harness_tools`.
+**Finding the project.** From the current directory up to the first one that has
+`.autoharness/gateway.json`; if there is none, it runs with an empty set and says so in
+`harness_tools`.
 
-**`initialize`.** Ответ: `protocolVersion` — запрошенная агентом, если она в
-`SUPPORTED = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")`, иначе первая из списка;
-`capabilities: {"tools": {"listChanged": true}}`; `serverInfo: {"name": "autoharness", "version"}`;
-`instructions`: коротко про `harness_tools` / `harness_call`.
+**`initialize`.** The answer: `protocolVersion` is the one the agent asked for if it is in
+`SUPPORTED = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")`, otherwise the first in the
+list; `capabilities: {"tools": {"listChanged": true}}`; `serverInfo: {"name": "autoharness", "version"}`;
+`instructions`: a short note on `harness_tools` / `harness_call`.
 
-**`tools/list`.** Мета-инструменты, затем родные инструменты всех запущенных серверов.
+**`tools/list`.** The meta-tools, then the native tools of every running server.
 
 ```json
 {"name": "harness_tools",
@@ -121,112 +122,111 @@ MCP-сервер на stdio (построчный JSON-RPC 2.0, по одном�
                  "arguments": {"type": "object"}}, "required": ["server", "tool"]}}
 ```
 
-Родное имя: `re.sub(r"[^a-zA-Z0-9_-]", "_", f"{server}__{tool}")[:64]`; при совпадении имён
-отдаётся первое по алфавиту серверов, остальные — только через `harness_call`.
+The native name: `re.sub(r"[^a-zA-Z0-9_-]", "_", f"{server}__{tool}")[:64]`; when names collide, the
+first server alphabetically gets it, the rest are reachable only through `harness_call`.
 
-**`tools/call`.** `harness_tools` → текст с JSON
+**`tools/call`.** `harness_tools` → text with the JSON
 `{"servers": {name: {"status": "running|starting|error", "error"?, "transport": "stdio|http",
 "tools": [{"name", "native_name"|null, "description", "inputSchema"}]}}, "project": path|null}`.
-`harness_call` и родные имена → `tools/call` дочернего сервера, результат (`content`, `isError`,
-`structuredContent`) возвращается без изменений. Неизвестный сервер или инструмент →
-результат с `isError: true` и текстом, что делать (`harness_tools`).
+`harness_call` and native names → `tools/call` of the child server; the result (`content`, `isError`,
+`structuredContent`) is returned unchanged. An unknown server or tool → a result with
+`isError: true` and text saying what to do (`harness_tools`).
 
-**`ping`** → `{}`. Прочие методы → `-32601`. Уведомления от агента (`notifications/initialized`,
-`notifications/cancelled`) — принимаются молча.
+**`ping`** → `{}`. Other methods → `-32601`. Notifications from the agent
+(`notifications/initialized`, `notifications/cancelled`) are accepted silently.
 
-**Слежение.** Поток раз в секунду проверяет `mtime` `gateway.json`. При изменении: новые серверы
-запускаются (в фоне, статус `starting`), удалённые останавливаются, изменённые перезапускаются;
-затем агенту уходит `notifications/tools/list_changed`. То же — когда stdio-сервер сам прислал
-`list_changed` (gateway перечитывает его `tools/list`). Уведомление отправляется только после
-того, как агент прислал `notifications/initialized`.
+**Watching.** A thread checks the `mtime` of `gateway.json` once a second. On a change: new servers
+start (in the background, status `starting`), removed ones stop, changed ones restart; then
+`notifications/tools/list_changed` goes to the agent. The same happens when a stdio server sends
+`list_changed` itself (the gateway reads its `tools/list` again). The notification is sent only after
+the agent has sent `notifications/initialized`.
 
-**Состояние для `gateway status`.** После каждого изменения gateway пишет
+**State for `gateway status`.** After every change the gateway writes
 `.autoharness/gateway.state.json`: `{"pid", "updated", "servers": {name: {"status", "error"?, "tools": n}}}`.
 
-## Дочерние серверы (`mcp_client.py`)
+## Child servers (`mcp_client.py`)
 
-Общий интерфейс: `start()`, `list_tools() -> list[dict]`, `call_tool(name, arguments) -> dict`,
-`close()`; при запуске — `initialize` (наша последняя версия из `SUPPORTED`,
-`capabilities: {}`, `clientInfo: {"name": "autoharness-gateway"}`) → `notifications/initialized`
-→ `tools/list` (с пагинацией по `nextCursor`).
+The common interface: `start()`, `list_tools() -> list[dict]`, `call_tool(name, arguments) -> dict`,
+`close()`; at start: `initialize` (our latest version from `SUPPORTED`, `capabilities: {}`,
+`clientInfo: {"name": "autoharness-gateway"}`) → `notifications/initialized` → `tools/list` (paged by
+`nextCursor`).
 
-**Подстановка секретов.** `${VAR}` в `command`, `args`, `env`, `url`, `headers` заменяются
-значениями из окружения gateway. Нет переменной → сервер получает статус
-`error: set <VAR> in the environment the agent is started from`, процесс не запускается.
+**Filling in secrets.** `${VAR}` in `command`, `args`, `env`, `url`, `headers` is replaced with values
+from the gateway's environment. A missing variable → the server gets the status
+`error: set <VAR> in the environment the agent is started from`, and the process does not start.
 
-**stdio.** `subprocess.Popen` с `shutil.which(command)` (на Windows находит `npx.cmd`),
-окружение = окружение gateway + `env` конфига, `stdin/stdout` — пайпы, `stderr` —
-в `.autoharness/gateway.log`. Поток-читатель разбирает строки: ответы сопоставляются с
-ожидающими запросами по `id`, уведомления `notifications/tools/list_changed` вызывают
-перечитывание, запросы от сервера получают `-32601`. Нестрочный вывод в stdout дочернего
-сервера пишется в лог и пропускается.
+**stdio.** `subprocess.Popen` with `shutil.which(command)` (on Windows it finds `npx.cmd`); the
+environment is the gateway's plus the config's `env`; `stdin/stdout` are pipes, `stderr` goes to
+`.autoharness/gateway.log`. A reader thread parses lines: answers are matched with waiting requests
+by `id`, `notifications/tools/list_changed` triggers a re-read, requests from the server get
+`-32601`. Non-line output on the child's stdout is written to the log and skipped.
 
-**HTTP (Streamable HTTP).** `urllib.request`, `POST url`, заголовки
-`Content-Type: application/json`, `Accept: application/json, text/event-stream`, заголовки
-конфига, после `initialize` — `MCP-Protocol-Version` и `Mcp-Session-Id` (если сервер его выдал).
-Ответ `application/json` — сообщение целиком; `text/event-stream` — читаются события `data:`
-до ответа с нашим `id`; `202` на уведомление — ок. `close()` шлёт `DELETE` с `Mcp-Session-Id`,
-ошибки игнорируются.
+**HTTP (Streamable HTTP).** `urllib.request`, `POST url`, headers
+`Content-Type: application/json`, `Accept: application/json, text/event-stream`, the config's headers,
+and after `initialize`, `MCP-Protocol-Version` and `Mcp-Session-Id` (if the server issued one). An
+`application/json` answer is the whole message; with `text/event-stream`, `data:` events are read
+until the answer with our `id`; `202` to a notification is fine. `close()` sends `DELETE` with
+`Mcp-Session-Id` and ignores errors.
 
-**Таймауты и сбои.** Запрос к дочернему серверу ждёт `AUTOHARNESS_GATEWAY_TIMEOUT` секунд
-(по умолчанию 120) → результат `isError: true` «timed out after N s». Упавший stdio-процесс →
-статус `error`; следующий вызов один раз пробует перезапустить, при неудаче — `isError: true`
-с последними строками лога. Gateway при завершении (EOF на stdin, сигнал) закрывает всех
-дочерних.
+**Timeouts and failures.** A request to a child server waits `AUTOHARNESS_GATEWAY_TIMEOUT` seconds
+(120 by default) → a result with `isError: true` "timed out after N s". A crashed stdio process →
+status `error`; the next call tries to restart it once, and on failure returns `isError: true` with the
+last lines of the log. On exit (EOF on stdin, a signal) the gateway closes all children.
 
-**stdout gateway** — только JSON-RPC. Всё остальное — в stderr и `.autoharness/gateway.log`.
+**The gateway's stdout** carries JSON-RPC only. Everything else goes to stderr and
+`.autoharness/gateway.log`.
 
-## Инструкции агенту (`SKILL.md`)
+## Instructions to the agent (`SKILL.md`)
 
-- Шаг 3: если `add mcp` ответил `via: gateway`, сервер доступен сразу: `harness_tools`, затем
-  `harness_call` или родные `<server>__<tool>`, если они появились. Перезапуск не нужен.
-- Если gateway не установлен и `add mcp` подсказал `gateway install` — предложить пользователю
-  один раз, объяснив, что это последний перезапуск.
-- Абзац про «New MCP servers load at session start» остаётся для случая без gateway.
+- Step 3: if `add mcp` answered `via: gateway`, the server is available right away: `harness_tools`,
+  then `harness_call`, or the native `<server>__<tool>` if they appeared. No restart is needed.
+- If the gateway is not installed and `add mcp` suggested `gateway install`, offer it to the user
+  once, explaining that it is the last restart.
+- The paragraph "New MCP servers load at session start" stays for the case without the gateway.
 
-README: раздел «Gateway», строка в таблице команд, пункт в «Ограничениях MVP» меняется на
-пределы gateway (OAuth и SSE — напрямую; родные инструменты зависят от `list_changed` в агенте).
+README: a "Gateway" section, a row in the command table, and the item in "MVP limitations" becomes the
+gateway's limits (OAuth and SSE go direct; native tools depend on `list_changed` in the agent).
 
-## Размещение в коде
+## Where it goes in the code
 
-| Файл | Что |
+| File | What |
 |---|---|
-| `src/autoharness/mcp_client.py` (новый) | `expand_secrets`, `StdioClient`, `HttpClient`, `make_client(name, config, log)` |
-| `src/autoharness/gateway.py` (новый) | реестр `gateway.json` (`load`, `save`, `is_installed`, `proxyable`), `Gateway` (JSON-RPC сервер), `serve()` |
-| `src/autoharness/env.py` | маршрут в `Task.add_mcp` / `remove_mcp` / `_keep_all` / `Project.remove_kept`, `STATE_GITIGNORE` |
-| `src/autoharness/cli.py` | `gateway install|uninstall|status|serve`, `add mcp --direct`, ответы `add` |
-| `tests/fake_mcp_server.py` (новый) | фейковый stdio MCP-сервер для тестов |
+| `src/autoharness/mcp_client.py` (new) | `expand_secrets`, `StdioClient`, `HttpClient`, `make_client(name, config, log)` |
+| `src/autoharness/gateway.py` (new) | the `gateway.json` registry (`load`, `save`, `is_installed`, `proxyable`), `Gateway` (the JSON-RPC server), `serve()` |
+| `src/autoharness/env.py` | the route in `Task.add_mcp` / `remove_mcp` / `_keep_all` / `Project.remove_kept`, `STATE_GITIGNORE` |
+| `src/autoharness/cli.py` | `gateway install|uninstall|status|serve`, `add mcp --direct`, the `add` answers |
+| `tests/fake_mcp_server.py` (new) | a fake stdio MCP server for tests |
 
-## Ошибки
+## Errors
 
-| Ситуация | Поведение |
+| Situation | Behaviour |
 |---|---|
-| `gateway install`, а сервер `autoharness` уже есть и он чужой | ошибка «not managed by autoharness» |
-| `gateway.json` не парсится | gateway оставляет прежний набор, ошибка в логе и в `harness_tools` (`registry_error`) |
-| нет переменной окружения для секрета | статус `error` с именем переменной |
-| команда не найдена | статус `error: command not found: <cmd>` |
-| дочерний сервер не ответил на `initialize` за таймаут | статус `error`, процесс остановлен |
+| `gateway install` while an `autoharness` server already exists and is foreign | the error "not managed by autoharness" |
+| `gateway.json` does not parse | the gateway keeps the previous set; the error goes to the log and to `harness_tools` (`registry_error`) |
+| no environment variable for a secret | status `error` with the variable's name |
+| command not found | status `error: command not found: <cmd>` |
+| a child server did not answer `initialize` within the timeout | status `error`, the process is stopped |
 
-## Тесты
+## Tests
 
-Без сети и без Node: фейковый stdio-сервер `tests/fake_mcp_server.py` (инструменты `echo`
-и `slow`, по команде `add_tool` сам шлёт `list_changed`) и фейковый HTTP-сервер на
-`http.server` в потоке (ответы JSON и SSE, `Mcp-Session-Id`).
+No network and no Node: a fake stdio server `tests/fake_mcp_server.py` (tools `echo` and `slow`; on
+the `add_tool` command it sends `list_changed` itself) and a fake HTTP server on `http.server` in a
+thread (JSON and SSE answers, `Mcp-Session-Id`).
 
-1. `StdioClient`: initialize, list_tools, call_tool, ответ на запрос от сервера `-32601`,
-   `list_changed` от сервера вызывает перечитывание.
-2. `HttpClient`: JSON-ответ, SSE-ответ, передача `Mcp-Session-Id`, подстановка `${VAR}` в заголовки.
-3. `expand_secrets`: подстановка и ошибка при отсутствующей переменной.
-4. Сквозной: `gateway serve` процессом; `initialize` → `tools/list` (два мета-инструмента) →
-   запись фейкового сервера в `gateway.json` → приходит `list_changed` → `tools/list` содержит
-   `fake__echo` → `harness_call` и прямой `fake__echo` возвращают результат → удаление из
-   `gateway.json` → `list_changed`, инструмента нет.
-5. Таймаут (`slow`) → `isError: true`; упавший сервер → `error` в `harness_tools`.
-6. Маршрут `add mcp`: с установленным gateway (stdio → gateway, http с headers → gateway,
-   http без headers → напрямую, `--direct` → напрямую), без gateway → напрямую с подсказкой.
-7. `teardown remove` и `prune` удаляют из `gateway.json`; `keep` оставляет.
-8. `gateway install` / `uninstall` / `status`; отказ при чужом сервере `autoharness`.
+1. `StdioClient`: initialize, list_tools, call_tool, `-32601` to a request from the server,
+   `list_changed` from the server triggers a re-read.
+2. `HttpClient`: a JSON answer, an SSE answer, passing `Mcp-Session-Id`, `${VAR}` in headers.
+3. `expand_secrets`: substitution and the error for a missing variable.
+4. End to end: `gateway serve` as a process; `initialize` → `tools/list` (two meta-tools) → a fake
+   server written into `gateway.json` → `list_changed` arrives → `tools/list` contains `fake__echo` →
+   `harness_call` and a direct `fake__echo` return the result → removal from `gateway.json` →
+   `list_changed`, the tool is gone.
+5. A timeout (`slow`) → `isError: true`; a crashed server → `error` in `harness_tools`.
+6. The `add mcp` route: with the gateway installed (stdio → gateway, http with headers → gateway,
+   http without headers → direct, `--direct` → direct); without the gateway → direct, with a hint.
+7. `teardown remove` and `prune` remove from `gateway.json`; `keep` leaves it.
+8. `gateway install` / `uninstall` / `status`; refusal when a foreign `autoharness` server exists.
 
-Ручная проверка после реализации: `gateway install` в `D:\Projects\ATH`, перезапуск Claude Code,
-`add mcp fetch` без перезапуска; зафиксировать, видит ли Claude Code родные инструменты или
-работают только мета-инструменты.
+Manual check after implementation: `gateway install` in a test project, restart Claude Code,
+`add mcp fetch` without a restart; record whether Claude Code sees the native tools or only the
+meta-tools work.

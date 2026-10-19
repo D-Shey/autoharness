@@ -1,43 +1,40 @@
-# Надёжность AutoHarness и интеграция Codex
+# AutoHarness reliability and the Codex integration
 
-Пользователь одобрил исправления из аудита и проверку Codex. Работа выполняется
-последовательно в текущем проекте; каждый дефект сначала закрепляется тестом.
+The user approved the fixes from the audit and the Codex check. The work is done in order in the
+current project; every defect is first pinned down by a test.
 
-## Критерии и порядок
+## Criteria and order
 
-- [x] HTTP: отклонять редиректы до передачи токенов другому адресату, включая
-  завершение сессии; регрессии на локальном HTTP-сервере.
-- [x] TOML: распознавать допустимые формы объявления MCP, проверять результат
-  перед записью, сохранять комментарии и пользовательские записи.
-- [x] Воспроизводимость: закрепить версии курированных исполняемых пакетов,
-  сохранить сведения о версиях в рецептах и документации.
-- [x] Состояние: сериализовать операции установки MCP, сохранять запись о
-  незавершённой установке до изменения конфигурации, поддержать безопасное
-  восстановление после сбоя; проверить ошибки записи и повторный запуск.
-- [x] Codex: реальный CLI читает конфигурацию; skill устанавливается в ожидаемый
-  каталог; конфиг gateway явно привязан к проекту; Codex вызывает локальный тестовый MCP.
-  Проверки используют временные CODEX_HOME/AUTOHARNESS_HOME без реальных секретов.
-- [x] Полный pytest, проверка сборки, документация и независимое итоговое ревью.
+- [x] HTTP: refuse redirects before tokens are passed to another address, including when a session
+  ends; regressions against a local HTTP server.
+- [x] TOML: recognise the valid forms of an MCP declaration, check the result before writing, keep
+  comments and the user's own entries.
+- [x] Reproducibility: pin the versions of the curated executable packages, keep the version
+  information in recipes and the docs.
+- [x] State: serialise MCP install operations, keep a record of an unfinished install before the
+  config changes, support safe recovery after a failure; check write errors and a rerun.
+- [x] Codex: the real CLI reads the config; the skill is installed into the expected directory; the
+  gateway config is tied to the project explicitly; Codex calls a local test MCP server. The checks
+  use temporary CODEX_HOME/AUTOHARNESS_HOME without real secrets.
+- [x] Full pytest, a build check, the docs and an independent final review.
 
-## Решения
+## Decisions
 
-- Запрет редиректов выбран вместо поддержки переходов: конфигурация должна
-  содержать конечный MCP endpoint; это исключает обход allowlist и передачу
-  произвольных секретных заголовков другому адресу.
-- Python 3.10 остаётся поддержанным: tomli нужен только до Python 3.11.
-- Сравнение качества выполнения реальных задач требует отдельного набора задач;
-  проверка интеграции в этой работе проверяет действительные границы процессов.
+- Refusing redirects was chosen over following them: the config must name the final MCP endpoint;
+  this rules out going around the allowlist and passing arbitrary secret headers to another address.
+- Python 3.10 stays supported: tomli is needed only before Python 3.11.
+- Comparing the quality of real tasks needs a separate task set; the integration check in this work
+  checks the real process boundaries.
 
-## Журнал
+## Log
 
-- Исходный аудит: 339 тестов прошли; редирект и TOML-дубликат воспроизведены.
-- Codex CLI локально: 0.156.0; требования MCP/skills сверены с документацией OpenAI.
-- 25.09.2026: возобновлена проверка незавершённых изменений. Исправлена выдача JSON
-  при некорректном TOML; тесты HTTP расширены на 301/302/303/307/308.
-- Независимое ревью выявило удаление маркеров внутри TOML-строк и отсутствие
-  обновления Codex env_vars при установке через другого агента. Оба дефекта
-  воспроизведены тестами и исправлены.
-- Наличие всех шести закреплённых версий проверено по API npm/PyPI. Закрепление
-  транзитивных зависимостей и ревизий skills остаётся отдельной задачей.
-- Восстановление пока охватывает установку MCP/gateway; удаление и копирование
-  skills не транзакционны. CI Windows/Linux настроен; удалённый запуск не выполнялся.
+- The original audit: 339 tests passed; the redirect and the TOML duplicate were reproduced.
+- Codex CLI locally: 0.156.0; the MCP/skills requirements were checked against OpenAI's docs.
+- 2026-09-25: the check of the unfinished changes resumed. JSON output on invalid TOML was fixed; the
+  HTTP tests were extended to 301/302/303/307/308.
+- The independent review found markers removed inside TOML strings and Codex env_vars not updated
+  when installing through another agent. Both defects were reproduced by tests and fixed.
+- All six pinned versions were checked against the npm/PyPI APIs. Pinning transitive dependencies and
+  skill revisions remains a separate task.
+- Recovery covers the MCP/gateway install for now; removing and copying skills are not transactional.
+  CI for Windows/Linux is set up; a remote run has not been done.
