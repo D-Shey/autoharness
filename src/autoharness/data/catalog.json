@@ -3,7 +3,7 @@
   "capabilities": {
     "browser-automation": {
       "description": "Drive a real browser: navigate, click, fill forms, screenshots, E2E flows.",
-      "keywords": ["browser", "playwright", "e2e", "website", "web app", "ui test", "screenshot", "click", "form", "сайт", "браузер", "веб", "форм", "скриншот", "кнопк"],
+      "keywords": ["browser", "playwright", "e2e", "website", "web app", "ui test", "screenshot", "click", "form"],
       "mcp": ["playwright"],
       "skills": ["microsoft/playwright-cli@playwright-cli", "anthropics/skills@webapp-testing"],
       "search": ["browser automation", "playwright"],
@@ -11,43 +11,43 @@
     },
     "browser-devtools": {
       "description": "Inspect network, console, performance traces of a live page.",
-      "keywords": ["devtools", "network", "console", "performance", "lighthouse", "core web vitals", "500", "request", "запрос", "производительность", "консоль"],
+      "keywords": ["devtools", "network", "console", "performance", "lighthouse", "core web vitals", "500", "request"],
       "mcp": ["chrome-devtools"],
       "skills": [],
       "search": ["chrome devtools", "web performance"]
     },
     "library-docs": {
       "description": "Current documentation for libraries, frameworks and SDKs.",
-      "keywords": ["docs", "documentation", "api reference", "library", "framework", "sdk", "upgrade", "migrate", "документация", "миграция", "библиотека", "фреймворк"],
+      "keywords": ["docs", "documentation", "api reference", "library", "framework", "sdk", "upgrade", "migrate"],
       "mcp": ["context7"],
       "skills": [],
       "search": ["library documentation"],
-      "exclude": ["standard library", "third party libraries", "external libraries", "стандартная библиотека", "сторонних библиотек"]
+      "exclude": ["standard library", "third party libraries", "external libraries"]
     },
     "github": {
       "description": "Issues, pull requests, code search and repos on GitHub.",
-      "keywords": ["github", "pull request", "pr", "issue", "пулл"],
+      "keywords": ["github", "pull request", "pr", "issue"],
       "mcp": ["github"],
       "skills": [],
       "search": ["github"]
     },
     "postgres": {
       "description": "Inspect and query a PostgreSQL database (read-only by default).",
-      "keywords": ["postgres", "postgresql", "sql", "database", "schema", "баз данных", "бд", "схем"],
+      "keywords": ["postgres", "postgresql", "sql", "database", "schema"],
       "mcp": ["postgres"],
       "skills": [],
       "search": ["postgres"]
     },
     "web-fetch": {
       "description": "Fetch and read arbitrary web pages as markdown.",
-      "keywords": ["fetch", "scrape", "research", "article", "url", "исследуй", "интернет"],
+      "keywords": ["fetch", "scrape", "research", "article", "url"],
       "mcp": ["fetch"],
       "skills": [],
       "search": ["web research", "fetch web page"]
     },
     "charting": {
       "description": "Turn data into a chart or a data summary (matplotlib and the like): pick the chart for the question, compute the numbers in code, check them against the source.",
-      "keywords": ["chart", "plot", "visualization", "visualize", "dashboard", "matplotlib", "seaborn", "график", "диаграмм", "визуализац"],
+      "keywords": ["chart", "plot", "visualization", "visualize", "dashboard", "matplotlib", "seaborn"],
       "mcp": [],
       "skills": ["anthropics/knowledge-work-plugins@data-visualization"],
       "search": ["data visualization", "matplotlib charts"],
@@ -55,7 +55,7 @@
     },
     "api-response": {
       "description": "Look at an API's actual response (a real request, saved as a reference) and its docs before writing or changing code that calls or serves it.",
-      "keywords": ["api", "endpoint", "rest api", "webhook", "эндпоинт", "вебхук"],
+      "keywords": ["api", "endpoint", "rest api", "webhook"],
       "mcp": ["fetch"],
       "skills": [],
       "search": ["http api testing", "api client"],
@@ -64,21 +64,21 @@
     },
     "debugging": {
       "description": "Disciplined root-cause debugging.",
-      "keywords": ["bug", "debug", "error", "crash", "fail", "flaky", "баг", "ошибка", "пада", "не работает"],
+      "keywords": ["bug", "debug", "error", "crash", "fail", "flaky"],
       "mcp": [],
       "skills": ["obra/superpowers@systematic-debugging"],
       "search": ["debugging"]
     },
     "testing": {
       "description": "Test-first development and verification before claiming done.",
-      "keywords": ["test", "tdd", "coverage", "pytest", "jest", "unit test", "ci", "тест", "тестирование", "покрытие"],
+      "keywords": ["test", "tdd", "coverage", "pytest", "jest", "unit test", "ci"],
       "mcp": [],
       "skills": ["obra/superpowers@test-driven-development", "obra/superpowers@verification-before-completion"],
       "search": ["testing", "test driven development"]
     },
     "documents": {
       "description": "Read and produce PDF, Word, Excel, PowerPoint files.",
-      "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet", "электронная таблица", "презентация"],
+      "keywords": ["pdf", "docx", "word", "excel", "xlsx", "pptx", "powerpoint", "spreadsheet"],
       "mcp": [],
       "skills": ["anthropics/skills@pdf", "anthropics/skills@docx", "anthropics/skills@xlsx", "anthropics/skills@pptx"],
       "search": ["pdf docx xlsx pptx"],
@@ -86,15 +86,15 @@
     },
     "visual-reference": {
       "description": "Find and study reference images of the real subject (a film still, product, place or brand) before drawing or designing it: note composition, scale, camera angle and palette.",
-      "keywords": ["movie", "film", "scene", "poster", "reference", "фильм", "кадр", "сцен", "постер", "персонаж", "референс", "pixel", "неотличим"],
+      "keywords": ["movie", "film", "scene", "poster", "reference", "pixel"],
       "mcp": ["playwright"],
       "skills": [],
       "search": ["reference images", "image search"],
       "requires": {"reference": 1, "media": "image"}
     },
     "visual-review": {
-      "description": "Render a visual result (SVG, canvas, HTML, chart) to an image and critique it side by side with the reference, over several rounds.",
-      "keywords": ["svg", "draw", "drawing", "illustration", "graphics", "picture", "logo", "icon", "canvas", "mockup", "layout", "pixel", "нарису", "рисун", "иллюстрация", "картинк", "логотип", "иконк", "макет", "сверстай", "вёрстка", "верстка", "неотличим"],
+      "description": "Render a visual result (a drawing, canvas, HTML, chart) to an image and critique it side by side with the reference, over several rounds.",
+      "keywords": ["draw", "drawing", "illustration", "graphics", "picture", "logo", "icon", "canvas", "mockup", "layout", "pixel"],
       "mcp": ["playwright"],
       "skills": [],
       "search": ["visual regression", "screenshot comparison"],
@@ -103,7 +103,7 @@
     },
     "skill-authoring": {
       "description": "Write a new skill when no existing one fits: when it triggers, the steps, how to verify.",
-      "keywords": ["skill", "скилл", "скил", "навык"],
+      "keywords": ["skill"],
       "mcp": [],
       "skills": ["anthropics/skills@skill-creator"],
       "search": ["skill creator"]

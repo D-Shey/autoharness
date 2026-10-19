@@ -1,0 +1,46 @@
+{
+  "_comment": "English words autoharness recognises beyond the catalog's own keywords.",
+  "stopwords": [
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "into",
+    "this",
+    "that",
+    "please",
+    "make",
+    "should",
+    "would",
+    "could",
+    "there",
+    "their",
+    "about",
+    "which",
+    "using",
+    "don't",
+    "dont"
+  ],
+  "endings": [
+    "",
+    "s",
+    "es",
+    "ed",
+    "ing",
+    "er",
+    "ers"
+  ],
+  "no_constraints": [
+    "no constraint",
+    "no constraints",
+    "n/a",
+    "na",
+    "-"
+  ],
+  "dependency_headings": [
+    "dependencies",
+    "requirements",
+    "prerequisites"
+  ]
+}

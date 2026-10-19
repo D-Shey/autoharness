@@ -1,0 +1,20 @@
+name: Feature request
+description: A class of tasks AutoHarness should handle better
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What kind of task goes wrong for an agent today, and how you can tell. A general class of tasks, not one prompt.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help
+      description: The step, check or capability you have in mind, and how it would be verified.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

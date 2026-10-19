@@ -446,7 +446,7 @@ def test_severity_labels_alone_do_not_make_two_points_the_same():
 
 
 def test_light_mode_on_a_visual_task_is_raised_to_full(project, capsys):
-    task = "draw an SVG of the film scene matching the reference image"
+    task = "draw a picture of the film scene matching the reference image"
     code, res = ah(capsys, project, "init", task, "--mode", "light")
     assert code == 0 and project.task().info()["mode"] == "full"   # light is for chores, not work to match
 
@@ -536,15 +536,15 @@ def test_saved_skills_and_recipes_keep_a_record_of_what_became_of_them(project, 
     from autoharness import lessons
     briefed(capsys, project)
     task = project.task()
-    lessons.bump("skill", "svg-scenes", "offered")
-    lessons.mark_used(task, "skill", "svg-scenes")
-    lessons.mark_used(task, "skill", "svg-scenes")          # once per task
-    assert task.info()["library_used"] == [["skill", "svg-scenes"]]
-    lessons.settle(task, ["svg-scenes"], [])
-    assert lessons.record("skill", "svg-scenes") == {"offered": 1, "used": 1, "kept": 1, "smooth": 1}
+    lessons.bump("skill", "poster-scenes", "offered")
+    lessons.mark_used(task, "skill", "poster-scenes")
+    lessons.mark_used(task, "skill", "poster-scenes")          # once per task
+    assert task.info()["library_used"] == [["skill", "poster-scenes"]]
+    lessons.settle(task, ["poster-scenes"], [])
+    assert lessons.record("skill", "poster-scenes") == {"offered": 1, "used": 1, "kept": 1, "smooth": 1}
     for _ in range(2):
-        lessons.bump("skill", "svg-scenes", "used", "removed", "friction")   # two later tasks dropped it
-    assert "removed in most tasks" in lessons.record("skill", "svg-scenes")["note"]
+        lessons.bump("skill", "poster-scenes", "used", "removed", "friction")   # two later tasks dropped it
+    assert "removed in most tasks" in lessons.record("skill", "poster-scenes")["note"]
     assert lessons.record("recipe", "never-used") == {}
 
 
@@ -828,7 +828,7 @@ def test_an_insight_reached_again_is_merged_and_shown_to_related_tasks(project, 
         code, res = ah(capsys, project, "lesson", "add", "report totals wrong: check currency rounding in the export")
         assert res["merged"] and res["insight"]["confirmed"] == n
     assert "lesson fold" in res["next"] and lessons.ripe()[0]["confirmed"] == 3
-    code, res = ah(capsys, project, "lesson", "add", "a different conclusion about svg gradients and filters")
+    code, res = ah(capsys, project, "lesson", "add", "a different conclusion about vector gradients and filters")
     assert not res["merged"]
     code, res = ah(capsys, project, "lesson", "fold", "1", "--skill", "report-totals")
     assert res["insight"]["skill"] == "report-totals" and lessons.ripe() == []

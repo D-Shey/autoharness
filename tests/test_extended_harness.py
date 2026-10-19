@@ -57,17 +57,17 @@ def test_status_is_compact_unless_asked_for_everything(tmp_path, capsys, monkeyp
     root.mkdir()
     assert run(root, capsys, 'init', 'a task')[0] == 0
     task = Project(root, 'claude').task()
-    task.record_discovery([{'kind': 'skill', 'query': 'svg', 'results': [{'name': f's{i}'} for i in range(5)]}])
+    task.record_discovery([{'kind': 'skill', 'query': 'poster', 'results': [{'name': f's{i}'} for i in range(5)]}])
     for i in range(40):
         task.log(f'step {i}')
     short = run(root, capsys, 'status')[1]
-    assert short['task']['discovery'] == ['skill: svg (5 found)']
+    assert short['task']['discovery'] == ['skill: poster (5 found)']
     assert 'step 39' in short['log'] and 'step 0\n' not in short['log'] and 'status --full' in short['log']
     task.record_discovery([{'skipped': 'offline'},
                            {'kind': 'mcp', 'query': 'browser', 'error': 'timeout', 'recipe': 'web'}])
     assert run(root, capsys, 'status')[1]['task']['discovery'] == [
         'skipped: offline', 'mcp: browser (failed: timeout) [recipe web]']
-    task.record_discovery([{'kind': 'skill', 'query': 'svg', 'results': [{'name': f's{i}'} for i in range(5)]}])
+    task.record_discovery([{'kind': 'skill', 'query': 'poster', 'results': [{'name': f's{i}'} for i in range(5)]}])
     full = run(root, capsys, 'status', '--full')[1]
     assert full['task']['discovery'][0]['results'][4]['name'] == 's4' and 'step 0\n' in full['log']
 

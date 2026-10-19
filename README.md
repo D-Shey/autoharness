@@ -1,269 +1,330 @@
+<div align="center">
+
 # AutoHarness
 
-**AutoHarness не даёт агенту браться за задачу неподготовленным. Агент разбирается в задаче,
-собирает под неё знания и инструменты, а результат проверяет независимый критик, пока качество
-не станет приемлемым.**
+**Engineering discipline for coding agents.**<br>
+Prepare before building. Check against the original. Let someone else judge the result.
 
-Coding-агент (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands) обычно
-решает задачу в лоб. Он пишет по памяти, не посмотрев на то, с чем результат должен совпасть, не
-узнав, как такую работу делают хорошо, и сам себе ставит «готово». Потолок качества тогда — то, что
-модель помнит. Это видно на любой задаче: на интеграции с чужим API, на тестах, на подготовке
-окружения, на вёрстке по макету, на картинке по кадру из фильма.
+[![Tests](https://github.com/D-Shey/autoharness/actions/workflows/tests.yml/badge.svg)](https://github.com/D-Shey/autoharness/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
+![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Инженер так не работает. Самолёт не строят в лоб: работу делят на дисциплины (аэродинамика,
-материалы, прочность, управление), по каждой поднимают то, что уже известно, проверяют гипотезы на
-макетах и только потом собирают. AutoHarness переносит этот порядок на агента:
+Works with **Claude Code** · **Codex CLI** · **Gemini CLI** · **Antigravity CLI** · **Qwen Code** · **GigaCode** · **Strands**
 
-```
-разбор → подготовка → brief → установка → основа → проверка → доучивание → … → teardown
-           │ области знаний, skills и MCP, метод, референс, факты
-           └─ чего не хватает — найти, а если найти нечего — написать свой skill
-```
+[How it works](#the-process) · [Quick start](#quick-start) · [Example](#example) · [Security](docs/security.md) · [Reference](docs/reference.md)
 
-Два участника делят работу так: **думает агент, а CLI считает и охраняет порядок**. Агент решает,
-что нужно задаче и хорош ли результат. CLI `autoharness` ищет в реестрах, оценивает доверие,
-ставит и снимает инструменты, ведёт учёт и не пускает дальше, пока не сделан предыдущий шаг.
-Каждая команда отвечает JSON с полем `next`, в котором сказано, что делать дальше. Код выхода `3`
-всегда значит одно: *остановись и спроси пользователя*.
+</div>
 
-## Процесс
+---
 
-### 1. Разбор — `init`
+AutoHarness keeps an agent from taking on a task unprepared. The agent works out what the task needs,
+gathers the know-how and tools for it, and an independent critic checks the result until the quality
+is acceptable.
 
-```bash
-autoharness init "<задача пользователя дословно>" --mode light|full|reviewed|auto
-```
-
-- `light` — рутина, которой не нужна ни одна возможность каталога (опечатка, коммит). Поиска и
-  brief нет: работа, проверка, `teardown`. Задачу, которой нужна хоть одна возможность (API,
-  браузер, тесты, отладка, изображение), `init` поднимает до `full`, что бы ни выбрал агент.
-- `full` — чего-то не хватает: того, с чем сверять, знаний, способа проверить. Включается полный
-  цикл ниже.
-- `reviewed` — полный цикл плюс обязательный независимый критик перед концом.
-
-`init` сразу ищет по задаче в [skills.sh](https://skills.sh) и в [официальном MCP
-registry](https://registry.modelcontextprotocol.io). Он показывает похожие сохранённые наборы
-(`recipes`), кандидатов, которых прошлые задачи уже отвергли (с причиной), и открытые находки.
-Поднять уровень идущей задачи можно без перезапуска: `autoharness mode full`.
-
-### 2. Подготовка — области знаний, поиск, метод
-
-Здесь решается качество, и именно этот шаг агенты обычно пропускают.
-
-- **Области знаний.** Агент делит задачу на области, из которых состоит сама работа: для сервиса —
-  протокол, модель данных, конкурентность, для картинки — фигуры, анатомия, свет. По каждой он
-  ищет готовое (`autoharness search skill|mcp "<запрос>"`, `autoharness need`) и берёт подходящее.
-  Если ничего не подходит, он пишет свой skill из прочитанных источников.
-- **Метод.** Как такую работу делают хорошо: алгоритм, порядок, известные ловушки. Агент берёт
-  его из найденных и прочитанных источников со ссылками, а не из памяти.
-- **Вход.** Сам оригинал, с которым результат должен совпасть: настоящий ответ API, образец
-  данных, макет, кадр. Пересказ не годится. Страница поиска, галерея или чья-то версия (фанарт,
-  мокап, пример из блога) — тоже не оригинал.
-- **Факты.** До первого результата агент снимает с референса инструментом то, что будет судиться:
-  поля и значения, размеры, позиции, пропорции, тайминги. Затем записывает их
-  (`evidence add <file> --kind facts`).
-
-Это не пожелания. CLI требует каждую часть:
-
-| Что | Чем держится |
+| An agent on its own | The same agent with AutoHarness |
 |---|---|
-| Каждая область покрыта | `brief --domains "<область>: skill\|mcp\|create <имя> (searched: <запрос>)"`. Запрос должен реально быть выполнен в этой задаче, skill или сервер — быть в его результатах. «Я и так умею» не принимается: это знание надо записать в skill |
-| Метод из источников | `brief --method "<техника>: <url>; …; searched: <запросы>"`. Без ссылок допускается только явное `nothing usable; searched: …` |
-| Skill в работе, а не на словах | Первый результат не принимается, пока взятые skills не установлены, а свои не созданы и не заполнены |
-| Факты из референса | `--kind facts` не принимается без референса. Первый результат не принимается, пока нет фактов, снятых после референса |
+| Writes from memory | Gets the original first: the real API response, the data sample, the mockup |
+| Guesses how the work is done | Finds and reads how it is done well, and cites it |
+| Installs whatever looks right | Installs only what passes a trust check and the user's constraints |
+| Fills open questions with its own habits | Picks what the person who asked would expect, and writes it down |
+| Marks its own work "done" | A fresh reviewer that did not do the work rules on it |
+| Loops on the same fix | Changes approach, then asks an arbiter, then the user |
+| Forgets everything after the session | Keeps what it learned as skills and recipes for the next task |
 
-### 3. Brief — план до работы
+A coding agent (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands)
+usually goes at a task head-on. It writes from memory without looking at what the result has to
+match, without finding out how such work is done well, and then marks its own work "done". The
+ceiling on quality is then whatever the model remembers. It shows on any task: an integration with
+someone else's API, tests, setting up an environment, a page built from a mockup, a drawing that
+has to match a reference image.
 
-```bash
-autoharness brief --goal "<планка качества>" --domains "..." --method "..." \
-  --inputs "<чего не хватает и откуда взять>" --constraints "<ограничения пользователя дословно>" \
-  --verify "<как проверить и с чем сверить>" --candidates "<имя>: take|skip, почему; …" \
-  --gaps "create <skill>: <что умеет>; …"
+Engineers do not work that way. Nobody builds an aircraft head-on: the work is split into
+disciplines (aerodynamics, materials, strength, control), what is already known in each is looked
+up, hypotheses are checked on models, and only then is it built. AutoHarness brings that order to
+the agent:
+
+```mermaid
+flowchart LR
+    A[Analysis<br><code>init</code>] --> P[Preparation<br>areas · method · reference · facts]
+    P --> B[Brief<br>the plan, recorded]
+    B --> I[Install<br>trust · constraints]
+    I --> S[Base<br>block-in first]
+    S --> R{Review<br>independent critic}
+    R -- blocking --> L[Learn<br>update the skill, then fix]
+    L --> R
+    R -- minor or none --> T[Teardown<br>skills · recipes · lessons]
+    P -. nothing fits .-> W[Write a skill<br>from the sources read]
+    W --> B
 ```
 
-Brief фиксирует, какой результат хорош и как это проверить, ограничения пользователя дословно
-(«без новых зависимостей», «только офлайн») и вердикт по каждому кандидату. Для работы, которую
-оценивают глазами, нужен `--fidelity`: уровень, на котором судят результат («стилизованный постер,
-не фотография»). Для браузера, API, логов и баз есть готовые шаблоны проверки
-(`--verify-template browser|api|api-client|logs|database`). С [хуком](docs/installation.md) агент
-не может ничего менять, пока brief не записан.
+The two sides split the work: **the agent thinks, the CLI keeps count and guards the order**. The
+agent decides what the task needs and whether the result is good. The `autoharness` CLI searches
+registries, scores trust, installs and removes tools, keeps the records, and does not let the agent
+move on until the previous step is done. Every command answers in JSON with a `next` field that
+says what to do next. Exit code `3` always means one thing: *stop and ask the user*.
 
-### 4. Установка — доверие и ограничения
+## The process
+
+### 1. Analysis: `init`
 
 ```bash
-autoharness inspect mcp <имя>        # trust score, секреты, куда сервер ходит
-autoharness add mcp <имя>  |  autoharness add skill <owner/repo@skill>
+autoharness init "<the user's task, verbatim>" --mode light|full|reviewed|auto
 ```
 
-- **Trust score.** Курированный каталог считается доверенным. Серверы из реестра оцениваются по
-  namespace, закреплённой версии и издателю. Всё, что не «high», всё с секретами и всё удалённое
-  ставится только после явного «да» пользователя.
-- **Скан skills.** Skill скачивается во временную папку и проверяется на опасное: `~/.ssh`,
-  `curl | sh`, «не говори пользователю», обфускацию.
-- **Ограничения.** Если в brief они есть, соответствие кандидата проверяет свежий субагент
-  (`vet`), а не тот, кто хочет его поставить.
-- **Сеть.** С настройкой `allowed_hosts` сервер вне списка ставится только с согласия
-  пользователя.
+- `light`: a chore that needs no capability from the catalog (a typo, a commit). No search and no
+  brief: do the work, check it, `teardown`. A task that needs any capability (an API, a browser,
+  tests, debugging, an image) is raised to `full` by `init`, whatever the agent chose.
+- `full`: something is missing: what to check against, know-how, a way to verify. The full cycle
+  below applies.
+- `reviewed`: the full cycle plus a mandatory independent critic before the end.
 
-После установки агент делает один дешёвый вызов на пробу. Не работает — `remove` и следующий
-кандидат. Чинить чужой инструмент долго не нужно.
+`init` searches [skills.sh](https://skills.sh) and the [official MCP
+registry](https://registry.modelcontextprotocol.io) for the task right away. It shows similar saved
+setups (`recipes`), candidates earlier tasks rejected (with the reason), and open follow-ups. A
+running task can be raised without starting over: `autoharness mode full`.
 
-### 5. Основа — сначала каркас, потом детали
+### 2. Preparation: areas of know-how, search, method
 
-Первая версия — грубая основа (block-in): структура, раскладка, пропорции, главные части по
-фактам, без полировки. Её сразу смотрит критик, и первый раунд судит только основу. Недоделанные
-детали в этом раунде не выше minor, неверная основа — major. Ошибка в основе дорожает с каждым
-раундом поверх неё. Правки без критика считаются: после 20 правок без свежего критика хук
-останавливает редактирование.
+This is where quality is decided, and it is the step agents usually skip.
 
-### 6. Проверка — судит не автор
+- **Areas of know-how.** The agent splits the task into the areas the work itself is made of: for a
+  service, its protocol, data model and concurrency; for a drawing, figures, anatomy and light. For
+  each, it looks for something ready-made (`autoharness search skill|mcp "<query>"`,
+  `autoharness need`) and takes what fits. If nothing fits, it writes its own skill from the
+  sources it read.
+- **Method.** How this kind of work is done well: the algorithm, the order, the known pitfalls. The
+  agent takes it from sources it found and read, with links, not from memory.
+- **Input.** The original the result has to match: the API's real response, a data sample, the
+  mockup, the reference image. A description of it does not count. A search page, a gallery or
+  someone's version of it (fan art, a mockup, a blog example) is not the original either.
+- **Facts.** Before the first result the agent measures with a tool what the result will be judged
+  on: fields and values, sizes, positions, proportions, timings. Then it records them
+  (`evidence add <file> --kind facts`).
+- **Open choices.** Where the task leaves a choice open (a format, a value or a formula, what a field
+  holds) and the user cannot be asked, the agent picks what the person who asked would take for
+  granted on first look: the plain, simple form, nothing they did not ask for. A tool's or a skill's
+  advice does not decide it.
+
+These are not suggestions. The CLI requires each part:
+
+| What | How it is enforced |
+|---|---|
+| Every area is covered | `brief --domains "<area>: skill\|mcp\|create <name> (searched: <query>)"`. The search must actually have run in this task, and the skill or server must be among its results. "I already know how" is not accepted: that knowledge goes into a skill |
+| Method from sources | `brief --method "<technique>: <url>; …; searched: <queries>"`. Without links only an explicit `nothing usable; searched: …` is accepted |
+| Open choices settled | `brief --expects "<open choice>: <pick> - <why they would expect it>; …"` or `none: <why>`. Each becomes a brief item the critic checks |
+| Skills in use, not in words | The first result is refused until the skills taken are installed and the skills to create are created and filled in |
+| Facts from the reference | `--kind facts` is refused without a reference. The first result is refused until there are facts taken after the reference |
+
+### 3. Brief: the plan before the work
 
 ```bash
-autoharness evidence add <file> --kind reference|facts|result   # результат: целиком, потом крупные планы (--closeup)
-autoharness evidence diff                                       # для кода — весь diff рабочей копии
-autoharness verify run "<команда>" --for B1                     # autoharness запускает сам, решает код выхода
-autoharness critic                                              # промпт для независимого критика
+autoharness brief --goal "<quality bar>" --domains "..." --method "..." \
+  --inputs "<what is missing and where to get it>" --expects "<open choice>: <pick> - <why>; ..." \
+  --constraints "<the user's constraints, verbatim>" \
+  --verify "<how to check, against what>" --candidates "<name>: take|skip, why; …" \
+  --gaps "create <skill>: <what it does>; …"
+```
+
+The brief records what a good result is and how it will be checked, the user's constraints verbatim
+("no new dependencies", "offline only"), and a verdict on every candidate. Work that is judged by eye
+needs `--fidelity`: the level the result is judged at ("stylised poster, not a photograph"). Browser,
+API, log and database checks have ready templates
+(`--verify-template browser|api|api-client|logs|database`). With the [hook](docs/installation.md)
+the agent cannot change anything until the brief is recorded.
+
+### 4. Install: trust and constraints
+
+```bash
+autoharness inspect mcp <name>        # trust score, secrets, where the server connects
+autoharness add mcp <name>  |  autoharness add skill <owner/repo@skill>
+```
+
+- **Trust score.** The curated catalog is trusted. Registry servers are scored by namespace, pinned
+  version and publisher. Anything not "high", anything with secrets and anything remote is
+  installed only after an explicit "yes" from the user.
+- **Skill scan.** A skill is downloaded to a temporary folder and checked for dangerous patterns:
+  `~/.ssh`, `curl | sh`, "don't tell the user", obfuscation.
+- **Constraints.** When the brief has any, a fresh subagent checks the candidate against them
+  (`vet`), not the agent that wants to install it.
+- **Network.** With `allowed_hosts` set, a server outside the list is installed only with the
+  user's consent.
+
+After installing, the agent makes one cheap call to try it. If it does not work: `remove` and the
+next candidate. There is no point spending long on fixing someone else's tool.
+
+### 5. Base: the frame first, details later
+
+The first version is a rough base (a block-in): structure, layout, proportions, the main parts
+from the facts, no polish. A critic looks at it right away, and the first round judges the base
+only. Unfinished details are at most minor in that round; a wrong base is major. A mistake in the
+base gets more expensive with every round built on top of it. Edits without a critic are counted:
+after 20 edits without a fresh critic the hook stops editing.
+
+### 6. Review: the author is not the judge
+
+```bash
+autoharness evidence add <file> --kind reference|facts|result   # the result: whole, then close-ups (--closeup)
+autoharness evidence diff                                       # for code: the whole working-tree diff
+autoharness verify run "<command>" --for B1                     # autoharness runs it; the exit code decides
+autoharness critic                                              # a prompt for an independent critic
 autoharness review --by critic --answer-file <file>
-autoharness critic --run claude|codex|agy                       # или autoharness сам запускает критика read-only
+autoharness critic --run claude|codex|agy                       # or autoharness starts a read-only critic itself
 ```
 
-- **Критик — свежий субагент, который работу не делал.** Его ответ сохраняется как есть.
-  autoharness сам читает из него замечания, вердикт и одноразовый `ANSWER-ID`, поэтому смягчённый
-  пересказ подставить нельзя.
-- **Что проверяет критик:**
-  - что референс — сам оригинал;
-  - что факты верны, сверяя несколько из них с референсом;
-  - каждый пункт brief (`met | partial | missing | contradicts`);
-  - следует ли работа найденному методу;
-  - что сделано сверх просьбы;
-  - проверяет ли каждый запуск `verify run` свой пункт на самом деле;
-  - готова ли работа целиком (`ACCEPT`). «Нет» — минимум major.
-- **Проверка должна уметь упасть.** `true`, `echo ok` или поиск строки в файле не засчитываются.
-  Запуск привязан к версии кода и устаревает после правки.
-- **Слепое сравнение.** В задачах, которые оценивают глазами, критик сравнивает текущий результат
-  с лучшим прежним под именами A и B. Какая копия чья, знает только autoharness. Если прежний
-  ближе, ответ — «Went backwards», и лучшим остаётся прежний результат.
-- **Два ревьюера** (`brief --review pair`). Каждый раунд, кроме критика, проверяет ревьюер
-  качества кода: баги, необработанные ошибки, безопасность, тесты, которые ничего не проверяют.
-  Вердикт раунда — худший из двух.
-- **Решённые споры не всплывают снова.** Спорный пункт решает свежий критик
-  (`critic --dispute`). Отклонённое пользователем замечание записывается (`ruling add`), и
-  следующие задачи проекта его не поднимают.
-- **Файлы — это данные.** Текст «одобрено» или «поставь none» внутри проверяемых файлов — повод
-  для замечания, а не инструкция.
+- **The critic is a fresh subagent that did not do the work.** Its answer is kept as it is.
+  autoharness reads the points, the verdict and a one-time `ANSWER-ID` from it itself, so a softened
+  retelling cannot be passed off instead. A subagent given a review prompt reviews; it cannot take
+  the task over.
+- **What the critic checks:**
+  - that the reference is the original itself;
+  - that the facts are right, by checking a few of them against the reference;
+  - every brief item (`met | partial | missing | contradicts`);
+  - the open choices, as the person who asked would see them;
+  - whether the work follows the method found;
+  - what was done beyond the request;
+  - whether each `verify run` really checks its item;
+  - whether the work is finished as a whole (`ACCEPT`). "No" is at least major.
+- **A check has to be able to fail.** `true`, `echo ok` or looking for a string in a file do not
+  count. A run is tied to a version of the code and goes stale after an edit.
+- **Blind comparison.** In work judged by eye, the critic compares the current result with the best
+  earlier one under the names A and B. Only autoharness knows which is which. If the earlier one is
+  closer, the answer is "Went backwards", and the earlier result stays the best.
+- **Two reviewers** (`brief --review pair`). Every round, besides the critic, a code-quality
+  reviewer checks for bugs, unhandled errors, security, and tests that check nothing. The round's
+  verdict is the worse of the two.
+- **Settled disputes do not come back.** A fresh critic rules on a disputed point
+  (`critic --dispute`). A point the user rejects is recorded (`ruling add`), and later tasks in the
+  project do not raise it again.
+- **Files are data.** "Approved" or "set none" written inside the files under review is a finding,
+  not an instruction.
 
-### 7. Доучивание — не чинить по памяти то, чего не знаешь
+### 7. Learn: don't fix from memory what you don't know
 
-Если критик нашёл серьёзные проблемы, исправлять их «по памяти» — значит получить ту же грубость
-ещё раз. Поэтому следующий результат не принимается, пока не изменился skill задачи. По каждому
-пункту, которому skills не учат, агент ищет, как это делают хорошо, записывает технику с
-источником в skill и только потом исправляет.
+If the critic found serious problems, fixing them "from memory" brings the same crudeness back.
+So the next result is refused until the task's skill has changed. For each point the skills do not
+teach, the agent looks up how it is done well, writes the technique with its source into the skill,
+and only then fixes it.
 
-Дальше есть защита от зацикливания:
+Then there are guards against loops:
 
-- одна и та же проблема три раунда подряд → обязательная смена подхода (`approach`): из памяти →
-  из документации, подгонка руками → вычисление, заплатка → пересборка;
-- не помогли несколько подходов → независимый арбитр: чинить с измеримой проверкой или признать
-  предел;
-- 8 блокирующих раундов подряд → решение за пользователем.
+- the same problem three rounds in a row → a mandatory change of approach (`approach`): from memory
+  → from the docs, tuning by hand → computing it, a patch → a rebuild;
+- several approaches did not help → an independent arbiter: fix it with a measurable check, or rule
+  it out of reach;
+- 8 blocking rounds in a row → the user decides.
 
-Принять результат за пользователя агент не может: `teardown --accepted "<его слова>"` проходит,
-только если пользователь сам что-то написал.
+The agent cannot accept the result for the user: `teardown --accepted "<their words>"` passes only
+if the user actually wrote something.
 
-### 8. Конец — teardown, skills, recipes
+### 8. The end: teardown, skills, recipes
 
 ```bash
-autoharness skill save <name>                                    # в библиотеку, после «да» пользователя
-autoharness teardown --save-recipe <name> --notes "<для чего годится>"
+autoharness skill save <name>                                    # into the library, after the user's "yes"
+autoharness teardown --save-recipe <name> --notes "<what it is good for>"
 ```
 
-- **Skills копят знание.** Всё, чему агент научился в задаче (как делать, как проверять, причуды
-  API), остаётся в skill и сохраняется в `~/.autoharness/skills/`. Значения, измеренные в
-  конкретном проекте, идут отдельно от процедуры: следующая задача их перепроверяет.
-- **Уроки из трения.** Если задача шла тяжело (проверка падала, понадобилась смена подхода,
-  результат откатывался, вмешивался пользователь), teardown один раз останавливается и просит
-  записать, что сломалось и что помогло. Короткие выводы копятся в `lesson add`. Вывод,
-  подтверждённый тремя задачами, переносится в skill.
-- **Recipe** запоминает набор и запросы, которые его нашли. Похожая задача получит его сразу, а
-  запросы перезапустятся, чтобы найти лучшее, если оно появилось.
-- **Что остаётся в проекте**, решает настройка `teardown`: `keep` (по умолчанию) или `remove`.
+- **Skills accumulate know-how.** What the agent learned in the task (how to do it, how to check it,
+  an API's quirks) stays in a skill and is saved in `~/.autoharness/skills/`. Values measured in one
+  project are kept apart from the procedure: the next task checks them again.
+- **Lessons from friction.** If the task went hard (checks failed, the approach had to change, the
+  result went backwards, the user stepped in), teardown stops once and asks what broke and what
+  helped. Short conclusions accumulate with `lesson add`. A conclusion confirmed by three tasks moves
+  into a skill.
+- **A recipe** remembers the setup and the queries that found it. A similar task gets it right away,
+  and the queries run again to find something better if it appeared.
+- **What stays in the project** is set by the `teardown` setting: `keep` (the default) or `remove`.
   `autoharness config set teardown remove [--global]`.
 
-## Пример
+## Example
 
-Задача: *«добавь приём оплат через API платёжного сервиса, вебхуки должны быть безопасными»*.
-Сессия условная, ответы CLI сокращены.
+Task: *"accept payments through a payment provider's API; the webhooks must be secure"*. The session
+is illustrative and the CLI's answers are shortened.
 
 ```bash
-autoharness init "добавь приём оплат через API платёжного сервиса, вебхуки безопасные" --mode reviewed
+autoharness init "accept payments through a payment provider's API, secure webhooks" --mode reviewed
 
-autoharness search skill "payment webhooks"         # что уже есть про эту область
+autoharness search skill "payment webhooks"         # what already exists for this area
 autoharness search mcp "payments api"
 autoharness search skill "idempotency"
 
-autoharness brief --goal "оплата проходит, повторный вебхук не списывает дважды, подделанный отклоняется" \
-  --domains "API платежей: mcp <сервер из поиска> (searched: payments api); \
-             подпись вебхуков: skill <skill из поиска> (searched: payment webhooks); \
-             идемпотентность: create idempotent-handlers (searched: idempotency)" \
-  --method "проверка подписи по сырому телу, ключ идемпотентности, ретраи с отсрочкой: <url>; …; searched: …" \
-  --inputs "настоящие ответы и вебхуки sandbox-аккаунта" --constraints "без новых зависимостей" \
-  --verify "тесты на реальные сохранённые вебхуки: подделка, повтор, порядок" \
-  --candidates "<сервер>: take, …; <skill>: take, …" --gaps "create idempotent-handlers: …"
+autoharness brief --goal "a payment goes through, a repeated webhook does not charge twice, a forged one is refused" \
+  --domains "payments API: mcp <server from the search> (searched: payments api); \
+             webhook signatures: skill <skill from the search> (searched: payment webhooks); \
+             idempotency: create idempotent-handlers (searched: idempotency)" \
+  --method "verify the signature over the raw body, an idempotency key, retries with backoff: <url>; …; searched: …" \
+  --inputs "real responses and webhooks of a sandbox account" \
+  --expects "amounts: integer minor units - what the provider's API takes" \
+  --constraints "no new dependencies" \
+  --verify "tests on real saved webhooks: forged, repeated, out of order" \
+  --candidates "<server>: take, …; <skill>: take, …" --gaps "create idempotent-handlers: …"
 
-autoharness add mcp <сервер>  &&  autoharness add skill <skill>
-autoharness skill new idempotent-handlers --description "…"     # заполняется из прочитанного
+autoharness add mcp <server>  &&  autoharness add skill <skill>
+autoharness skill new idempotent-handlers --description "…"     # filled from what was read
 
-autoharness evidence add webhook-samples.json --kind reference  # сохранённые настоящие вебхуки
-autoharness evidence add webhook-facts.md --kind facts          # поля, заголовок подписи, порядок событий
-# основа: обработчик, проверка подписи, хранение ключей — без обвязки
-autoharness evidence diff && autoharness critic                 # → major: подпись считается по разобранному JSON
-# доучивание: почему подпись считают по сырому телу → в skill, затем правка
+autoharness evidence add webhook-samples.json --kind reference  # real saved webhooks
+autoharness evidence add webhook-facts.md --kind facts          # fields, the signature header, event order
+# base: the handler, signature check, key storage, nothing around them
+autoharness evidence diff && autoharness critic                 # → major: the signature is computed over parsed JSON
+# learn: why the signature is computed over the raw body → into the skill, then the fix
 autoharness verify run "uv run pytest tests/test_webhooks.py" --for B2
 autoharness evidence diff && autoharness critic                 # → minor
-autoharness teardown --save-recipe payments-webhooks --notes "приём оплат с безопасными вебхуками"
+autoharness teardown --save-recipe payments-webhooks --notes "accepting payments with secure webhooks"
 ```
 
-Так же идёт задача с макетом, кадром, логами или окружением. Меняются только области, источники
-и способ проверки.
+A task with a mockup, a reference image, logs or an environment goes the same way. Only the areas,
+the sources and the way to check change.
 
-## Gateway: серверы без перезапуска
+## Languages
 
-Обычно новый MCP-сервер агент видит только после перезапуска. Gateway это убирает. В конфиг агента
-один раз прописывается сервер `autoharness`, дальше `add mcp` пишет новые серверы в
-`.autoharness/gateway.json`, а gateway запускает их на лету. Агенту он отдаёт два постоянных
-инструмента: `harness_tools` и `harness_call(server, tool, arguments)`. Кроме того, он публикует
-родные `<server>__<tool>` с `tools/list_changed`. В Claude Code они появляются без перезапуска, в
-Codex и Gemini CLI надёжный путь — мета-инструменты. Сервер, пришедший в `gateway.json` через
-`git pull`, не запустится без одобрения на этой машине (`autoharness gateway approve`).
+autoharness reads a task in any language it has a language file for. English is built in; Russian
+ships as `src/autoharness/data/lang/ru.json`. A language file lists, per catalog capability, the
+words that point to it, plus stopwords, common word endings, the ways to say "no constraints" and
+dependency headings. To add a language, add `data/lang/<code>.json` (or `~/.autoharness/lang/<code>.json`
+for yourself) and a matching `tests/lang/<code>.json` with the cases it must understand; no code
+changes are needed.
 
-## Безопасность коротко
+## Gateway: servers without a restart
 
-- Ставится только то, что прошло проверку доверия, или то, на что пользователь сказал «да».
-- Skills сканируются до копирования в проект. Секреты в конфиги не пишутся, только `${ENV_VAR}`.
-- Ограничения пользователя проверяет независимый субагент, а не тот, кто хочет поставить.
-- Записи задачи подписаны (HMAC, ключ вне проекта). Правка в обход autoharness видна на teardown.
-- Удаляется только то, что поставил autoharness на этой машине.
-- Хук и `--approve` — рамка процедуры, а не песочница. Где граница каждой защиты, описано в
-  [docs/security.md](docs/security.md).
+An agent usually sees a new MCP server only after a restart. The gateway removes that. One server,
+`autoharness`, is added to the agent's config once; from then on `add mcp` writes new servers to
+`.autoharness/gateway.json` and the gateway starts them on the fly. It gives the agent two
+permanent tools: `harness_tools` and `harness_call(server, tool, arguments)`. It also publishes
+native `<server>__<tool>` tools with `tools/list_changed`. In Claude Code they appear without a
+restart; in Codex and Gemini CLI the meta-tools are the reliable path. A server that arrived in
+`gateway.json` through `git pull` does not start without approval on this machine
+(`autoharness gateway approve`).
 
-## Быстрый старт
+## Security in short
+
+- Only what passed the trust check, or what the user said "yes" to, is installed.
+- Skills are scanned before they are copied into the project. Secrets are never written into
+  configs, only `${ENV_VAR}`.
+- An independent subagent checks the user's constraints, not the agent that wants to install.
+- Task records are signed (HMAC, the key lives outside the project). An edit that goes around
+  autoharness shows at teardown, and the hook keeps tools away from the key.
+- Only what autoharness installed on this machine is removed.
+- The hook and `--approve` frame the procedure; they are not a sandbox. Where each protection ends
+  is described in [docs/security.md](docs/security.md).
+
+## Quick start
 
 ```bash
-uv tool install git+https://github.com/D-Shey/autoharness   # CLI (нужен uv; для skills и MCP — Node.js)
-autoharness agents                                          # какие агенты найдены
+uv tool install git+https://github.com/D-Shey/autoharness   # the CLI (needs uv; skills and MCP need Node.js)
+autoharness agents                                          # which agents are found
 cd /path/to/your/project
-autoharness --agent claude install-skill                    # skill для агента (--user --all — для всех агентов)
-autoharness --agent claude gateway install                  # по желанию: MCP без перезапусков
-autoharness --agent agy gateway install --user              # то же сразу для всех проектов (agy, Gemini, Qwen, GigaCode)
-autoharness install-hook                                    # по желанию: Claude Code не начнёт без brief
-autoharness --agent agy install-hook                        # то же для Antigravity CLI
+autoharness --agent claude install-skill                    # the skill for the agent (--user --all: every agent)
+autoharness --agent claude gateway install                  # optional: MCP servers without restarts
+autoharness --agent agy gateway install --user              # the same for every project (agy, Gemini, Qwen, GigaCode)
+autoharness install-hook                                    # optional: Claude Code does not start without a brief
+autoharness --agent agy install-hook                        # the same for Antigravity CLI
 ```
 
-Репозиторий приватный: до установки войдите в GitHub (`gh auth login`). Если `autoharness` не
-находится, выполните `uv tool update-shell` и откройте новый терминал. Перезапустите агента и
-дайте ему задачу.
+If `autoharness` is not found, run `uv tool update-shell` and open a new terminal. Restart the agent
+and give it a task.
 
-| Агент | `--agent` |
+| Agent | `--agent` |
 |---|---|
 | Claude Code | `claude` |
 | Codex CLI | `codex` |
@@ -273,29 +334,33 @@ autoharness --agent agy install-hook                        # то же для A
 | [Strands harness](https://github.com/strands-agents/harness-sdk) | `strands` |
 | Antigravity CLI | `agy` |
 
-## Документация
+## Documentation
 
-- [docs/reference.md](docs/reference.md) — все команды и где что лежит. Там же описаны находки вне
-  задачи (`followup`), замер пользы (`eval record|batch|compare`), решённые споры (`ruling`) и
-  настройки (`config`).
-- [docs/installation.md](docs/installation.md) — установка для всех агентов, gateway, хук,
-  удаление.
-- [docs/security.md](docs/security.md) — как устроена каждая защита и где её граница.
+- [docs/reference.md](docs/reference.md): every command and where everything is kept. It also covers
+  follow-ups found outside the task (`followup`), measuring the benefit (`eval record|batch|compare`),
+  settled disputes (`ruling`) and settings (`config`).
+- [docs/installation.md](docs/installation.md): installing for every agent, the gateway, the hook,
+  uninstalling.
+- [docs/security.md](docs/security.md): how each protection works and where it ends.
+- [docs/design/](docs/design/): the specs and plans features were built from.
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md).
 
-## Ограничения
+## Limitations
 
-- Качество всё равно упирается в модель. AutoHarness заставляет её подготовиться, свериться и
-  доучиться, но не рисует и не пишет код за неё.
-- Проверки autoharness формальны. Он видит, что поиск выполнен, skill изменён, факты записаны, но
-  не оценивает, насколько хорошо. Суть оценивает критик, а он тоже модель.
-- Gateway не умеет OAuth-вход и устаревший SSE-транспорт: такие серверы пишутся в конфиг агента и
-  требуют перезапуска.
-- `allowed_hosts` ограничивает только удалённые серверы. Локальный процесс ходит куда хочет.
+- Quality still depends on the model. AutoHarness makes it prepare, check itself against the
+  original and learn, but it does not draw or write code for it.
+- autoharness's checks are formal. It sees that a search ran, a skill changed, facts were recorded,
+  but not how good they are. The substance is judged by the critic, and the critic is a model too.
+- A task's text can leave a choice open that only its author could settle. The brief and the critic
+  pick what a person would most likely expect, which is not always what a hidden check wants.
+- The gateway does not do OAuth sign-in or the legacy SSE transport: such servers go into the agent's
+  config and need a restart.
+- `allowed_hosts` limits remote servers only. A local process connects wherever it wants.
 
-## Разработка
+## Development
 
 ```bash
 git clone https://github.com/D-Shey/autoharness.git && cd autoharness
-uv tool install -e .            # команда autoharness сразу видит правки
-uv run --extra dev pytest       # тесты; uv сам создаёт .venv и ставит pytest
+uv tool install -e .            # the autoharness command sees edits right away
+uv run --extra dev pytest       # tests; uv creates .venv and installs pytest itself
 ```

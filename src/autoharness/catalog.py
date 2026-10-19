@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from importlib import resources
 
-from autoharness import text
+from autoharness import lang, text
 
 
 URL = re.compile(r"https?://|\bwww\.|\b[\w-]+\.(?:org|com|net|io|dev|gov|edu|info|app|ru)\b(?!\.)", re.IGNORECASE)
@@ -41,10 +41,11 @@ class Catalog:
     def load(cls) -> "Catalog":
         raw = json.loads(resources.files("autoharness").joinpath("data/catalog.json").read_text("utf-8"))
         caps = {
-            name: Capability(name=name, description=c["description"], keywords=c["keywords"],
+            name: Capability(name=name, description=c["description"],
+                             keywords=c["keywords"] + lang.for_capability("keywords", name),
                              mcp=c.get("mcp", []), skills=c.get("skills", []), search=c.get("search", []), requires=c.get("requires", {}), review=c.get("review", ""),
                              interactive=c.get("interactive", False),
-                             exclude=c.get("exclude", []))
+                             exclude=c.get("exclude", []) + lang.for_capability("exclude", name))
             for name, c in raw["capabilities"].items()
         }
         return cls(caps, raw["mcp_servers"], set(raw["trusted_skill_owners"]),

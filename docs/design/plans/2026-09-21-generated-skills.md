@@ -1,14 +1,12 @@
 # Generated Skills Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Let the agent turn what it learned during a task into a skill, check it for leaks, save it to a local library with the user's consent, and install it in other projects as `local:<name>`.
 
 **Architecture:** A new `library.py` owns the library on disk (`~/.autoharness/skills/`), the leak/format checks and a stager that installs from the library. `env.py` gets `Task.new_skill`, `local:` spec parsing and teardown handling of unsaved generated skills. `cli.py` gets the `skill new|save|list|delete` command and `local:` support in `add`, `need`, `teardown`.
 
 **Tech Stack:** Python 3.10+, stdlib only, pytest.
 
-**Spec:** `docs/superpowers/specs/2026-09-21-generated-skills-design.md`
+**Spec:** `docs/design/specs/2026-09-21-generated-skills-design.md`
 
 ## Global Constraints
 
@@ -106,7 +104,7 @@ def test_check_blocks_high_scan_findings(tmp_path):
 
 def test_check_warns_about_paths_and_emails(tmp_path):
     res = library.check(write_skill(tmp_path, "pptx-qa",
-                                    FILLED + "\nSee C:\\Users\\rda44\\deck and ask dev@example.com\n"))
+                                    FILLED + "\nSee C:\\Users\\alice\\deck and ask dev@example.com\n"))
     assert res.status == "ok"
     assert any("path" in w for w in res.warnings) and any("email" in w for w in res.warnings)
 ```
@@ -587,7 +585,7 @@ git commit -m "feat(env): scaffold generated skills and keep unsaved ones from v
 def test_cli_generated_skill_full_cycle(tmp_path, lib_home, capsys):
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir(); b.mkdir()
-    cli_json(capsys, "--project", str(a), "init", "сделать pptx")
+    cli_json(capsys, "--project", str(a), "init", "make a pptx")
     cli_json(capsys, "--project", str(a), "need", "documents")
     code, res = cli_json(capsys, "--project", str(a), "skill", "new", "pptx-qa", "--description", "Check .pptx slides visually")
     assert code == 0
@@ -595,7 +593,7 @@ def test_cli_generated_skill_full_cycle(tmp_path, lib_home, capsys):
     code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
     assert code == 1 and res["status"] == "invalid"
 
-    skill_md.write_text(FILLED + "\nTried on C:\\Users\\rda44\\deck\n", "utf-8")
+    skill_md.write_text(FILLED + "\nTried on C:\\Users\\alice\\deck\n", "utf-8")
     code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
     assert code == 3 and res["status"] == "approval_required" and res["overwrites"] is False
     assert any("path" in w for w in res["warnings"]) and not library.exists("pptx-qa")
@@ -605,7 +603,7 @@ def test_cli_generated_skill_full_cycle(tmp_path, lib_home, capsys):
     code, res = cli_json(capsys, "--project", str(a), "skill", "save", "pptx-qa")
     assert code == 3 and res["overwrites"] is True
 
-    cli_json(capsys, "--project", str(b), "init", "другая презентация")
+    cli_json(capsys, "--project", str(b), "init", "another presentation")
     code, res = cli_json(capsys, "--project", str(b), "need", "documents")
     assert res["local"] == [{"name": "pptx-qa", "description": "Check .pptx slides visually"}]
     code, res = cli_json(capsys, "--project", str(b), "add", "skill", "local:pptx-qa")
@@ -864,31 +862,30 @@ In step 6, insert a new item between "1. Verify…" and "2. End the task…" and
 In the commands table, after the `config` row add:
 
 ```markdown
-| `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
+| `skill new\|save\|list\|delete` | the agent's own skills and the local library |
 ```
 
-Before `## Безопасность` add a section:
+Before `## Security` add a section:
 
 ```markdown
-## Свои skills
+## Your own skills
 
-В конце задачи агент может записать выученное (как собрать и проверить такой проект,
-особенности API) в skill и сохранить его в библиотеку `~/.autoharness/skills/`:
+At the end of a task the agent can write what it learned (how to build and check such a project,
+an API's quirks) into a skill and save it in the library `~/.autoharness/skills/`:
 
 ```bash
-autoharness skill new pptx-qa --description "Check .pptx slides visually"   # заготовка в папке skills
-autoharness skill save pptx-qa              # проверки; код 3 — нужно согласие пользователя
-autoharness skill save pptx-qa --approve    # в библиотеку
-autoharness add skill local:pptx-qa         # в другом проекте
+autoharness skill new pptx-qa --description "Check .pptx slides visually"   # a template in the skills folder
+autoharness skill save pptx-qa              # checks; code 3: the user's consent is needed
+autoharness skill save pptx-qa --approve    # into the library
+autoharness add skill local:pptx-qa         # in another project
 ```
 
-`skill save` блокирует секреты (токены, приватные ключи, `password=…`) и опасные паттерны,
-предупреждает об абсолютных путях и email и без `--approve` ничего не сохраняет. Recipe
-ссылается на такой skill как `local:<name>`; `need` показывает skills из библиотеки
-с подходящей capability.
+`skill save` blocks secrets (tokens, private keys, `password=…`) and dangerous patterns, warns about
+absolute paths and emails, and saves nothing without `--approve`. A recipe refers to such a skill as
+`local:<name>`; `need` shows library skills with a matching capability.
 ```
 
-In `## Ограничения MVP` delete the line `- Генерация собственных skills, когда подходящего нет, пока не реализована.`
+In `## MVP limitations` delete the line about generating your own skills when none fits not being implemented yet.
 
 - [ ] **Step 5: Run all tests**
 

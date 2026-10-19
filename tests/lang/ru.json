@@ -1,0 +1,148 @@
+{
+  "_comment": "What autoharness must understand in Russian: tests/test_languages.py runs every case of every language file here.",
+  "classify": [
+    {
+      "task": "Проверь этот сайт, найди баги и сделай отчёт",
+      "expected": [
+        "browser-automation",
+        "debugging"
+      ]
+    },
+    {
+      "task": "обнови пароль пользователя в форме настроек",
+      "expected": [
+        "browser-automation"
+      ]
+    },
+    {
+      "task": "посмотри схему в базе данных",
+      "expected": [
+        "postgres"
+      ]
+    },
+    {
+      "task": "изучи документацию по next.js",
+      "expected": [
+        "library-docs"
+      ]
+    },
+    {
+      "task": "исследовать конкурентов",
+      "expected": [
+        "web-fetch"
+      ]
+    },
+    {
+      "task": "почему тесты падают на CI",
+      "expected": [
+        "testing",
+        "debugging"
+      ]
+    },
+    {
+      "task": "сделать вебинар по information security",
+      "absent": [
+        "browser-automation"
+      ]
+    },
+    {
+      "task": "настроить message broker",
+      "absent": [
+        "debugging"
+      ]
+    },
+    {
+      "task": "нарисуй иллюстрацию по кадру из фильма",
+      "expected": [
+        "visual-reference",
+        "visual-review"
+      ]
+    },
+    {
+      "task": "сделай логотип в svg",
+      "expected": [
+        "visual-review"
+      ]
+    },
+    {
+      "task": "если скила нет, создай новый skill",
+      "expected": [
+        "skill-authoring"
+      ]
+    },
+    {
+      "task": "Сверстай главную страницу https://example.com одним HTML-файлом так, чтобы на скриншоте она была неотличима от оригинала",
+      "expected": [
+        "visual-review",
+        "visual-reference"
+      ]
+    },
+    {
+      "task": "Напиши Python-скрипт rate.py, который берёт текущий курс USD к EUR из официального API Европейского центробанка и печатает его с датой курса. Без сторонних зависимостей, только стандартная библиотека.",
+      "exactly": [
+        "api-response"
+      ]
+    },
+    {
+      "task": "документация библиотеки httpx",
+      "expected": [
+        "library-docs"
+      ]
+    },
+    {
+      "task": "обнови документацию библиотеки",
+      "expected": [
+        "library-docs"
+      ]
+    },
+    {
+      "task": "Сделай Word-документ (.docx) — памятку на одну страницу А4: как восстановить случайно удалённую git-ветку через reflog, с примерами команд. Команды должны реально работать.",
+      "exactly": [
+        "documents"
+      ]
+    },
+    {
+      "task": "Собери по официальным страницам python.org таблицу веток Python, результат в markdown",
+      "exactly": [
+        "web-fetch"
+      ]
+    },
+    {
+      "task": "сделай электронную таблицу с бюджетом",
+      "expected": [
+        "documents"
+      ]
+    }
+  ],
+  "word_forms": [
+    [
+      "документация",
+      "по документации"
+    ]
+  ],
+  "filler_words": {
+    "task": "но у нас же было задумано что если надо переделать отчёт",
+    "skipped": [
+      "было",
+      "задумано",
+      "если",
+      "надо"
+    ]
+  },
+  "recipe": {
+    "task": "сделать .pptx-презентацию проекта autoharness",
+    "notes": "Сборка .pptx через pptxgenjs и validate.py; визуальная проверка экспортом слайдов в PNG через PowerPoint COM, LibreOffice не нужен",
+    "same": "сделай презентацию pptx для отчёта",
+    "other": "почини падающий e2e-тест"
+  },
+  "local_skill_task": "Какие файлы в репозитории чаще всего менялись? Построй график по истории git",
+  "no_constraints": [
+    "нет ограничений",
+    "без ограничений."
+  ],
+  "constraints": [
+    "нет: только офлайн",
+    "нет, но только офлайн"
+  ],
+  "non_ascii_command": "autoharness init \"обнови скилл, если отстают репы\""
+}
