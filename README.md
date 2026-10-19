@@ -254,6 +254,7 @@ autoharness agents                                          # какие аге�
 cd /path/to/your/project
 autoharness --agent claude install-skill                    # skill для агента (--user --all — для всех агентов)
 autoharness --agent claude gateway install                  # по желанию: MCP без перезапусков
+autoharness --agent agy gateway install --user              # то же сразу для всех проектов (agy, Gemini, Qwen, GigaCode)
 autoharness install-hook                                    # по желанию: Claude Code не начнёт без brief
 autoharness --agent agy install-hook                        # то же для Antigravity CLI
 ```

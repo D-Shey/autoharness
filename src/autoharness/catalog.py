@@ -24,6 +24,9 @@ class Capability:
     requires: dict = field(default_factory=dict)  # evidence teardown insists on (evidence.py)
     review: str = ""  # what an independent critic should look at for this capability
     exclude: list[str] = field(default_factory=list)  # phrases whose words do not count ("standard library")
+    # the agent itself has to see and operate something live (a page, an app): a script written blind is no
+    # substitute, so the brief covers it with an MCP server
+    interactive: bool = False
 
 
 @dataclass
@@ -40,6 +43,7 @@ class Catalog:
         caps = {
             name: Capability(name=name, description=c["description"], keywords=c["keywords"],
                              mcp=c.get("mcp", []), skills=c.get("skills", []), search=c.get("search", []), requires=c.get("requires", {}), review=c.get("review", ""),
+                             interactive=c.get("interactive", False),
                              exclude=c.get("exclude", []))
             for name, c in raw["capabilities"].items()
         }

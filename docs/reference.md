@@ -13,7 +13,7 @@
 | `mode full\|reviewed` | поднимает идущую задачу: лёгкую в полный режим с поиском кандидатов, или любую до обязательного критика |
 | `plan "<задача>"` | то же без побочных эффектов |
 | `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов и свои skills |
-| `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
+| `search mcp\|skill <query>` | MCP: маркетплейс плагинов Anthropic (claude-plugins-official, имена `claude-plugins-official/<плагин>`), затем официальный MCP registry; skills: skills.sh; с trust score |
 | `inspect mcp\|skill <name>` | подробный trust-отчёт; для MCP ещё `egress` — куда сервер может ходить |
 | `brief --goal ... --domains ... --method ... --constraints ... [--verify ... \| --verify-template browser\|api\|logs\|database] [--review critic]` | план задачи: цель, области знаний (`<область>: skill|mcp|create <имя> (searched: <запрос>)`, не меньше двух; запрос должен быть реально выполнен через `autoharness search`, взятое — `take` в candidates, создаваемое — в gaps; создаваемые скиллы заполняются до первого результата), метод (как такое делают хорошо — по найденным и прочитанным источникам с URL и запросами `searched:`, или `nothing usable; searched: ...`; критик сверяет результат с ним), входы, ограничения, проверка, вердикты по кандидатам |
 | `verify guide browser\|api\|api-client\|logs\|database` | шаги и ожидаемые доказательства типовой проверки |
@@ -37,7 +37,7 @@
 | `skill new\|save\|list\|delete` | свои skills агента и локальная библиотека |
 | `recipe list\|match\|show` | сохранённые наборы; `show` перезапускает запросы recipe и отдаёт новое в `fresh` |
 | `config get\|set [teardown keep\|remove \| allowed_hosts "<хосты>" \| min_mode any\|full\|reviewed] [--global]` | настройки |
-| `gateway install\|uninstall\|status\|serve\|approve` | MCP-сервер autoharness, через который новые серверы работают без перезапуска |
+| `gateway install\|uninstall\|status\|serve\|approve [--user]` | MCP-сервер autoharness, через который новые серверы работают без перезапуска; `--user` ставит его в собственный конфиг агента (agy, Gemini, Qwen, GigaCode), и он обслуживает проект, в котором агент запущен |
 | `install-skill` / `install-hook` / `waive` | установка skill и хука; пропуск autoharness в сессии по слову пользователя |
 | `agents` | поддерживаемые агенты и их пути |
 

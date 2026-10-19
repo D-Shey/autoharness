@@ -77,7 +77,9 @@ autoharness search mcp|skill "<query>"            # MCP registry, skills.sh
 ```
 
 Prefer local skill → curated entry → high-trust result → nothing. Install only what beats the
-tools you have: a CLI (`gh`, `psql`, `npx playwright`) needs no MCP server.
+tools you have: a CLI (`gh`, `psql`) needs no MCP server. A skill is know-how, not a tool: when you
+have to see and operate something live (a page, an app), step by step, cover it with an MCP server
+(`brief` asks for one); a script written blind does not show you what is on screen.
 
 **Prepare like an engineer, not head-on.** Building an aircraft takes aerodynamics, materials,
 strength, control theory; every non-trivial task likewise splits into areas of know-how. List them
@@ -147,7 +149,8 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - `already_installed`: an earlier task kept it; use it.
 - `via: gateway`: works now, use `harness_tools` / `harness_call`. Otherwise the server is in
   `{{MCP_FILE}}`: tell the user to {{RELOAD}}, and continue what does not depend on it. If `add`
-  suggests `autoharness gateway install`, offer it once: later servers then need no restart.
+  suggests `autoharness gateway install`, offer it once (`--user` puts it in your own config, for
+  every project): later servers then need no restart.
 
 Smoke-test each new capability with one cheap call before relying on it; if it fails,
 `remove` it and try the next. Do not debug a third-party tool for long.

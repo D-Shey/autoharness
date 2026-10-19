@@ -65,8 +65,9 @@ def native_name(server: str, tool: str) -> str:
 
 class Gateway:
     def __init__(self, project: Path | None, write: Callable[[dict], None], log: Callable[[str], None],
-                 stderr=None, client_factory=make_client):
+                 stderr=None, client_factory=make_client, start: Path | None = None):
         self.project, self.write, self.log, self.stderr = project, write, log, stderr
+        self.start = start  # where to look for the project until it has one (a gateway in the agent's own config)
         self.client_factory = client_factory
         self.configs: dict[str, dict] = {}
         self.clients: dict[str, object] = {}
@@ -81,6 +82,10 @@ class Gateway:
     # --- registry and children -------------------------------------------------
 
     def _registry_file(self) -> Path | None:
+        if self.project is None and self.start is not None:
+            self.project = find_project(self.start)   # the task adds its first server after the agent started
+            if self.project:
+                self.log(f"serving {self.project}")
         return self.project / ".autoharness" / "gateway.json" if self.project else None
 
     def _enforce_hosts(self) -> bool:
@@ -396,7 +401,7 @@ def serve(start: Path | None = None) -> int:
             log_file.write(stamped + "\n")
             log_file.flush()
 
-    gw = Gateway(project, write, log, stderr=log_file)
+    gw = Gateway(project, write, log, stderr=log_file, start=(start or Path.cwd()).resolve())
     gw.sync()
     stop = threading.Event()
 

@@ -6,7 +6,8 @@
       "keywords": ["browser", "playwright", "e2e", "website", "web app", "ui test", "screenshot", "click", "form", "сайт", "браузер", "веб", "форм", "скриншот", "кнопк"],
       "mcp": ["playwright"],
       "skills": ["microsoft/playwright-cli@playwright-cli", "anthropics/skills@webapp-testing"],
-      "search": ["browser automation", "playwright"]
+      "search": ["browser automation", "playwright"],
+      "interactive": true
     },
     "browser-devtools": {
       "description": "Inspect network, console, performance traces of a live page.",

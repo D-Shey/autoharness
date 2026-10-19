@@ -992,8 +992,9 @@ def _check_constraints(text: str, task) -> None:
 
 
 def _skills_not_installed(project, task) -> list[str]:
-    """The skills the brief's areas are covered by that are neither installed for this task, kept in the project,
-    nor in the user's library: an area is covered by a skill in use, not by its name."""
+    """The skills and MCP servers the brief's areas are covered by that are not installed (for this task, kept in
+    the project, in the user's library, or already in the agent's config): an area is covered by what is in use,
+    not by its name."""
     lock = task.skills_lock()
     have = set(lock) | set(project.kept()["skills"]) | {p.parent.name for p in _agent_skills(project)}
     missing = []
@@ -1012,6 +1013,15 @@ def _skills_not_installed(project, task) -> list[str]:
                                f"`autoharness inspect skill {m['name']}`, then `autoharness add skill {m['name']}`; if it "
                                "cannot be installed or vetting rejects it, record the brief again with another "
                                "candidate from your searches for that area, or `create` a skill for it")
+        elif m and m["how"].lower() == "mcp":
+            name = local_mcp_name(m["name"])
+            stores = [project.agent.mcp_store(project.root), project.agent.user_mcp_store()]
+            if not (name in task.mcp_lock() or name in project.kept()["mcp"]
+                    or any(s is not None and s.has(name) for s in stores)):
+                missing.append(f"area `{m['area'].strip()}` is covered by MCP server `{m['name']}`, not installed: "
+                               f"`autoharness inspect mcp {m['name']}`, then `autoharness add mcp {m['name']}`, and "
+                               "use it (through harness_call when it was added through the gateway); if it cannot "
+                               "be installed, record the brief again with another server from your searches")
     return missing
 
 
@@ -1029,6 +1039,13 @@ def cmd_brief(args, project, catalog):
         library.validate_name(name)
     _check_constraints(args.constraints, task)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
+    live = [c.name for c, _ in catalog.classify(str(task.info().get("task", ""))) if c.interactive]
+    if live and not any((m := DOMAIN.match(e.strip())) and m["how"].lower() == "mcp" for e in domains.split(";")):
+        raise HarnessError(
+            f"the task needs {', '.join(live)}: you have to see and operate it live, step by step, and a skill is "
+            "know-how, not a tool for that, while a script written blind does not show you what is on screen. Cover "
+            "it with an MCP server: `autoharness search mcp \"<query>\"`, then `<area>: mcp <name> (searched: "
+            "<query>)` in --domains and `<name>: take, <why>` in --candidates. Skills may cover other areas.")
     method = args.method.strip()
     if "searched:" not in method.lower() or not (SOURCE.search(method)
                                                  or re.search(r"nothing usable", method, re.IGNORECASE)):
@@ -1447,7 +1464,18 @@ def cmd_gateway(args, project, catalog):
         from autoharness.gateway import serve
         return serve(project.root)
     agent = project.agent
-    if args.action == "install":
+    if args.action == "install" and args.user:
+        # no --project: the gateway serves the project the agent runs in, found from its working directory
+        path = project.install_user_gateway({"command": sys.executable, "args": ["-m", "autoharness", "gateway",
+                                                                                  "serve"]})
+        out({"status": "ok", "installed": agent.name, "file": str(path),
+             "next": f"One last restart: ask the user to {agent.reload_hint}. After that, in every project, servers "
+                     "added with `add mcp` are available at once through harness_tools / harness_call."})
+    elif args.action == "uninstall" and args.user:
+        path = project.uninstall_user_gateway()
+        out({"status": "ok", "uninstalled": agent.name, "file": str(path),
+             "next": f"Ask the user to {agent.reload_hint} to drop the gateway."})
+    elif args.action == "install":
         server = {"command": sys.executable, "args": ["-m", "autoharness", "--project", str(project.root),
                                                        "gateway", "serve"]}
         project.install_gateway(server)
@@ -1465,7 +1493,8 @@ def cmd_gateway(args, project, catalog):
         state_file = project.state / "gateway.state.json"
         state = json.loads(state_file.read_text("utf-8")) if state_file.exists() else None
         unapproved = unapproved_servers(project)
-        out({"installed": project.gateway_active(), "agents": reg["installed"], "servers": sorted(reg["servers"]),
+        out({"installed": project.gateway_active(), "user": project.user_gateway_active(),
+             "agents": reg["installed"], "servers": sorted(reg["servers"]),
              "unapproved": unapproved, "running": state and state.get("servers"),
              "state_updated": state and state.get("updated")}
             | ({"next": "The gateway does not run unapproved servers (gateway.json may come from a pull). "
@@ -2790,6 +2819,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--approve", action="store_true", help="for `save`: the user explicitly agreed")
     s = sub.add_parser("gateway", help="one MCP server that hot-adds the servers you add, no agent restarts")
     s.add_argument("action", choices=["install", "uninstall", "status", "serve", "approve"])
+    s.add_argument("--user", action="store_true",
+                   help="for `install`/`uninstall`: in the agent's own MCP file, for every project")
     s.add_argument("name", nargs="?", help="for `approve`: the server in .autoharness/gateway.json")
     s.add_argument("--approve", action="store_true", help="for `approve`: the user read the config and agreed")
     s.add_argument("--all", action="store_true", help="for `approve`: every server waiting for approval")
