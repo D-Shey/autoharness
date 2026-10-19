@@ -1820,6 +1820,11 @@ def cmd_claim(args, project, catalog):
         raise HarnessError("no agent session id in the environment: pass it, `autoharness claim <session id>`")
     info = task.info()
     previous = info.get("owner")
+    mine = session_state(me)
+    if os.environ.get(reviewers.ENV_FLAG) or (mine.get("state") == "reviewer"
+                                              and mine.get("reviews") in _pending_answers(info)):
+        raise HarnessError("this session was given a review prompt of this task: a reviewer answers it and does not "
+                           "take the task over. Write the answer the prompt asks for and stop.")
     if previous == me:
         out({"status": "ok", "task_id": task.id, "owner": me, "next": "This session already owns the task."})
         return 0
@@ -2244,6 +2249,14 @@ def cmd_hook(args, project, catalog):
         reviewer = task_info.get("answer_ids", {}).get(os.environ.get(reviewers.ENV_FLAG, ""), {})
         if reviewer and not reviewer.get("used") and not reviewer.get("retired"):
             return 0   # the reviewer `critic --run` started for its pending prompt: read-only, no task of its own
+        if active and sid and sid != task_info.get("owner"):
+            # a subagent the author gave a pending prompt to: it reviews the task, it does not own or take it
+            told = str(data.get("prompt", "")) if event == "UserPromptSubmit" else ""
+            if saved_state.get("state") == "reviewer" and saved_state.get("reviews") in _pending_answers(task_info):
+                return 0
+            if told and (reviews := _reviewer_prompt(told, active, task_info)):
+                set_session_state(sid, state="reviewer", reviews=reviews, prompt=told[:PROMPT_KEPT])
+                return 0
         owner = task_info.get("owner")
         # the task belongs to another session: this one is told about it and stays gated until it claims it
         foreign = bool(active and sid and owner and owner != sid and task_info.get("status") == "active")
@@ -2367,6 +2380,22 @@ def cmd_hook(args, project, catalog):
         return 0
     except Exception:  # noqa: BLE001 - a hook must not break the session
         return 0
+
+
+def _pending_answers(info: dict) -> list[str]:
+    """Answer ids of the task's prompts still waiting for their answer, the latest first."""
+    ids = info.get("answer_ids", {})
+    return sorted((i for i, a in ids.items() if not a.get("used") and not a.get("retired")),
+                  key=lambda i: ids[i].get("issued", ""), reverse=True)
+
+
+def _reviewer_prompt(text: str, task_id: str, info: dict) -> str | None:
+    """The pending answer id a session's first prompt hands it (the id itself, or the task's prompt file), or None."""
+    pending = _pending_answers(info)
+    named = next((i for i in pending if i in text), None)
+    if named or not pending:
+        return named
+    return pending[0] if re.search(rf"tasks[\\/]+{re.escape(task_id)}[\\/]+prompts[\\/]", text) else None
 
 
 REPEAT_LIMIT = 5   # the same call this many times in a row may pass; one more is a loop, not progress
