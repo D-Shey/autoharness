@@ -1799,7 +1799,21 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
     while tool == "Bash" and last and ENV_PREFIX.match(last[0]):
         last = last[1:]
     return (all(len(c) == 2 and c[0] == "cd" for c in prefix)
-            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last)))
+            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last) or _reads_only(last)))
+
+
+READERS = {"ls", "dir", "pwd", "tree", "cat", "head", "tail", "type", "get-childitem", "gci", "get-location",
+           "get-content", "gc", "get-item", "test-path", "resolve-path"}
+GIT_READERS = {"status", "log", "diff", "show", "ls-files", "branch", "remote", "rev-parse"}
+
+
+def _reads_only(words: list[str]) -> bool:
+    """A listing or reading of files (`ls`, `Get-ChildItem`, `cat`, `git status`): reading stays open before the
+    brief, and these only read. Redirection and chaining never reach here (`_plain_commands` refuses them)."""
+    if not words:
+        return False
+    head = words[0].lower()
+    return head in READERS or (head == "git" and len(words) > 1 and words[1].lower() in GIT_READERS)
 
 
 def _looks_up_autoharness(words: list[str]) -> bool:
