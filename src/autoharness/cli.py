@@ -220,8 +220,10 @@ def cmd_init(args, project, catalog):
         selected = before
     # light is for chores: a task that needs any capability of the catalog (an API, a browser, tests, debugging,
     # a reference) is not one, whatever the agent chose; skipping the harness altogether is the user's call (waive)
+    # A routine is still a chore: a skill the agent has, named in the task, or the same task run light before
     needs = [c.name for c, _ in classified]
-    lightened = selected == "light" and bool(needs)
+    routine = selected == "light" and bool(needs) and _routine(project, args.task)
+    lightened = selected == "light" and bool(needs) and not routine
     if lightened:
         selected = "full"
     mode = "light" if selected == "light" else "full"
@@ -252,6 +254,8 @@ def cmd_init(args, project, catalog):
         result["mode_raised"] = (f"to full: the task needs {', '.join(needs)}, and light mode is for chores that "
                                  "need none (a typo, a commit). Prepare as full mode asks")
         task.log(f"light raised to full: the task needs {', '.join(needs)}")
+    if routine:
+        task.log(f"light kept although the task needs {', '.join(needs)}: {routine}")
     if restarted:
         result["mode_raised"] = (f"to {before}: this task was started at that level before, and starting it again "
                                  "does not lower it. Do what the earlier start asked for (its brief) instead")
@@ -1988,6 +1992,26 @@ def _earlier_level(project, text: str) -> str | None:
     return found
 
 
+def _routine(project, text: str) -> str | None:
+    """Why a task is a routine the agent already knows how to do, or None: a skill it has is named in the task
+    text, or this project ran the same task (times and other numbers aside) in light mode before."""
+    agent = agents.get(project.agent_name)
+    for skills in (agent.skills_path(project.root), agent.user_skills_path(), library.root()):
+        for skill_md in skills.glob("*/SKILL.md") if skills.is_dir() else ():
+            if re.search(rf"(?<![\w-]){re.escape(skill_md.parent.name)}(?![\w-])", text, re.IGNORECASE):
+                return f"it names the skill `{skill_md.parent.name}` the agent has"
+    same = re.sub(r"\d+", "#", " ".join(text.split()).lower())
+    for info_path in (project.state / "tasks").glob("*/task.json"):
+        try:
+            info = json.loads(info_path.read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (info.get("mode") == "light" and info.get("profile") != "reviewed"
+                and re.sub(r"\d+", "#", " ".join(str(info.get("task", "")).split()).lower()) == same):
+            return "the same task ran light in this project before"
+    return None
+
+
 USER_FLAGS = ("--accepted", "--force")
 
 
@@ -2146,6 +2170,18 @@ def cmd_hook(args, project, catalog):
                               "said nothing since this task started: you cannot accept your own result for them. "
                               "Finish what teardown asks for (its `problems`), or stop and ask the user whether "
                               "they accept the result as it is; pass their words only after they answer.")
+                    out({"decision": "deny", "reason": reason} if agy else
+                        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                "permissionDecisionReason": reason}})
+                # a full task ended before its brief is dropped, and starting it again lighter escapes the brief
+                elif (active and not foreign and state != "waived"
+                        and _autoharness_subcommand(tool, tool_input) == "teardown"
+                        and (info := Task(project, active).info()).get("mode", "full") != "light"
+                        and not info.get("brief") and not lessons.user_messages(Task(project, active))):
+                    reason = ("This task has no brief yet, and ending it now drops it: only the user decides that. "
+                              "If the brief is refused, do what its error says (quote the user's constraints or "
+                              "`none`; search for each area and take or create a skill). If you think the task "
+                              "needs no harness, stop and ask the user; `autoharness waive` takes their words.")
                     out({"decision": "deny", "reason": reason} if agy else
                         {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                 "permissionDecisionReason": reason}})
