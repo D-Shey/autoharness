@@ -80,6 +80,14 @@ autoharness search mcp|skill "<query>"            # MCP registry, skills.sh
 Prefer local skill → curated entry → high-trust result → nothing. Install only what beats the
 tools you have: a CLI (`gh`, `psql`, `npx playwright`) needs no MCP server.
 
+**Prepare like an engineer, not head-on.** Building an aircraft takes aerodynamics, materials,
+strength, control theory; every non-trivial task likewise splits into areas of know-how. List them
+(`--domains`), and for each ask: what do I actually know, what is known out there (skills, servers,
+docs, worked examples, algorithms), how will I test the hypothesis? Search each area
+(`autoharness search skill|mcp "<query>"`, `autoharness need`), take what fits, and where nothing
+fits create the skill yourself from what you read (`--gaps "create ..."`), filled before the first
+result. "I know how" is not a cover: what you know goes into that skill.
+
 **Research the method before you build.** Someone has usually solved this kind of task before:
 search the web, the field's docs, papers, repos and tutorials for how it is done well (the
 algorithm, the workflow, the known pitfalls), read the best two or three sources, and write the
@@ -91,6 +99,7 @@ know-how goes into a skill (`--gaps "create ..."`).
 
 ```bash
 autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get them>" \
+  --domains "<area>: skill|mcp|create <name> (searched: <query>); ..." \
   --method "<technique or steps>: <url>; ...; searched: <queries>" \
   --constraints "<verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; ...; searched: <queries>" \

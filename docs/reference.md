@@ -15,7 +15,7 @@
 | `need <capability> --reason ...` | фиксирует capability gap, отдаёт курированных кандидатов и свои skills |
 | `search mcp\|skill <query>` | официальный MCP registry / skills.sh, с trust score |
 | `inspect mcp\|skill <name>` | подробный trust-отчёт; для MCP ещё `egress` — куда сервер может ходить |
-| `brief --goal ... --method ... --constraints ... [--verify ... \| --verify-template browser\|api\|logs\|database] [--review critic]` | план задачи: цель, метод (как такое делают хорошо — по найденным и прочитанным источникам с URL и запросами `searched:`, или `nothing usable; searched: ...`; критик сверяет результат с ним), входы, ограничения, проверка, вердикты по кандидатам |
+| `brief --goal ... --domains ... --method ... --constraints ... [--verify ... \| --verify-template browser\|api\|logs\|database] [--review critic]` | план задачи: цель, области знаний (`<область>: skill|mcp|create <имя> (searched: <запрос>)`, не меньше двух; запрос должен быть реально выполнен через `autoharness search`, взятое — `take` в candidates, создаваемое — в gaps; создаваемые скиллы заполняются до первого результата), метод (как такое делают хорошо — по найденным и прочитанным источникам с URL и запросами `searched:`, или `nothing usable; searched: ...`; критик сверяет результат с ним), входы, ограничения, проверка, вердикты по кандидатам |
 | `verify guide browser\|api\|api-client\|logs\|database` | шаги и ожидаемые доказательства типовой проверки |
 | `verify record KIND --passed yes\|no --evidence FILE` | сохраняет исход проверки и файл доказательства |
 | `decision mcp\|skill NAME select\|skip --reason TEXT` / `audit [TASK_ID]` | причина выбора и структурированный журнал решений |

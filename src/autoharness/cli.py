@@ -397,6 +397,11 @@ def cmd_evidence(args, project, catalog):
             and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
             and (why := evidence.needs_facts(catalog, task)):
         raise HarnessError(why)
+    if (args.action == "diff" or args.kind == "result") \
+            and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
+            and (unready := task.planned_skill_problems()[0]):
+        raise HarnessError("prepare before the first result: the skills the brief creates hold the know-how the "
+                           "work is built on, from the sources you read. " + "; ".join(unready))
     if args.action == "diff":
         item = evidence.add_diff(task, project.root, args.base, args.note or "")
         out({"status": "ok", "evidence": item,
@@ -432,7 +437,9 @@ def cmd_evidence(args, project, catalog):
     if args.kind == "reference":
         nxt = ("Check that it is the thing itself the task names (the original, as published or as it really "
                "is), not someone's version of it (fan art, a remake, a mockup, an example from a blog): a "
-               "version is only a hint, find the original. " + nxt)
+               "version is only a hint, find the original. A page that only shows it among other things (search "
+               "results, a gallery, a collage, thumbnails, a snippet) is not it either: open the thing itself and "
+               "keep it whole, at its own size. " + nxt)
     if args.kind == "reference" and item.get("media") == "image":
         nxt = ("Check that it shows everything the task names, whole and uncropped; if a part is cut off or "
                "missing, find a reference that shows it and add it as well. " + nxt)
@@ -784,6 +791,43 @@ def cmd_critic(args, project, catalog):
     return 0
 
 
+DOMAIN = re.compile(r"^(?P<area>[^:]+):\s*(?P<how>skill|mcp|create)\s+(?P<name>[\w@./-]+)[^(]*"
+                    r"\(\s*searched:\s*(?P<query>[^)]+)\)\s*$", re.IGNORECASE)
+MIN_DOMAINS = 2
+
+
+def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict]) -> str:
+    """The brief's areas of know-how, each covered by a skill or a server found by a search of this task, or by a
+    skill this task creates. Raises when an area is covered by nothing, or its search was never run."""
+    usage = ("--domains splits the task into the areas of know-how it takes, the way an engineer splits building "
+             "a machine into its disciplines, and says how each is covered: `<area>: skill <name> (searched: "
+             "<query>); <area>: mcp <name> (searched: <query>); <area>: create <skill-name> (searched: <query>)`. "
+             f"At least {MIN_DOMAINS} areas. For each, first run `autoharness search skill|mcp \"<query>\"` (and "
+             "`autoharness need`), then take what fits (`skill`/`mcp`, also named as `take` in --candidates) or, "
+             "when nothing fits, create the skill from the sources you read (`create`, also in --gaps). Knowing it "
+             "already is not a cover: what you know goes into the skill you create.")
+    entries = [e.strip() for e in (text or "").split(";") if e.strip()]
+    if len(entries) < MIN_DOMAINS:
+        raise HarnessError(usage)
+    run = {s["query"].strip().lower() for s in searches}
+    for entry in entries:
+        m = DOMAIN.match(entry)
+        if not m:
+            raise HarnessError(f"cannot read the area `{entry}`. " + usage)
+        how, name, query = m["how"].lower(), m["name"], m["query"].strip().lower()
+        if query not in run:
+            raise HarnessError(f"area `{m['area'].strip()}`: no search `{query}` was run in this task. Run "
+                               f"`autoharness search skill \"{query}\"` (or `mcp`), read what it finds, then record "
+                               "the brief again. " + ("Searches run: " + "; ".join(sorted(run)) if run else ""))
+        if how == "create" and name not in planned:
+            raise HarnessError(f"area `{m['area'].strip()}` creates `{name}`: name it in --gaps too "
+                               f"(`create {name}: <capability>`)")
+        if how in ("skill", "mcp") and not re.search(rf"{re.escape(name)}\s*:\s*take\b", candidates, re.IGNORECASE):
+            raise HarnessError(f"area `{m['area'].strip()}` is covered by `{name}`: name it in --candidates as "
+                               f"`{name}: take, <why>`")
+    return "; ".join(entries)
+
+
 def cmd_brief(args, project, catalog):
     from autoharness import verification
     task = project.task()
@@ -796,6 +840,7 @@ def cmd_brief(args, project, catalog):
                            "or start with `none:` and say why the tools at hand cover every capability")
     for name in planned:
         library.validate_name(name)
+    domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
     method = args.method.strip()
     if "searched:" not in method.lower() or not (re.search(r"https?://", method)
                                                  or re.search(r"nothing usable", method, re.IGNORECASE)):
@@ -810,7 +855,8 @@ def cmd_brief(args, project, catalog):
             "poster: composition, palette, mood and poses read at a glance; not photographic likeness\"). "
             "Without it a critic judges against the reference itself, which a different medium never reaches, "
             "and every round stays major")
-    task.record_brief({"goal": args.goal, "method": method, "inputs": args.inputs, "constraints": args.constraints,
+    task.record_brief({"goal": args.goal, "domains": domains, "method": method, "inputs": args.inputs,
+                       "constraints": args.constraints,
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
@@ -2516,6 +2562,8 @@ def build_parser() -> argparse.ArgumentParser:
     for flag, what in [("--gaps", "`create <skill-name>: <capability>` for each capability no skill covers, "
                                   "or `none: <why>`"),
                        ("--goal", "what a good result looks like (the quality bar)"),
+                       ("--domains", "the areas of know-how the task takes, each covered: `<area>: skill|mcp|create "
+                                     "<name> (searched: <query>); ...`"),
                        ("--method", "how this kind of work is done well, from sources found and read first: "
                                     "`<technique or steps>: <url>; ...; searched: <queries>`"),
                        ("--inputs", "missing inputs and how you will get them (references, docs, data)"),

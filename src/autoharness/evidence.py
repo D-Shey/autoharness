@@ -1018,7 +1018,9 @@ Open and study these files yourself:
 Reference:
 {ref_lines}
 {facts_text}First check the reference itself: is it the original the task names (as published, or as it really is),
-or someone's version of it (fan art, a remake, a mockup, an example), or a different subject? If it is not
+or someone's version of it (fan art, a remake, a mockup, an example), or a different subject? A page that only
+shows it among other things (search results, a gallery, a collage, thumbnails, a snippet) is not the original
+either: the thing itself is open, whole and at its own size. If it is not
 the original, or it does not show what the task describes, say so as your first difference, a blocker:
 work matched to the wrong reference fails the task however close it is.
 Result to judge{whole}:
