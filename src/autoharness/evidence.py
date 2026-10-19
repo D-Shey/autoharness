@@ -646,7 +646,7 @@ def record_check(task: Task, result: str, passed: bool, run: int | None = None,
 
 def _caps(catalog, task: Task) -> list:
     info = task.info()
-    names = {c.name for c, _ in catalog.classify(info.get("task", ""))} | set(info.get("capabilities", []))
+    names = {c.name for c, _ in catalog.classify(task.about())} | set(info.get("capabilities", []))
     return [catalog.capabilities[n] for n in sorted(names) if n in catalog.capabilities]
 
 

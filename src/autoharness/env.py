@@ -460,6 +460,12 @@ class Task:
     def info(self) -> dict:
         return _read_json(self.dir / "task.json", {})
 
+    def about(self) -> str:
+        """What the task is, to match capabilities against: the text init got, and the prompt the session
+        started with (the user's own words, when the agent passed init a summary)."""
+        info = self.info()
+        return "\n".join(t for t in (str(info.get("task", "")), str(info.get("prompt", ""))) if t)
+
     @property
     def agent(self) -> Agent:
         return _agent(self.info().get("agent", "claude"))  # tasks from before adapters were Claude-only

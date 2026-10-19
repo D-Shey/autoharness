@@ -241,7 +241,11 @@ LEVELS = ("light", "full", "reviewed")
 def cmd_init(args, project, catalog):
     if args.profile and args.mode:
         raise HarnessError("use either --profile or --mode, not both")
-    classified = catalog.classify(args.task)
+    # the user's own words too: an agent may pass init a summary that drops what the task needs ("browser")
+    sid = agents.session_id(agent=project.agent_name)
+    prompt = session_state(sid).get("prompt", "") if sid else ""
+    about = "\n".join(t for t in (args.task, prompt) if t)
+    classified = catalog.classify(about)
     # --profile is the older spelling of the same levels
     selected = ({"quick": "light", "standard": "full", "reviewed": "reviewed"}[args.profile] if args.profile
                 else args.mode or "full")
@@ -283,10 +287,9 @@ def cmd_init(args, project, catalog):
     if mode == "light" and visual:
         task._update_info(light_reason=light_reason)
         task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
-    if owner := agents.session_id(agent=project.agent_name):
+    if owner := sid:
         task._update_info(owner=owner)
-        # the user's own words: the agent may pass init a summary, and the brief quotes the user
-        if prompt := session_state(owner).get("prompt"):
+        if prompt:   # the user's own words: the agent may pass init a summary, and the brief quotes the user
             task._update_info(prompt=prompt)
     if selected == "reviewed":
         task._update_info(profile="reviewed")
@@ -331,7 +334,7 @@ def cmd_init(args, project, catalog):
                 if rec := lessons.record(kind, item["name"]):   # earlier tasks only, before this offer counts
                     item["record"] = rec
                 lessons.bump(kind, item["name"], "offered")
-        result["discovered"] = discovered = discover(catalog, args.task, recipe_queries(matches))
+        result["discovered"] = discovered = discover(catalog, about, recipe_queries(matches))
         task.record_discovery(discovered)
         if rejected := rejected_before(project, task.id, result):
             result["rejected_before"] = rejected
@@ -1042,7 +1045,7 @@ def cmd_brief(args, project, catalog):
         library.validate_name(name)
     _check_constraints(args.constraints, task)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
-    live = [c.name for c, _ in catalog.classify(str(task.info().get("task", ""))) if c.interactive]
+    live = [c.name for c, _ in catalog.classify(task.about()) if c.interactive]
     if live and not any((m := DOMAIN.match(e.strip())) and m["how"].lower() == "mcp" for e in domains.split(";")):
         raise HarnessError(
             f"the task needs {', '.join(live)}: you have to see and operate it live, step by step, and a skill is "
