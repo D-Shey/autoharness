@@ -7,6 +7,7 @@ import pytest
 
 from autoharness import cli
 from autoharness.env import Project
+from conftest import TEST_DOMAINS, TEST_METHOD
 
 
 @pytest.fixture
@@ -54,7 +55,7 @@ def test_auto_mode_selects_light_or_full_without_changing_default(project, capsy
 
 
 def test_light_mode_opens_hook_gate_and_tears_down_without_review(project, capsys, monkeypatch):
-    assert run(project, capsys, 'init', '--mode', 'light', 'fix browser form')[0] == 0
+    assert run(project, capsys, 'init', '--mode', 'light', 'fix a typo in the readme')[0] == 0
     monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps({
         'hook_event_name': 'PreToolUse', 'session_id': 'light-session',
         'tool_name': 'Write', 'tool_input': {'file_path': 'x'}})))
@@ -65,7 +66,7 @@ def test_light_mode_opens_hook_gate_and_tears_down_without_review(project, capsy
 
 def test_light_mode_honors_explicit_critic_requirement(project, capsys):
     assert run(project, capsys, 'init', '--mode', 'light', 'fix a typo')[0] == 0
-    assert run(project, capsys, 'brief', '--goal', 'correct spelling', '--inputs', 'the existing file',
+    assert run(project, capsys, 'brief', '--goal', 'correct spelling', '--inputs', 'the existing file', '--domains', TEST_DOMAINS, '--method', TEST_METHOD, '--expects', 'none: the task settles every choice',
                '--constraints', '', '--verify', 'read the file', '--candidates', 'none',
                '--gaps', 'none: the editor is enough', '--review', 'critic')[0] == 0
     code, result = run(project, capsys, 'teardown')
@@ -88,7 +89,7 @@ def test_hook_closes_gate_again_when_light_task_upgrades(project, capsys, monkey
 
 def test_hook_requires_new_brief_for_second_full_task_in_same_session(project, capsys, monkeypatch):
     assert run(project, capsys, 'init', 'first small task')[0] == 0
-    assert run(project, capsys, 'brief', '--goal', 'first done', '--inputs', 'file',
+    assert run(project, capsys, 'brief', '--goal', 'first done', '--inputs', 'file', '--domains', TEST_DOMAINS, '--method', TEST_METHOD, '--expects', 'none: the task settles every choice',
                '--constraints', '', '--verify', 'read file', '--candidates', 'none',
                '--gaps', 'none: tools available')[0] == 0
     event = {'hook_event_name': 'PreToolUse', 'session_id': 'reused-session',

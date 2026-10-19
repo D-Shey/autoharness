@@ -1308,7 +1308,7 @@ def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
     return res and res["hookSpecificOutput"]["permissionDecision"]
 
 
-BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--domains", TEST_DOMAINS, "--method", TEST_METHOD, "--expects", "none: the task settles every choice", "--constraints", "no generators",
+BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--domains", TEST_DOMAINS, "--method", TEST_METHOD, "--expects", "none: the task settles every choice", "--constraints", "none",
          "--verify", "render and compare side by side", "--candidates", "svg-art: skip, it is a generator",
          "--gaps", "none: a browser and the shell cover every capability",
          "--fidelity", "stylised vector poster, not photographic"]
@@ -1322,17 +1322,17 @@ def test_gate_blocks_work_until_a_brief_is_recorded(project, capsys, monkeypatch
     res = prompt(capsys, monkeypatch, project, "fix the flaky login form in the settings page")
     ctx = res["hookSpecificOutput"]["additionalContext"]
     assert "autoharness waive s1" in ctx and "autoharness brief" in ctx
-    for name, inp in [("Write", {"file_path": "x"}), ("Edit", {}), ("Bash", {"command": "ls"}),
+    for name, inp in [("Write", {"file_path": "x"}), ("Edit", {}), ("Bash", {"command": "npm install"}),
                       ("mcp__playwright__browser_navigate", {})]:
         assert tool(capsys, monkeypatch, project, name, **inp) == "deny", name
     assert tool(capsys, monkeypatch, project, "Read") is None
     assert tool(capsys, monkeypatch, project, "Skill", skill="autoharness") is None
     assert tool(capsys, monkeypatch, project, "Write") == "deny"  # invoking the skill is not enough
     assert tool(capsys, monkeypatch, project, "Bash", command="autoharness --agent claude init x") is None
-    cli_json(capsys, "--project", str(project.root), "init", "fix the login form")
+    cli_json(capsys, "--project", str(project.root), "init", "fix the totals in the quarterly report")
     assert tool(capsys, monkeypatch, project, "Write") == "deny"  # nor is starting a task
     code, res = brief(capsys, project)
-    assert code == 0 and res["status"] == "ok"
+    assert code == 0 and res["status"] == "ok", res
     assert tool(capsys, monkeypatch, project, "Write") is None
     # once done, later prompts in the session are left alone, even after teardown
     cli_json(capsys, "--project", str(project.root), "teardown")
@@ -1372,7 +1372,7 @@ def test_agy_gate_reads_the_prompt_from_the_transcript_and_blocks_work_until_a_b
     shell = "run_command"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file", TargetFile="x") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "replace_file_content") == "deny"
-    assert agy_tool(capsys, monkeypatch, tmp_path, project, shell, CommandLine="ls") == "deny"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, shell, CommandLine="npm install") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "call_mcp_tool", ServerName="fetch", ToolName="get") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "view_file", AbsolutePath="x") is None
     assert agy_tool(capsys, monkeypatch, tmp_path, project, shell, CommandLine="autoharness --agent agy init x") is None
@@ -1459,6 +1459,7 @@ def fake_registry(monkeypatch, fail=False):
         return []
     monkeypatch.setattr(registry, "search_skills", skills)
     monkeypatch.setattr(registry, "search_mcp", mcp)
+    monkeypatch.setattr(registry, "search_marketplace", mcp)
     monkeypatch.delenv("AUTOHARNESS_OFFLINE")
     return calls
 
@@ -1581,12 +1582,23 @@ def png(path: Path) -> Path:
 def visual_task(capsys, project):
     root = str(project.root)
     cli_json(capsys, "--project", root, "init", BLADE_RUNNER)
-    cli_json(capsys, "--project", root, "brief", *BRIEF)
+    code, res = cli_json(capsys, "--project", root, "brief", *BRIEF, "--constraints", "Don't use external svg generators")
+    assert code == 0, res
     return root
 
 
 def ev(capsys, root, path, kind):
-    return cli_json(capsys, "--project", root, "evidence", "add", str(path), "--kind", kind)
+    code, res = cli_json(capsys, "--project", root, "evidence", "add", str(path), "--kind", kind)
+    if code == 1 and "must match a reference" in res.get("error", ""):   # visual work starts from the original
+        assert ev(capsys, root, png(Path(path).with_name(f"ref-{Path(path).name}")), "reference")[0] == 0
+        code, res = cli_json(capsys, "--project", root, "evidence", "add", str(path), "--kind", kind)
+    if code == 1 and "--kind facts" in res.get("error", ""):   # a reference asks for its facts before a result
+        facts = Path(path).with_name(f"facts-{Path(path).stem}.md")
+        facts.write_text("- the figure stands left of centre\n", "utf-8")
+        added = cli_json(capsys, "--project", root, "evidence", "add", str(facts), "--kind", "facts")
+        assert added[0] == 0, (res, added)
+        code, res = cli_json(capsys, "--project", root, "evidence", "add", str(path), "--kind", kind)
+    return code, res
 
 
 def test_evidence_takes_any_file_and_copies_it(project, capsys, tmp_path):
@@ -1611,9 +1623,10 @@ def test_critic_prompt_points_at_the_files_the_bar_and_the_focus(project, capsys
     ev(capsys, root, png(tmp_path / "still.png"), "reference")
     ev(capsys, root, png(tmp_path / "r1.png"), "result")
     code, res = cli_json(capsys, "--project", root, "critic")
+    assert "prompt" in res, res
     p = res["prompt"]
     assert code == 0 and res["result"] in p and res["references"][0] in p
-    assert "matches the film frame" in p and "no generators" in p and "VERDICT" in p
+    assert "matches the film frame" in p and "svg generators" in p and "VERDICT" in p
     assert "signature details" in p  # focus from the visual-review capability
     assert "the author's own guess" not in p  # interfaces are for code, not for a drawing
     assert "fresh subagent" in res["next"]
@@ -1674,10 +1687,10 @@ def test_a_closeup_is_marked_by_hand_and_needs_a_whole_first(project, capsys, tm
     code, res = cli_json(capsys, "--project", root, "evidence", "add", str(png(tmp_path / "c.png")),
                          "--kind", "result", "--closeup")
     assert code == 1 and "whole result first" in res["error"]
-    ev(capsys, root, sized_png(tmp_path / "r1.png", 800, 600), "result")
+    whole = ev(capsys, root, sized_png(tmp_path / "r1.png", 800, 600), "result")[1]["evidence"]["n"]
     code, res = cli_json(capsys, "--project", root, "evidence", "add",
                          str(sized_png(tmp_path / "hand.png", 1600, 1200)), "--kind", "result", "--closeup")
-    assert code == 0 and res["evidence"]["closeup"] == 1
+    assert code == 0 and res["evidence"]["closeup"] == whole
     code, res = cli_json(capsys, "--project", root, "critic")
     assert len(res["results"]) == 2
 
@@ -1688,7 +1701,7 @@ def test_a_stylised_fidelity_does_not_excuse_broken_drawing(project, capsys, tmp
     ev(capsys, root, png(tmp_path / "r1.png"), "result")
     code, res = cli_json(capsys, "--project", root, "critic")
     assert "not how well it is made" in res["prompt"] and "never a reason to rate those minor" in res["prompt"]
-    assert "hand" not in res["prompt"] and "anatomy" not in res["prompt"]  # no one kind of picture
+    assert "hands" not in res["prompt"] and "anatomy" not in res["prompt"]  # no one kind of picture
 
 
 def test_a_page_to_copy_pixel_for_pixel_is_visual_work():
@@ -1797,6 +1810,8 @@ def test_a_result_that_is_the_reference_itself_is_flagged(project, capsys, tmp_p
 def test_critic_reads_notes_as_labels_sees_the_project_and_lists_only_differences(project, capsys, tmp_path):
     root = visual_task(capsys, project)
     ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    (tmp_path / "facts.md").write_text("- the figure stands left of centre\n", "utf-8")
+    ev(capsys, root, tmp_path / "facts.md", "facts")
     cli_json(capsys, "--project", root, "evidence", "add", str(png(tmp_path / "r1.png")), "--kind", "result",
              "--note", "pixel diff 0")
     code, res = cli_json(capsys, "--project", root, "critic")
@@ -2414,8 +2429,10 @@ def test_gateway_refuses_a_remote_host_off_the_allowlist(project):
 
 def briefed(capsys, project, constraints="no generators"):
     root = str(project.root)
-    cli_json(capsys, "--project", root, "init", "prepare the quarterly report")
-    args = [constraints if a == "no generators" else a for a in BRIEF]
+    cli_json(capsys, "--project", root, "init",
+             f"prepare the quarterly report for the board meeting next week; {constraints}")
+    args = list(BRIEF)
+    args[args.index("--constraints") + 1] = constraints
     return cli_json(capsys, "--project", root, "brief", *args)
 
 

@@ -20,3 +20,9 @@ def test_domains_need_no_search(monkeypatch):
     real = cli._check_domains
     monkeypatch.setattr(cli, "_check_domains",
                         lambda text, *a: text if text == TEST_DOMAINS else real(text, *a))
+
+
+@pytest.fixture(autouse=True)
+def no_reviewer_to_start(monkeypatch):
+    """Whether an agent CLI is installed differs from machine to machine: tests start none unless they say so."""
+    monkeypatch.setattr(cli, "_reviewer_can_start", lambda agent: False)

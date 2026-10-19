@@ -1269,8 +1269,7 @@ def cmd_vet(args, project, catalog):
     if not vet.constraints(task):
         raise HarnessError("the brief records no constraints to vet against; record `autoharness brief "
                            "--constraints \"<the user's words>\"` first (or there is nothing to vet)")
-    if args.verdict and not args.answer_file and project.agent.name in reviewers.AGENTS \
-            and shutil.which(project.agent.name):
+    if args.verdict and not args.answer_file and _reviewer_can_start(project.agent.name):
         # a retold verdict cannot be told from the author's own: where a reviewer can be started, it answers itself
         raise HarnessError(f"the vet verdict comes from a reviewer that did not pick this candidate, not from you: "
                            f"`autoharness vet {args.kind} {args.name} --run {project.agent.name}` starts one and records "
@@ -2321,6 +2320,12 @@ def cmd_hook(args, project, catalog):
                     {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                             "permissionDecisionReason": reason}})
                 return 0
+            # the key is never for tools, even in a call that looks like reading autoharness's own files
+            if (reason := _writes_records(tool, tool_input, project.root)) == KEY_DENIED:
+                out({"decision": "deny", "reason": reason} if agy else
+                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                            "permissionDecisionReason": reason}})
+                return 0
             if _is_autoharness_call(tool, tool_input):
                 if foreign and state != "waived" and _autoharness_subcommand(tool, tool_input) in ("init", "teardown"):
                     reason = handoff(Task(project, active), sid)
@@ -2394,6 +2399,11 @@ def cmd_hook(args, project, catalog):
         return 0
     except Exception:  # noqa: BLE001 - a hook must not break the session
         return 0
+
+
+def _reviewer_can_start(agent: str) -> bool:
+    """Whether autoharness can start a fresh reviewer of this agent kind here (`--run`)."""
+    return agent in reviewers.AGENTS and bool(shutil.which(agent))
 
 
 def _pending_answers(info: dict) -> list[str]:

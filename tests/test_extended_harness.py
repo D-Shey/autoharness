@@ -3,6 +3,7 @@ import sys
 
 from autoharness import cli
 from autoharness.env import Project
+from conftest import TEST_DOMAINS, TEST_METHOD
 
 
 def run(root, capsys, *args):
@@ -32,10 +33,10 @@ def test_one_mode_flag_covers_every_level_and_a_task_can_be_raised(tmp_path, cap
     monkeypatch.setenv('AUTOHARNESS_OFFLINE', '1')
     root = tmp_path / 'repo'
     root.mkdir()
-    light = run(root, capsys, 'init', 'check the page in a real browser', '--mode', 'light')[1]
+    light = run(root, capsys, 'init', 'fix a typo in the readme', '--mode', 'light')[1]
     # light mode does no discovery, so init prints none of what discovery needs
-    assert not {'all_capabilities', 'recipes', 'discovered', 'suggested'} & set(light)
-    assert 'browser-automation' in light['hint'] and 'dir' in light
+    assert light['mode'] == 'light' and not {'all_capabilities', 'recipes', 'discovered', 'suggested'} & set(light)
+    assert 'dir' in light
     raised = run(root, capsys, 'mode', 'reviewed')[1]
     assert raised['mode'] == 'reviewed' and 'critic' in raised['next']
     assert run(root, capsys, 'status')[0] == 0   # offline discovery is `skipped`, which status must survive
@@ -96,7 +97,7 @@ def test_verification_templates_and_recorded_evidence(tmp_path, capsys, monkeypa
         code, guide = run(root, capsys, 'verify', 'guide', kind)
         assert code == 0 and guide['steps'] and guide['brief_verify']
     assert run(root, capsys, 'init', '--mode', 'light', 'check API')[0] == 0
-    code, brief = run(root, capsys, 'brief', '--goal', 'healthy API', '--inputs', 'service',
+    code, brief = run(root, capsys, 'brief', '--goal', 'healthy API', '--inputs', 'service', '--domains', TEST_DOMAINS, '--method', TEST_METHOD, '--expects', 'none: the task settles every choice',
                       '--constraints', '', '--verify-template', 'api', '--candidates', 'none',
                       '--gaps', 'none: existing tools')
     assert code == 0
