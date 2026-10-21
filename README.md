@@ -40,7 +40,7 @@ ceiling on quality is then whatever the model remembers. It shows on any task: a
 someone else's API, tests, setting up an environment, a page built from a mockup, a drawing that
 has to match a reference image.
 
-Engineers do not work that way. Nobody builds an aircraft head-on: the work is split into
+Engineers do not work that way. Nobody builds an aircraft from memory: the work is split into
 disciplines (aerodynamics, materials, strength, control), what is already known in each is looked
 up, hypotheses are checked on models, and only then is it built. AutoHarness brings that order to
 the agent:
