@@ -162,7 +162,9 @@ Names from lockfiles and `kept.json` are compared with the folder listing letter
 ## Your own skills
 
 `skill save` blocks secrets (tokens, private keys, `password=…`) and dangerous patterns, warns about
-absolute paths and emails, and saves nothing without `--approve`.
+absolute paths and emails, and saves nothing without `--approve`. It also warns when a skill was never
+tested with `skill test` or lost its last test, and when its description retells the steps instead of
+saying when to use it.
 
 ## The hook
 

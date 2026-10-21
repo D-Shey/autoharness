@@ -35,7 +35,7 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `eval record --case NAME --variant baseline\|harness --passed yes\|no [--seconds N] [--task-id ID] [--tokens N] [--cost N] [--tool-calls N]` | saves a run's measurement; a finished task supplies the time and CLI statistics |
 | `eval batch --dataset FILE --variant baseline\|harness -- RUNNER [ARGS]` | runs an external runner on each JSONL case and records the measurements |
 | `eval compare` | compares only the cases that have runs of both variants |
-| `skill new\|save\|list\|delete` | the agent's own skills and the local library |
+| `skill new\|test\|save\|list\|delete` | the agent's own skills and the local library; `test` has fresh agents do 1-3 tasks with and without the skill and a blind judge compare |
 | `recipe list\|match\|show` | saved setups; `show` reruns the recipe's queries and returns what is new in `fresh` |
 | `lesson add` | a short conclusion from a task's friction; one confirmed by three tasks moves into a skill |
 | `ruling add` | a review point the user rejected, so later critics in the project do not raise it again |

@@ -120,7 +120,29 @@ def check(src: Path) -> CheckResult:
             for label, pattern in PRIVACY:
                 if pattern.search(line):
                     warnings.append(f"{label} at {path.relative_to(src)}:{i}")
-    return CheckResult("ok", description, [], warnings)
+    return CheckResult("ok", description, [], warnings + craft(description, skill_md.read_text("utf-8")))
+
+
+MAX_LINES = 500
+RETOLD_STEPS = re.compile(r"\bthen\b|->|→|\bstep \d", re.IGNORECASE)
+SHOUTING = re.compile(r"\b(?:MUST|NEVER|ALWAYS|CRITICAL|IMPORTANT)\b")
+
+
+def craft(description: str, skill_md: str) -> list[str]:
+    """What tends to make a skill go unused or unread; warnings, the author decides."""
+    found = []
+    if len(description.split()) < 4:
+        found.append("the description is too short for an agent to tell when to open the skill: name the "
+                     "situation and the words a request would use")
+    if RETOLD_STEPS.search(description):
+        found.append("the description seems to retell the steps: say when to use the skill instead, or an agent "
+                     "may follow the summary and skip the body")
+    if (n := len(skill_md.splitlines())) > MAX_LINES:
+        found.append(f"SKILL.md has {n} lines: move reference material into references/ and say when to read it")
+    if len(SHOUTING.findall(skill_md)) >= 5:
+        found.append("many MUST/NEVER/ALWAYS: say why a step matters, so an agent can handle the case the skill "
+                     "did not foresee")
+    return found
 
 
 def root() -> Path:

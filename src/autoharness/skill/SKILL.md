@@ -129,7 +129,9 @@ least two results and a critic before teardown; `brief` lists what this task owe
 verify from what you found (no absolute paths, secrets or people's names) before producing the
 result, follow it, and update it as you learn. Values you measured in this project (a threshold, a
 mapping, a colour) go under "Facts found here", apart from the procedure: the next task re-checks
-them. Teardown refuses while a planned skill is missing or unfilled.
+them. Teardown refuses while a planned skill is missing or unfilled. Then check it helps:
+`autoharness skill test <name> --task "<a realistic request>"` (1-3 tasks) has fresh subagents do
+each task with and without it, `--judge` compares them blind, `--answer-file` records who won.
 
 ## 4. Vet and install
 

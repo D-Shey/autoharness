@@ -791,6 +791,76 @@ def test_cli_teardown_warns_about_unsaved_local_skills_in_recipe(tmp_path, lib_h
     assert "skill save" in res["next"]
 
 
+def test_check_warns_about_how_a_skill_is_written(tmp_path):
+    res = library.check(write_skill(tmp_path, "pptx-qa", FILLED.replace(
+        "Check .pptx slides visually", "Export slides, then look at them") + "\nMUST MUST NEVER ALWAYS IMPORTANT\n"))
+    assert res.status == "ok"
+    assert any("retell the steps" in w for w in res.warnings) and any("why a step matters" in w for w in res.warnings)
+    res = library.check(write_skill(tmp_path, "pptx-qa", FILLED.replace("Check .pptx slides visually", "Slides")
+                                    + "line\n" * library.MAX_LINES))
+    assert any("too short" in w for w in res.warnings) and any("references/" in w for w in res.warnings)
+
+
+def _judge_answer(path: Path, answer_id: str, picks: list[str]) -> Path:
+    lines = [f"ANSWER-ID: {answer_id}"] + [f"T{i}: {p}\nthe other one missed a slide" for i, p in enumerate(picks, 1)]
+    path.write_text("\n".join(lines + ["VERDICT: done"]), "utf-8")
+    return path
+
+
+def test_cli_skill_test_judges_blind_and_scores_the_skill(tmp_path, lib_home, capsys):
+    cli_json(capsys, "--project", str(tmp_path), "init", "make a pptx")
+    cli_json(capsys, "--project", str(tmp_path), "skill", "new", "pptx-qa", "--description", "Check .pptx slides visually")
+    (tmp_path / ".claude" / "skills" / "pptx-qa" / "SKILL.md").write_text(FILLED, "utf-8")
+    code, res = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa")
+    assert code == 1 and "--task" in res["error"]
+    code, res = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa",
+                         "--task", "a 5-slide deck on Q3 sales", "--task", "fix overlapping text in deck.pptx")
+    assert code == 0 and res["round"] == 1 and len(res["runs"]) == 4
+    with_skill = [r for r in res["runs"] if "SKILL.md" in r["prompt"] and "Do not open" not in r["prompt"]]
+    assert len(with_skill) == 2 and {r["task"] for r in with_skill} == {"T1", "T2"}
+    assert all("Do not open any SKILL.md" in r["prompt"] for r in res["runs"] if r not in with_skill)
+    code, again = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa")
+    assert again["repeated"] and again["runs"] == res["runs"]
+
+    code, res2 = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa", "--judge")
+    assert code == 1 and "left nothing" in res2["error"]
+    for r in res["runs"]:
+        (Path(r["dir"]) / "notes.md").write_text("done", "utf-8")
+    code, judge = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa", "--judge")
+    assert code == 0 and "ANSWER-ID" in judge["prompt"] and "SKILL" not in judge["prompt"]
+
+    code, res3 = cli_json(capsys, "--project", str(tmp_path), "skill", "save", "pptx-qa")
+    assert any("never tested" in w for w in res3["warnings"])
+    labels = {r["task"]: r["label"] for r in with_skill}
+    other = {"A": "B", "B": "A"}
+    picks = [labels["T1"], other[labels["T2"]]]          # the skill wins T1 and loses T2
+    code, rec = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa", "--answer-file",
+                         str(_judge_answer(tmp_path / "j1.txt", judge["answer_id"], picks)))
+    assert code == 0 and rec["result"]["per_task"] == ["skill", "baseline"] and not rec["result"]["passed"]
+    assert "did not beat" in rec["next"]
+    code, res3 = cli_json(capsys, "--project", str(tmp_path), "skill", "save", "pptx-qa")
+    assert any("did not pass" in w for w in res3["warnings"])
+
+    code, res = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa")   # the same tasks again
+    assert code == 0 and res["round"] == 2 and "repeated" not in res
+    for r in res["runs"]:
+        (Path(r["dir"]) / "out.txt").write_text("x", "utf-8")
+    code, judge = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa", "--judge")
+    labels = {r["task"]: r["label"] for r in res["runs"] if "Do not open" not in r["prompt"]}
+    code, rec = cli_json(capsys, "--project", str(tmp_path), "skill", "test", "pptx-qa", "--answer-file",
+                         str(_judge_answer(tmp_path / "j2.txt", judge["answer_id"], [labels["T1"], "same"])))
+    assert rec["result"]["passed"] and rec["result"]["ties"] == 1 and "skill save" in rec["next"]
+    code, res3 = cli_json(capsys, "--project", str(tmp_path), "skill", "save", "pptx-qa")
+    assert not any("tested" in w or "did not pass" in w for w in res3["warnings"])
+
+
+def test_skill_new_teaches_how_to_write_and_test_a_skill(tmp_path, capsys):
+    cli_json(capsys, "--project", str(tmp_path), "init", "t")
+    code, res = cli_json(capsys, "--project", str(tmp_path), "skill", "new", "pptx-qa", "--description", "d")
+    assert code == 0 and "description" in res["next"] and "references/" in res["next"]
+    assert "autoharness skill test pptx-qa" in res["next"]
+
+
 def test_bootstrap_skill_teaches_generated_skills():
     from importlib import resources
     text = resources.files("autoharness").joinpath("skill/SKILL.md").read_text("utf-8")

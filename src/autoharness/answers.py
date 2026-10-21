@@ -17,7 +17,7 @@ from pathlib import Path
 
 from autoharness.env import HarnessError, Task
 
-KINDS = ("critic", "quality", "arbiter", "vet")
+KINDS = ("critic", "quality", "arbiter", "vet", "skilltest")
 ID_LINE = re.compile(r"^\W*ANSWER-ID:\s*(ah-[0-9a-f]{12})\b", re.MULTILINE | re.IGNORECASE)
 VERDICT_LINE = re.compile(r"^\W*VERDICT:(.*)$", re.MULTILINE | re.IGNORECASE)
 CHECK_LINE = re.compile(r"^\W*CHECK:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
