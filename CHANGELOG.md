@@ -25,6 +25,9 @@ The first public version.
 - Guards against loops: a change of approach, an arbiter with a measurable check, then the user.
 - Learning: skills the agent writes and saves to a local library, recipes that rerun their queries,
   lessons from friction.
+- `skill test`: fresh agents do 1-3 realistic tasks with a new skill and without it, and a blind judge
+  compares each pair. `skill new` explains how to write a skill that gets opened and followed, and
+  `skill save` warns when a skill was never tested, lost its test, or its description retells the steps.
 
 ### Tools and trust
 

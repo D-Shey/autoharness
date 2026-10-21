@@ -221,6 +221,7 @@ if the user actually wrote something.
 ### 8. The end: teardown, skills, recipes
 
 ```bash
+autoharness skill test <name> --task "<a realistic request>"   # with it and without it, judged blind
 autoharness skill save <name>                                    # into the library, after the user's "yes"
 autoharness teardown --save-recipe <name> --notes "<what it is good for>"
 ```

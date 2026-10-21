@@ -20,7 +20,7 @@ from importlib import resources
 from pathlib import Path
 
 from autoharness import (__version__, agents, answers, approvals, config, egress, evidence, followups, history, lessons,
-                         library, recipes, registry, reviewers, rulings, runs, text, vet)
+                         library, recipes, registry, reviewers, rulings, runs, skilltests, text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (GATEWAY_NAME, ContentChanged, HarnessError, Project, SkillRejected, Task,
                              missing_tools, npx_stage_skill, parse_skill_spec, skill_dir)
@@ -1604,6 +1604,54 @@ def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
     return entry, task if task and task.dir.exists() else None
 
 
+# how a skill that earns its place is written; the agent reads it once, right after `skill new`
+SKILL_WRITING = (
+    "Fill in every section of SKILL.md now, from the references, docs and findings you have. It is your procedure "
+    "for this task: follow it, and change it when you learn something. What makes it work for the next agent too:\n"
+    "- Aim it at a failure you saw: what went wrong without it (a critic finding, a wrong first attempt) and what "
+    "prevents that. A skill that only restates what any agent already does adds nothing.\n"
+    "- The description in the frontmatter decides whether an agent opens the skill at all. Write when to open it "
+    "(the situation, the symptoms, the words a request would use), not what the steps are: an agent that finds the "
+    "steps in the description tends to follow that summary and skip the body.\n"
+    "- Method, not a story of this task: no absolute paths, secrets, people's names or one-off values in the steps. "
+    "Values measured here go under \"Facts found here\".\n"
+    "- Say why a step matters instead of shouting MUST or NEVER: an agent that knows the reason handles the case "
+    "the skill did not foresee.\n"
+    "- Keep SKILL.md short (well under 500 lines). Long reference material goes into references/<topic>.md with a "
+    "line in SKILL.md saying when to read it; code an agent would otherwise rewrite each time goes into scripts/.\n"
+    "Then test it: `autoharness skill test {name} --task \"<a realistic request it is for>\"` (1-3 tasks that "
+    "differ) has fresh agents do the work with it and without it, and a blind judge compares. At the end run "
+    "`autoharness skill save {name}` and ask the user.")
+
+
+def _skill_test(args, project) -> int:
+    task = project.task()
+    if args.answer_file:
+        res = skilltests.record(task, args.name, Path(args.answer_file))
+        nxt = (f"The skill helped. Save it with `autoharness skill save {args.name}` and ask the user."
+               if res["passed"] else
+               "The skill did not beat an agent without it. Read the judge's answer and both outputs of each task "
+               "it did not win, find where the skill misled the agent or left it on its own, and change the skill "
+               "so it would help on any such request, not only these. Then test again: `autoharness skill test "
+               f"{args.name}` (same tasks; add a new one with --task to check it did not just fit these).")
+        out({"status": "ok", "result": res, "next": nxt})
+        return 0
+    if args.judge:
+        res = skilltests.judge_prompt(task, args.name)
+        res["prompt_file"] = evidence.save_prompt(task, "skilltest", res["prompt"])
+        out({"status": "ok"} | res | {
+            "next": "Give the prompt unchanged to one fresh subagent that did none of the runs, save its answer "
+                    f"unedited to a file and record it: `autoharness skill test {args.name} --answer-file <file>`."})
+        return 0
+    skill_dir = task.agent.skills_path(project.root) / args.name
+    res = skilltests.start(task, args.name, skill_dir, args.test_tasks)
+    out({"status": "ok"} | res | {
+        "next": "Run every prompt in its own fresh subagent, all at once, each unchanged: the runs must not see "
+                "each other or this conversation. Which label has the skill stays hidden, also from you. When all "
+                f"have finished, `autoharness skill test {args.name} --judge` gives the blind comparison prompt."})
+    return 0
+
+
 def cmd_skill(args, project, catalog):
     if args.action == "list":
         entries, warnings = library.list_skills()
@@ -1622,12 +1670,10 @@ def cmd_skill(args, project, catalog):
         if not args.description:
             raise HarnessError("skill new needs --description: when should an agent use this skill?")
         path = project.task().new_skill(args.name, args.description)
-        out({"status": "ok", "created": str(path),
-             "next": "Fill in every section of SKILL.md now, generalised (no absolute paths, secrets or people's "
-                     "names), from the references, docs and findings you have. It is your procedure for this task: "
-                     "follow it, and update it when you learn something. At the end run `autoharness skill save "
-                     + args.name + "` and ask the user."})
+        out({"status": "ok", "created": str(path), "next": SKILL_WRITING.format(name=args.name)})
         return 0
+    if args.action == "test":
+        return _skill_test(args, project)
 
     # save
     entry, task = _find_local_skill(project, args.name)
@@ -1641,6 +1687,14 @@ def cmd_skill(args, project, catalog):
              "next": "Fix the problems and run skill save again." if res.status == "invalid"
                      else "Remove the flagged content; saving is blocked until it is gone."})
         return 1
+    if entry.get("source") == "generated":   # a library skill installed here was tested where it was written
+        tested = skilltests.status(task, args.name)
+        if not tested:
+            res.warnings.append(f"never tested: `autoharness skill test {args.name} --task \"...\"` shows whether "
+                                "an agent does the work better with it than without")
+        elif not tested["passed"]:
+            res.warnings.append(f"its last test did not pass ({tested['wins']} won, {tested['losses']} lost, "
+                                f"{tested['ties']} tied against an agent without it)")
     if not args.approve:
         out({"status": "approval_required", "skill": args.name, "description": res.description,
              "files": sorted(str(p.relative_to(src)) for p in src.rglob("*") if p.is_file()),
@@ -2927,9 +2981,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("value", nargs="?")
     s.add_argument("--global", dest="glob", action="store_true", help="change ~/.autoharness/config.json")
     s = sub.add_parser("skill", help="write your own skills and keep them in the local library")
-    s.add_argument("action", choices=["new", "save", "list", "delete"])
+    s.add_argument("action", choices=["new", "test", "save", "list", "delete"])
     s.add_argument("name", nargs="?")
     s.add_argument("--description", help="for `new`: when an agent should use the skill")
+    s.add_argument("--task", action="append", default=[], dest="test_tasks",
+                   help="for `test`: a realistic request the skill is for (1-3, repeat the flag); starts a round")
+    s.add_argument("--judge", action="store_true", help="for `test`: the blind comparison prompt for the round")
+    s.add_argument("--answer-file", help="for `test`: the judge's answer, saved unedited")
     s.add_argument("--approve", action="store_true", help="for `save`: the user explicitly agreed")
     s = sub.add_parser("gateway", help="one MCP server that hot-adds the servers you add, no agent restarts")
     s.add_argument("action", choices=["install", "uninstall", "status", "serve", "approve"])
