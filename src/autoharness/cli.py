@@ -91,9 +91,20 @@ def local_skills(catalog: Catalog, task_text: str) -> list[dict]:
     return library.matching([c.name for c, _ in catalog.classify(task_text)], task_text)
 
 
-def suggestions(catalog: Catalog, caps) -> list[dict]:
+def suggestions(catalog: Catalog, caps, builtin=()) -> list[dict]:
+    """Curated entries for the matched capabilities; a server built into the agent comes first."""
     return [{"capability": c.name, "description": c.description, "matched": m,
-             "mcp": c.mcp, "skills": c.skills} for c, m in caps]
+             "mcp": [b.name for b in builtin if c.name in b.capabilities] + c.mcp, "skills": c.skills}
+            for c, m in caps]
+
+
+def builtin_results(catalog: Catalog, builtin, query: str) -> list[dict]:
+    """The agent's built-in servers a search for `query` finds: by name, or by a capability the query names."""
+    caps = {c.name for c, _ in catalog.classify(query)}
+    words = query.lower().split()
+    return [{"name": b.name, "score": 100, "level": "builtin", "reasons": ["built into the agent: nothing to install"],
+             "requires_approval": False, "description": b.description} for b in builtin
+            if caps & set(b.capabilities) or any(w in b.name for w in words)]
 
 
 DISCOVERY_QUERIES = 4
@@ -229,7 +240,8 @@ REJECTED_NEXT = ("`rejected_before` lists candidates earlier tasks skipped, remo
 # --- commands ---------------------------------------------------------------
 
 def cmd_plan(args, project, catalog):
-    out({"task": args.task, "suggested": suggestions(catalog, catalog.classify(args.task)),
+    out({"task": args.task, "suggested": suggestions(catalog, catalog.classify(args.task),
+                                                     agents.builtin_mcp(project.agent.name)),
          "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"]} for s, r in recipes.match(args.task)],
          "all_capabilities": {n: c.description for n, c in catalog.capabilities.items()}})
     return 0
@@ -322,7 +334,7 @@ def cmd_init(args, project, catalog):
         agent = task.agent
         matches = recipes.match(args.task)
         result |= {"agent": {"name": agent.name, "mcp_config": agent.mcp_file, "skills_dir": agent.skills_dir},
-                   "suggested": suggestions(catalog, classified),
+                   "suggested": suggestions(catalog, classified, agents.builtin_mcp(agent.name)),
                    "recipes": [{"score": s, "name": r["name"], "capabilities": r["capabilities"],
                                 "mcp": list(r["mcp"]), "skills": r["skills"], "queries": r.get("queries", [])}
                                for s, r in matches],
@@ -421,12 +433,15 @@ def cmd_need(args, project, catalog):
     asked = f"{args.capability.replace('-', ' ')} {args.reason or ''}"
     local = library.matching([args.capability] + [c.name for c, _ in catalog.classify(asked)],
                              args.capability) or library.matching([], asked)
+    builtin = agents.builtin_mcp(project.agent.name)
     if cap:
-        out({"status": "ok", "capability": cap.name, "curated": {"mcp": cap.mcp, "skills": cap.skills}, "local": local}
+        mcp = [b.name for b in builtin if cap.name in b.capabilities] + cap.mcp
+        out({"status": "ok", "capability": cap.name, "curated": {"mcp": mcp, "skills": cap.skills}, "local": local}
             | ({"next": "Prefer a `local` skill: `autoharness add skill local:<name>`."} if local else {}))
     else:
         # the name may just be phrased differently from a curated capability
-        related = suggestions(catalog, catalog.classify(f"{args.capability.replace('-', ' ')} {args.reason or ''}"))
+        related = suggestions(catalog, catalog.classify(f"{args.capability.replace('-', ' ')} {args.reason or ''}"),
+                              builtin)
         out({"status": "ok", "capability": args.capability, "curated": None, "local": local, "related": related,
              "next": (("Prefer a `local` skill: `autoharness add skill local:<name>`. " if local else "")
                       + "No curated entry under this name. Check `related` first; if none fits, try "
@@ -440,7 +455,7 @@ def cmd_search(args, project, catalog):
         if errors and not found:
             raise HarnessError("; ".join(errors))
         curated = [curated_report(n, e).to_dict() for n, e in catalog.mcp_servers.items() if args.query.lower() in n]
-        results = curated + found
+        results = builtin_results(catalog, agents.builtin_mcp(project.agent.name), args.query) + curated + found
     else:
         errors = []
         results = []
@@ -878,9 +893,10 @@ DOMAIN = re.compile(r"^(?P<area>[^:]+):\s*(?P<how>skill|mcp|create)\s+(?P<name>[
 MIN_DOMAINS = 2
 
 
-def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict]) -> str:
-    """The brief's areas of know-how, each covered by a skill or a server found by a search of this task, or by a
-    skill this task creates. Raises when an area is covered by nothing, or its search was never run."""
+def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict], builtin=()) -> str:
+    """The brief's areas of know-how, each covered by a skill or a server found by a search of this task (or built
+    into the agent), or by a skill this task creates. Raises when an area is covered by nothing, or its search was
+    never run."""
     usage = ("--domains splits the task into the areas of know-how it takes, the way an engineer splits building "
              "a machine into its disciplines, and says how each is covered: `<area>: skill <name> (searched: "
              "<query>); <area>: mcp <name> (searched: <query>); <area>: create <skill-name> (searched: <query>)`. "
@@ -908,7 +924,7 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
             raise HarnessError(f"area `{m['area'].strip()}` creates `{name}`: name it in --gaps too "
                                f"(`create {name}: <capability>`)")
         found = next((s.get("results", []) for s in searches if s["query"].strip().lower() == query), [])
-        real = how == "skill" and library.exists(name) or any(
+        real = how == "skill" and library.exists(name) or how == "mcp" and name in builtin or any(
             r.lower() == name.lower() or re.search(rf"[@/]{re.escape(name.lower())}$", r.lower()) for r in found)
         if how in ("skill", "mcp") and not real:
             raise HarnessError(f"area `{m['area'].strip()}`: `{name}` is not among what the search `{query}` found"
@@ -1080,7 +1096,8 @@ def cmd_brief(args, project, catalog):
     for name in planned:
         library.validate_name(name)
     _check_constraints(args.constraints, task)
-    domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []))
+    domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []),
+                             [b.name for b in agents.builtin_mcp(project.agent.name)])
     live = [c.name for c, _ in catalog.classify(task.about()) if c.interactive]
     if live and not any((m := DOMAIN.match(e.strip())) and m["how"].lower() == "mcp" for e in domains.split(";")):
         raise HarnessError(
@@ -1169,6 +1186,10 @@ def cmd_add(args, project, catalog):
         raise HarnessError("adding tools requires full mode; run `autoharness mode full` first")
     if args.kind == "mcp" and (args.as_name or local_mcp_name(args.name)) in project.kept()["mcp"]:
         return already_kept(project, "mcp", args.as_name or local_mcp_name(args.name))
+    if args.kind == "mcp" and args.name in [b.name for b in agents.builtin_mcp(project.agent.name)]:
+        out({"status": "ok", "already_installed": args.name, "builtin": True,
+             "next": "This server is built into the agent: nothing to install, use its tools as they are."})
+        return 0
     if args.kind == "skill" and parse_skill_spec(args.name)[1] in project.kept()["skills"]:
         return already_kept(project, "skills", parse_skill_spec(args.name)[1])
     if (gate := vet_gate(task, args)) is not None:

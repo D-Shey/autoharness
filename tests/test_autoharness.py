@@ -3709,3 +3709,71 @@ def test_a_new_skill_keeps_facts_apart_from_procedure():
     from autoharness import library
     text = library.template("poster-scenes", "draw scenes")
     assert "## Facts found here" in text and text.count(library.FILL_MARKER) == 3
+
+
+# --- servers built into the agent: Claude in Chrome ---------------------------
+
+def install_claude_in_chrome(profile="Profile 1"):
+    from autoharness import agents
+    ext = (Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / profile / "Extensions"
+           / agents.CLAUDE_IN_CHROME_EXTENSION / "1.0.102_0")
+    ext.mkdir(parents=True)
+
+
+def test_claude_in_chrome_is_found_in_any_chrome_profile():
+    from autoharness import agents
+    assert not agents.claude_in_chrome_installed() and agents.builtin_mcp("claude") == []
+    install_claude_in_chrome()
+    assert agents.claude_in_chrome_installed()
+    assert [b.name for b in agents.builtin_mcp("claude")] == ["claude-in-chrome"]
+    assert agents.builtin_mcp("codex") == []
+
+
+def test_init_suggests_claude_in_chrome_first_for_a_browser_task(project, capsys):
+    install_claude_in_chrome()
+    code, res = cli_json(capsys, "--project", str(project.root), "init", "fill the form on the website in the browser")
+    [browser] = [s for s in res["suggested"] if s["capability"] == "browser-automation"]
+    assert browser["mcp"] == ["claude-in-chrome", "playwright"]
+
+
+def test_init_leaves_claude_in_chrome_out_without_the_extension(project, capsys):
+    code, res = cli_json(capsys, "--project", str(project.root), "init", "fill the form on the website in the browser")
+    [browser] = [s for s in res["suggested"] if s["capability"] == "browser-automation"]
+    assert browser["mcp"] == ["playwright"]
+
+
+def test_search_lists_the_builtin_server_first(project, capsys, monkeypatch):
+    install_claude_in_chrome()
+    monkeypatch.setattr(cli, "search_mcp_sources", lambda *a, **k: ([{"name": "x/playwright", "score": 90}], []))
+    cli_json(capsys, "--project", str(project.root), "init", "fill the form in the browser")
+    code, res = cli_json(capsys, "--project", str(project.root), "search", "mcp", "chrome browser")
+    assert [r["name"] for r in res["results"]] == ["claude-in-chrome", "x/playwright"]
+    assert res["results"][0]["level"] == "builtin"
+    code, res = cli_json(capsys, "--project", str(project.root), "search", "mcp", "postgres")
+    assert "claude-in-chrome" not in [r["name"] for r in res["results"]]
+
+
+BUILTIN_BRIEF = ["--goal", "the form is sent", "--inputs", "none", "--method", TEST_METHOD,
+                 "--expects", "none: the task settles every choice", "--constraints", "none",
+                 "--verify", "screenshot of the confirmation", "--gaps", "create test-checks: checks",
+                 "--domains", "the page: mcp claude-in-chrome (searched: browser); checks: create test-checks "
+                              "(searched: browser)",
+                 "--candidates", "claude-in-chrome: take, the user's own signed-in Chrome"]
+
+
+def test_a_brief_covers_the_browser_with_claude_in_chrome(project, capsys):
+    install_claude_in_chrome()
+    cli_json(capsys, "--project", str(project.root), "init", "fill the form on the website in the browser")
+    project.task().note_search("mcp", "browser", ["x/playwright"])
+    code, res = cli_json(capsys, "--project", str(project.root), "brief", *BUILTIN_BRIEF)
+    assert code == 0 and res["status"] == "ok", res
+    code, res = cli_json(capsys, "--project", str(project.root), "add", "mcp", "claude-in-chrome")
+    assert code == 0 and res["builtin"] is True
+    assert not project.mcp_path.exists()   # nothing written to .mcp.json
+
+
+def test_a_brief_cannot_name_claude_in_chrome_without_the_extension(project, capsys):
+    cli_json(capsys, "--project", str(project.root), "init", "fill the form on the website in the browser")
+    project.task().note_search("mcp", "browser", ["x/playwright"])
+    code, res = cli_json(capsys, "--project", str(project.root), "brief", *BUILTIN_BRIEF)
+    assert code != 0 and "is not among what the search" in res["error"]
