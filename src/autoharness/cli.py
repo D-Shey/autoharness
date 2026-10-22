@@ -1039,7 +1039,8 @@ def _skills_not_installed(project, task, templates: bool = True) -> list[str]:
             name = local_mcp_name(m["name"])
             stores = [project.agent.mcp_store(project.root), project.agent.user_mcp_store()]
             if not (name in task.mcp_lock() or name in project.kept()["mcp"]
-                    or any(s is not None and s.has(name) for s in stores)):
+                    or any(s is not None and s.has(name) for s in stores)
+                    or name in [b.name for b in agents.builtin_mcp(project.agent.name)]):
                 missing.append(f"area `{m['area'].strip()}` is covered by MCP server `{m['name']}`, not installed: "
                                f"`autoharness inspect mcp {m['name']}`, then `autoharness add mcp {m['name']}`, and "
                                "use it (through harness_call when it was added through the gateway); if it cannot "

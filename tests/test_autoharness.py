@@ -3770,6 +3770,8 @@ def test_a_brief_covers_the_browser_with_claude_in_chrome(project, capsys):
     code, res = cli_json(capsys, "--project", str(project.root), "add", "mcp", "claude-in-chrome")
     assert code == 0 and res["builtin"] is True
     assert not project.mcp_path.exists()   # nothing written to .mcp.json
+    # nor is the area left uncovered: the work goes ahead with it
+    assert not [m for m in cli._skills_not_installed(project, project.task()) if "claude-in-chrome" in m]
 
 
 def test_a_brief_cannot_name_claude_in_chrome_without_the_extension(project, capsys):
