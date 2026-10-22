@@ -339,6 +339,55 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
 DEFAULT_AGENT = "claude"
 
 
+# --- servers built into an agent --------------------------------------------
+# Some agents bring an MCP server of their own, in no config file autoharness writes and in no registry it
+# searches: Claude Code's Claude in Chrome drives the user's own Chrome, signed in to their sites, which a fresh
+# Playwright browser is not. Where one is there, it is the first choice for what it covers.
+
+CLAUDE_IN_CHROME_EXTENSION = "fcoeoabgfenejglbffodgkkbkcdhcgfn"
+
+
+def _chrome_user_data() -> list[Path]:
+    """Where Chrome keeps its profiles: Windows, macOS, Linux."""
+    home = Path.home()
+    return [home / "AppData" / "Local" / "Google" / "Chrome" / "User Data",
+            home / "Library" / "Application Support" / "Google" / "Chrome",
+            home / ".config" / "google-chrome"]
+
+
+def claude_in_chrome_installed() -> bool:
+    """The Claude extension is in some Chrome profile of this user (Default, Profile 1, ...)."""
+    for data in _chrome_user_data():
+        try:
+            if any((p / "Extensions" / CLAUDE_IN_CHROME_EXTENSION).is_dir() for p in data.iterdir() if p.is_dir()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+@dataclass(frozen=True)
+class BuiltinMcp:
+    name: str
+    agent: str
+    description: str
+    capabilities: tuple[str, ...]   # catalog capabilities it covers
+    installed: Callable[[], bool]
+
+
+BUILTIN_MCP = [
+    BuiltinMcp("claude-in-chrome", "claude",
+               "Claude in Chrome, built into Claude Code: drives the user's own Chrome with their sign-ins "
+               "(tools mcp__claude-in-chrome__*). Nothing to install.",
+               ("browser-automation", "browser-devtools"), claude_in_chrome_installed),
+]
+
+
+def builtin_mcp(agent: str) -> list[BuiltinMcp]:
+    """The servers built into `agent` that are there on this machine."""
+    return [b for b in BUILTIN_MCP if b.agent == agent and b.installed()]
+
+
 def sharing_skills_dir(agent: Agent, user: bool = False) -> list[Agent]:
     """Agents that read their skills from the same directory as `agent` (Codex and agy share `.agents/skills`)."""
     key = (lambda a: a.user_skills_dir) if user else (lambda a: a.skills_dir)
