@@ -532,9 +532,14 @@ class Task:
         from autoharness import library  # lazy: library imports env
         blocking, warnings = [], []
         lock = self.skills_lock()
+        kept = self.project.kept()["skills"]
         for name in self.info().get("planned_skills", []):
             skill_md = self.skills_dir / name / "SKILL.md"
-            if name not in lock:
+            if name not in lock and name in kept and skill_md.is_file():
+                # an earlier task made it and the project keeps it: `skill new` cannot make it again
+                if library.FILL_MARKER in skill_md.read_text("utf-8"):
+                    blocking.append(f"planned skill `{name}` is still an unfilled template: fill in every section")
+            elif name not in lock:
                 blocking.append(f"planned skill `{name}` was never created: run `autoharness skill new {name} "
                                 f"--description ...`, fill it in and follow it")
             elif skill_md.exists() and library.FILL_MARKER in skill_md.read_text("utf-8"):
@@ -713,12 +718,14 @@ class Task:
         from autoharness import library  # lazy: library imports env
         library.validate_name(name)
         dest = self.skills_dir / name
+        if name in self.project.kept()["skills"]:   # before `already exists`: the kept skill is that directory
+            raise HarnessError(f"skill {name!r} is already kept in this project (an earlier task made it): edit it "
+                               f"in place, {self.agent.skills_dir}/{name}/SKILL.md; it counts for this task's areas as "
+                               f"`skill {name}` in the brief")
         if dest.exists():
             raise HarnessError(f"{self.agent.skills_dir}/{name} already exists")
         if library.exists(name):
             raise HarnessError(f"skill {name!r} is already in the library; install it with `add skill local:{name}`")
-        if name in self.project.kept()["skills"]:
-            raise HarnessError(f"skill {name!r} is already kept in this project")
         dest.mkdir(parents=True)
         (dest / "SKILL.md").write_text(library.template(name, description), "utf-8")
         lock = self.skills_lock()

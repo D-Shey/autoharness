@@ -21,6 +21,7 @@ task, and once enough tasks confirmed one, teardown asks for it to be folded int
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -30,14 +31,18 @@ from autoharness.env import HarnessError, Task
 USER_MESSAGES = "user-messages.jsonl"
 MANY_ROUNDS = 4  # critic rounds from which the number of rounds is itself a lesson
 EVENTS = ("offered", "used", "kept", "removed", "smooth", "friction")
+# what the agent's harness delivers as a prompt of its own (a background command finished, a system reminder):
+# nobody typed it, so it is neither a correction nor the user's word that `teardown --accepted` waits for
+HARNESS_PROMPT = re.compile(r"\A\s*<(?:task-notification|system-reminder)\b")
 
 
 def note_user_message(task: Task, prompt: str, started_by: str | None = None) -> None:
     """Record a message the user sent while the task was active: corrections and new input are lessons.
     Appended without the project lock: the hook has seconds, and a line per message cannot clash. The prompt
     that set the task is not one (some agents send it to the hook again on every step): neither the task text
-    nor `started_by`, the prompt the session started with (the agent may have passed `init` other words)."""
-    if prompt.strip() == str(task.info().get("task", "")).strip() or (
+    nor `started_by`, the prompt the session started with (the agent may have passed `init` other words).
+    Nor is a notification the agent's harness sends as a prompt (HARNESS_PROMPT)."""
+    if HARNESS_PROMPT.match(prompt) or prompt.strip() == str(task.info().get("task", "")).strip() or (
             started_by and prompt.strip()[:len(started_by.strip())] == started_by.strip()):
         return
     with (task.dir / USER_MESSAGES).open("a", encoding="utf-8") as f:

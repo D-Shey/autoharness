@@ -29,6 +29,11 @@ The first public version.
   compares each pair. `skill new` explains how to write a skill that gets opened and followed, and
   `skill save` warns when a skill was never tested, lost its test, or its description retells the steps.
 
+- The project's journal: when a project keeps one (`JOURNAL.md`, or the `journal` setting; `off`
+  turns it off), a task is not done until it adds an entry. `autoharness journal` drafts it from the
+  task's record (goal, checks, lessons, sources) in the journal's own heading, date format and order;
+  a remark too short to be an entry does not count, and in light mode a missing one only warns.
+
 ### Tools and trust
 
 - Discovery in Anthropic's plugin marketplace, the official MCP registry and skills.sh, with trust
@@ -49,3 +54,13 @@ The first public version.
   subagent read without taking the task over.
 - Language files (`data/lang/<code>.json`): tasks are understood in English and Russian, and a
   language is added without code changes.
+
+### Fixed
+
+- A skill an earlier task kept in the project covers a later task's areas (`skill <name>` in the
+  brief); naming it in `--gaps` again is refused at once with what to do instead, and `skill new`
+  says to edit it in place. Before, the brief refused it as a cover, `skill new` refused to make it,
+  and teardown waited for it to be created, with no way out.
+- A notification the agent's harness sends as a prompt (`<task-notification>`, `<system-reminder>`)
+  is not recorded as the user's message: it no longer counts as a lesson, nor as the user's word
+  that `teardown --accepted` waits for.

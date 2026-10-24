@@ -525,6 +525,83 @@ def test_the_agent_cannot_accept_its_own_result_until_the_user_has_spoken(projec
     assert not denied(call(accepted))
 
 
+def test_a_background_task_notification_is_not_the_user_speaking(project, capsys, monkeypatch):
+    from autoharness import lessons
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    briefed(capsys, project)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    # the agent harness delivers a finished background command as a prompt of its own: nobody typed it
+    for text in ["<task-notification>\n<task-id>b7jgb6wjx</task-id>\n<status>completed</status>\n</task-notification>",
+                 "  <system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\n</system-reminder>"]:
+        hook(capsys, monkeypatch, project, {"hook_event_name": "UserPromptSubmit", "session_id": "owner-1",
+                                            "prompt": text})
+    task = project.task()
+    assert lessons.user_messages(task) == []
+    assert not any("stepped in" in line for line in lessons.friction(task))
+    res = hook(capsys, monkeypatch, project, {"hook_event_name": "PreToolUse", "session_id": "owner-1",
+                                              "tool_name": "Bash",
+                                              "tool_input": {"command": 'autoharness teardown --accepted "ok"'}})
+    assert denied(res)   # a notification cannot hand the agent the user's acceptance
+
+
+# --- the project's own journal: a human entry for what each task did ------------------------
+
+JOURNAL = ("# Журнал работ\n\nНовые записи — сверху.\n\n## 20.10.2026 — старая запись\n\nчто было\n\n"
+           "## 18.10.2026 — ещё старее\n\nчто было раньше\n")
+ENTRY = ("## 24.10.2026 — итоговая строка отчёта\n\nДобавлена строка итогов, заголовок исправлен; тесты отчёта "
+         "прошли (`verify run`, B1). Замер: 42 строки в выгрузке.\n\n")
+
+
+def test_teardown_asks_for_a_journal_entry_drafted_in_the_journals_own_style(project, capsys):
+    import time as _time
+    (project.root / "JOURNAL.md").write_text(JOURNAL, "utf-8")
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 1 and res["status"] == "incomplete"
+    assert any("JOURNAL.md" in p and "entry" in p for p in res["problems"])
+    draft = Path(res["journal_draft"]).read_text("utf-8")
+    assert draft.startswith("## " + _time.strftime("%d.%m.%Y"))       # the journal's date format, not ISO
+    assert "totals row added" in draft and OK in draft and "passed" in draft
+    assert "at the top" in " ".join(res["problems"])                    # newest first, as the journal is kept
+
+    path = project.root / "JOURNAL.md"
+    text = path.read_text("utf-8")
+    path.write_text(text.replace("## 20.10.2026", "ок\n\n## 20.10.2026", 1), "utf-8")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 1 and any("JOURNAL.md" in p for p in res["problems"])   # a word is not an entry
+    path.write_text(text.replace("## 20.10.2026", ENTRY + "## 20.10.2026", 1), "utf-8")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 0, res
+
+
+def test_the_journal_command_shows_the_draft_and_where_it_goes(project, capsys):
+    (project.root / "JOURNAL.md").write_text(JOURNAL, "utf-8")
+    briefed(capsys, project)
+    code, res = ah(capsys, project, "journal")
+    assert code == 0 and res["journal"].endswith("JOURNAL.md") and res["order"] == "newest first"
+    assert "totals row added" in res["draft"]
+
+
+def test_no_journal_or_journal_off_asks_for_nothing_and_light_mode_only_warns(project, capsys):
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 0 and not any("journal" in w.lower() for w in res.get("warnings", []))
+
+    (project.root / "JOURNAL.md").write_text(JOURNAL, "utf-8")
+    ah(capsys, project, "config", "set", "journal", "off")
+    briefed(capsys, project)
+    ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 0, res
+
+    ah(capsys, project, "config", "set", "journal", "JOURNAL.md")
+    ah(capsys, project, "init", "commit the changes", "--mode", "light")
+    code, res = ah(capsys, project, "teardown")
+    assert code == 0 and any("JOURNAL.md" in w for w in res["warnings"])
+
+
 def test_a_smooth_task_has_no_lessons_and_tears_down_at_once(project, capsys):
     briefed(capsys, project)
     ah(capsys, project, "verify", "run", OK, "--for", "B1")

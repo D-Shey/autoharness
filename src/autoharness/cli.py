@@ -19,8 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 from pathlib import Path
 
-from autoharness import (__version__, agents, answers, approvals, config, egress, evidence, followups, history, lessons,
-                         library, recipes, registry, reviewers, rulings, runs, skilltests, text, vet)
+from autoharness import (__version__, agents, answers, approvals, config, egress, evidence, followups, history, journal,
+                         lessons, library, recipes, registry, reviewers, rulings, runs, skilltests, text, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (GATEWAY_NAME, ContentChanged, HarnessError, Project, SkillRejected, Task,
                              missing_tools, npx_stage_skill, parse_skill_spec, skill_dir)
@@ -296,6 +296,7 @@ def cmd_init(args, project, catalog):
     check_owner(project, project.active_id())
     task = project.init_task(args.task, mode=mode)
     task._update_info(requested=requested)
+    journal.snapshot(task)
     if mode == "light" and visual:
         task._update_info(light_reason=light_reason)
         task.log(f"light mode although the task mentions {', '.join(visual)}: {light_reason}")
@@ -893,10 +894,11 @@ DOMAIN = re.compile(r"^(?P<area>[^:]+):\s*(?P<how>skill|mcp|create)\s+(?P<name>[
 MIN_DOMAINS = 2
 
 
-def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict], builtin=()) -> str:
+def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict], builtin=(),
+                   kept=()) -> str:
     """The brief's areas of know-how, each covered by a skill or a server found by a search of this task (or built
-    into the agent), or by a skill this task creates. Raises when an area is covered by nothing, or its search was
-    never run."""
+    into the agent, or a skill an earlier task kept in the project), or by a skill this task creates. Raises when an
+    area is covered by nothing, or its search was never run."""
     usage = ("--domains splits the task into the areas of know-how it takes, the way an engineer splits building "
              "a machine into its disciplines, and says how each is covered: `<area>: skill <name> (searched: "
              "<query>); <area>: mcp <name> (searched: <query>); <area>: create <skill-name> (searched: <query>)`. "
@@ -924,11 +926,12 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
             raise HarnessError(f"area `{m['area'].strip()}` creates `{name}`: name it in --gaps too "
                                f"(`create {name}: <capability>`)")
         found = next((s.get("results", []) for s in searches if s["query"].strip().lower() == query), [])
-        real = how == "skill" and library.exists(name) or how == "mcp" and name in builtin or any(
+        real = how == "skill" and (library.exists(name) or name in kept) or how == "mcp" and name in builtin or any(
             r.lower() == name.lower() or re.search(rf"[@/]{re.escape(name.lower())}$", r.lower()) for r in found)
         if how in ("skill", "mcp") and not real:
             raise HarnessError(f"area `{m['area'].strip()}`: `{name}` is not among what the search `{query}` found"
-                               + (" nor a skill in your library" if how == "skill" else "") + ": name a "
+                               + (" nor a skill in your library or kept in this project" if how == "skill" else "")
+                               + ": name a "
                                f"{how} that search returned (" + (", ".join(found) or "it found nothing") + "), "
                                "or create the skill (`create <skill-name>`)")
         if how in ("skill", "mcp") and not re.search(rf"{re.escape(name)}\s*:\s*take\b", candidates, re.IGNORECASE):
@@ -1094,11 +1097,18 @@ def cmd_brief(args, project, catalog):
     if not planned and not args.gaps.strip().lower().startswith("none"):
         raise HarnessError("--gaps must name each skill you will create (`create <skill-name>: <capability>`) "
                            "or start with `none:` and say why the tools at hand cover every capability")
+    kept = project.kept()["skills"]
     for name in planned:
         library.validate_name(name)
+        if name in kept:
+            # `skill new` refuses a kept name and teardown would wait for it forever: say so before the work starts
+            raise HarnessError(f"skill `{name}` is already kept in this project (an earlier task made it): do not "
+                               f"create it again. Cover its areas with `<area>: skill {name} (searched: <query>)`, "
+                               f"name it in --candidates as `{name}: take, <why>`, drop it from --gaps, and edit "
+                               f"{project.agent.skills_dir}/{name}/SKILL.md in place with what this task teaches")
     _check_constraints(args.constraints, task)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []),
-                             [b.name for b in agents.builtin_mcp(project.agent.name)])
+                             [b.name for b in agents.builtin_mcp(project.agent.name)], kept)
     live = [c.name for c, _ in catalog.classify(task.about()) if c.interactive]
     if live and not any((m := DOMAIN.match(e.strip())) and m["how"].lower() == "mcp" for e in domains.split(";")):
         raise HarnessError(
@@ -1453,11 +1463,17 @@ def cmd_teardown(args, project, catalog):
         blocking += [p for p in _skills_not_installed(project, task) if p not in blocking]
         blocking += _mcp_not_used(project, task)
     blocking += runs.problems(task)
+    draft = None
+    if missing := journal.problem(task):
+        # a chore is not held up for an entry; anything that took preparation is
+        (warnings if info.get("mode") == "light" else blocking).append(missing[0])
+        draft = missing[1]
     if args.accepted:
         task._update_info(accepted_by_user=args.accepted)
         task.log(f"user accepted the result as it is: {args.accepted}")
     if blocking and not (args.force or args.accepted):
-        out({"status": "incomplete", "task_id": task.id, "problems": blocking,
+        out({"status": "incomplete", "task_id": task.id, "problems": blocking}
+            | ({"journal_draft": draft} if draft else {}) | {
              "next": "Fix these, then tear down again. If the user, asked in this task, decides the result is "
                      "good enough as it is, run `autoharness teardown --accepted \"<their words>\"`; never on "
                      "your own judgment (with the hook installed it is refused until the user has spoken)."})
@@ -2727,6 +2743,22 @@ def cmd_followup(args, project, catalog):
     return 0
 
 
+def cmd_journal(args, project, catalog):
+    task = project.task()
+    if (p := journal.path(project.root)) is None:
+        out({"status": "ok", "journal": None,
+             "next": f"This project keeps no journal ({journal.DEFAULT}, or `autoharness config set journal <path>`); "
+                     "nothing to add."})
+        return 0
+    draft, form = journal.draft(task)
+    out({"status": "ok", "journal": str(p), "order": form["order"], "draft_file": str(draft),
+         "draft": draft.read_text("utf-8"),
+         "next": "Finish the draft with what autoharness cannot know (values measured, where things live, backups, "
+                 "what is left), in the journal's language, and add it to the journal "
+                 + ("at the top, under its header." if form["order"] == "newest first" else "at the bottom.")})
+    return 0
+
+
 RIPE_NEXT = (f"`ripe_insights` were confirmed by {lessons.RIPE} or more tasks: fold each into the skill it belongs "
              "to (or a new one), then `autoharness lesson fold <id> --skill <name>`. ")
 
@@ -2923,6 +2955,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("value", nargs="?", help="add: what is left to do and where; done: its number")
     s.add_argument("--note", help="done: what settled it")
     s.add_argument("--all", action="store_true", help="list: include done items")
+    sub.add_parser("journal", help="draft this task's entry for the project's journal (JOURNAL.md or the `journal` "
+                                   "setting), in the journal's own form")
     s = sub.add_parser("lesson", help="small conclusions kept across tasks, each with how many tasks confirmed it: "
                                       "add, list, fold (into a skill)")
     s.add_argument("action", choices=["add", "list", "fold"])
@@ -3109,7 +3143,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_eval, "decision": cmd_decision, "followup": cmd_followup, "lesson": cmd_lesson, "ruling": cmd_ruling, "audit": cmd_audit, "verify": cmd_verify, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
+COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_eval, "decision": cmd_decision, "followup": cmd_followup, "journal": cmd_journal, "lesson": cmd_lesson, "ruling": cmd_ruling, "audit": cmd_audit, "verify": cmd_verify, "need": cmd_need, "search": cmd_search, "inspect": cmd_inspect, "vet": cmd_vet,
             "add": cmd_add, "remove": cmd_remove, "prune": cmd_prune, "status": cmd_status,
             "teardown": cmd_teardown, "config": cmd_config, "skill": cmd_skill, "gateway": cmd_gateway,
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
