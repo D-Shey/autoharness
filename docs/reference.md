@@ -38,8 +38,9 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `skill new\|test\|save\|list\|delete` | the agent's own skills and the local library; `test` has fresh agents do 1-3 tasks with and without the skill and a blind judge compare |
 | `recipe list\|match\|show` | saved setups; `show` reruns the recipe's queries and returns what is new in `fresh` |
 | `lesson add` | a short conclusion from a task's friction; one confirmed by three tasks moves into a skill |
+| `journal` | the draft of this task's entry in the project's journal, and where it goes |
 | `ruling add` | a review point the user rejected, so later critics in the project do not raise it again |
-| `config get\|set [teardown keep\|remove \| allowed_hosts "<hosts>" \| min_mode any\|full\|reviewed] [--global]` | settings |
+| `config get\|set [teardown keep\|remove \| allowed_hosts "<hosts>" \| min_mode any\|full\|reviewed \| journal "<path>"\|off] [--global]` | settings |
 | `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart; `--user` puts it into the agent's own config (agy, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
 | `agents` | the supported agents and their paths |

@@ -1658,6 +1658,44 @@ def test_teardown_refuses_while_a_planned_skill_is_missing_or_unfilled(project, 
     assert code == 0 and any("not in the library" in w for w in res["warnings"])
 
 
+def test_a_skill_an_earlier_task_kept_covers_an_area_and_is_not_created_again(project, capsys):
+    root = str(project.root)
+    first = project.init_task("t1")
+    first.new_skill("pptx-qa", "Check .pptx slides visually")
+    (project.skills_dir / "pptx-qa" / "SKILL.md").write_text(FILLED, "utf-8")
+    first.teardown("keep")
+    assert "pptx-qa" in project.kept()["skills"] and not library.exists("pptx-qa")
+
+    cli_json(capsys, "--project", root, "init", "prepare the quarterly report")
+    project.task().note_search("skill", "slides qa", [])
+    def with_(domains, candidates, gaps):
+        swap = {TEST_DOMAINS: domains, "image-art: skip, it is a generator": candidates,
+                "none: a browser and the shell cover every capability": gaps}
+        return cli_json(capsys, "--project", root, "brief", *[swap.get(a, a) for a in BRIEF])
+
+    code, res = with_("slides: create pptx-qa (searched: slides qa); checks: create pptx-qa (searched: slides qa)",
+                      "nothing else fits", "create pptx-qa: slide checks")
+    assert code == 1 and "already kept in this project" in res["error"] and "skill pptx-qa" in res["error"]
+    code, res = with_("slides: skill pptx-qa (searched: slides qa); checks: skill pptx-qa (searched: slides qa)",
+                      "pptx-qa: take, made for these slides", "none: the kept skill covers it")
+    assert code == 0, res
+    code, res = cli_json(capsys, "--project", root, "teardown")
+    assert code == 0 and not any("never created" in p for p in res.get("problems", []))
+
+
+def test_a_planned_skill_that_is_kept_in_the_project_does_not_block_teardown(project):
+    first = project.init_task("t1")
+    first.new_skill("pptx-qa", "d")
+    (project.skills_dir / "pptx-qa" / "SKILL.md").write_text(FILLED, "utf-8")
+    first.teardown("keep")
+    task = project.init_task("t2")
+    task._update_info(planned_skills=["pptx-qa"])   # a brief recorded before kept skills could cover an area
+    blocking, _ = task.planned_skill_problems()
+    assert blocking == []
+    with pytest.raises(HarnessError, match="edit it in place"):
+        task.new_skill("pptx-qa", "d")
+
+
 def test_teardown_force_drops_a_planned_skill_with_a_warning(project, capsys):
     root = str(project.root)
     start_task(capsys, project, "create poster-review: visual-review")

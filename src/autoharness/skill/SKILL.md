@@ -254,6 +254,9 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    `local` skill or recipe in `init` may carry a `record` of earlier tasks; heed its `note`.
 3. **End**: `autoharness teardown`, or `--save-recipe <name> --notes "<what it was good for>"`
    (`--query "skill|mcp:<query>"` to re-run a search next time) when the setup was useful. Pass `--keep`/`--remove` only when the user asked.
+   If the project keeps a journal (`JOURNAL.md`, or the `journal` setting), teardown waits for this
+   task's entry: `autoharness journal` shows a draft from the task's record in the journal's own
+   form; add what was measured, where things live and what is left, put it where it says, tear down again.
 4. **Tell the user** what was installed, kept and removed, any part ruled out of reach, any
    teardown warning (skipped discovery or brief), follow-ups left for later, and what is left for
    them (env vars, restart). Report what was checked as teardown's `checked` says, without
