@@ -1885,11 +1885,14 @@ def handoff(task: Task, session_id: str) -> str:
     log = [line for line in (task.dir / "harness.md").read_text("utf-8").splitlines() if line.startswith("- ")]
     stale = (f" Nothing happened in it for {idle:.0f} hours: it looks abandoned." if idle >= STALE_HOURS else
              f" It last changed {idle * 60:.0f} minutes ago, so the other session may still be working on it.")
+    held = ("It does not hold this session's tools: go on with the user's request. This session may still "
+            "neither start nor tear down a task while that one is active." if idle >= STALE_HOURS else
+            "Tools that do work stay blocked for this session, and it may neither start nor tear down a task while "
+            "that one is active.")
     return (f"autoharness: task {task.id} is active in this project and belongs to another agent session "
             f"({info.get('owner')}): \"{info.get('task', '')[:300]}\" (mode {info.get('mode', 'full')}"
             f"{', brief recorded' if info.get('brief') else ', no brief yet'}).{stale} Last steps: "
-            + (" | ".join(log[-3:]) or "none") + ". Tools that do work stay blocked for this session, and it may "
-            "neither start nor tear down a task while that one is active. Tell the user. If they want this session "
+            + (" | ".join(log[-3:]) or "none") + f". {held} Tell the user. If they want this session "
             f"to carry that task on (or its session is gone), run `autoharness claim {session_id} --reason "
             "\"<their words>\"` and continue from `autoharness status`.")
 
@@ -2365,10 +2368,13 @@ def cmd_hook(args, project, catalog):
         owner = task_info.get("owner")
         # the task belongs to another session: this one is told about it and stays gated until it claims it
         foreign = bool(active and sid and owner and owner != sid and task_info.get("status") == "active")
+        # a task its owner left alone that long no longer holds other sessions' tools, only its own commands
+        abandoned = foreign and idle_hours(Task(project, active)) >= STALE_HOURS
         if active and sid and state != "waived":
             ready = task_info.get("mode") == "light" or bool(task_info.get("brief"))
-            wanted = "pending" if foreign or not ready else "done"
-            via = ("other session" if foreign else "light" if task_info.get("mode") == "light" else
+            wanted = "free" if abandoned else "pending" if foreign or not ready else "done"
+            via = ("abandoned" if abandoned else "other session" if foreign else
+                   "light" if task_info.get("mode") == "light" else
                    "brief" if ready else "waiting")
             if state != wanted or saved_state.get("task_id") != active or saved_state.get("via", via) != via:
                 set_session_state(sid, state=wanted, task_id=active, via=via, told=saved_state.get("told"),
