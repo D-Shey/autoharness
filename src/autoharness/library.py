@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from autoharness import text
+from autoharness import text, vague
 from autoharness.env import RUNTIME_JUNK, HarnessError, _hash_dir
 from autoharness.recipes import home
 from autoharness.trust import TrustReport, scan_skill
@@ -251,6 +251,9 @@ def craft(description: str, skill_md: str) -> list[str]:
         found.append("the skill has the agent write a file or saved state but does not say how: say to write it "
                      "atomically (a temp file in the same directory, then os.replace), or a crash can leave it "
                      "half-written (R1)")
+    if loose := vague.vague_steps(skill_md):
+        found.append(f"{len(loose)} step(s) lean on vague words and name nothing concrete (a file, a command, a "
+                     f"number), e.g. \"{loose[0][:80]}\": say what exactly to do")
     return found
 
 
