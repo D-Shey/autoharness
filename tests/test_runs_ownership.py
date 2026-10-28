@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1187,4 +1188,75 @@ def test_a_command_without_agent_keeps_the_tasks_agent_session(project, capsys, 
     assert cli.main(["--agent", "agy", "--project", str(project.root), "init", "fix the quarterly report"]) == 0
     capsys.readouterr()
     code, res = ah(capsys, project, *BRIEF)   # no --agent: still the task's agy session, not refused
+    assert code == 0, res
+
+
+# --- the user's latest message sets the next task, and the agent's own skills count -----------------------
+
+def say(capsys, monkeypatch, project, text, sid="owner-1"):
+    return hook(capsys, monkeypatch, project, {"hook_event_name": "UserPromptSubmit", "session_id": sid,
+                                               "prompt": text})
+
+
+@pytest.mark.parametrize("end", ["teardown", "waive"])
+def test_init_reads_the_latest_message_not_the_one_an_earlier_task_started_with(project, capsys, monkeypatch, end):
+    say(capsys, monkeypatch, project, "debug the failing tests of the quarterly report")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    briefed(capsys, project)
+    if end == "waive":
+        ah(capsys, project, "waive", "owner-1", "--reason", "skip it")
+    say(capsys, monkeypatch, project, "fine, take it as it is")   # the hook sees the briefed task: state done
+    ah(capsys, project, "teardown", "--accepted", "fine, take it as it is")
+    say(capsys, monkeypatch, project, "fix the typo in the readme")
+    code, res = ah(capsys, project, "init", "fix the typo in the readme", "--mode", "light")
+    assert code == 0 and res["mode"] == "light" and "mode_raised" not in res, res
+    assert project.task().info().get("prompt") == "fix the typo in the readme"
+
+
+def test_a_message_during_a_task_does_not_become_its_starting_prompt(project, capsys, monkeypatch):
+    say(capsys, monkeypatch, project, "fix the quarterly report")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    briefed(capsys, project)
+    say(capsys, monkeypatch, project, "also open it in a browser")
+    assert cli.session_state("owner-1")["prompt"] == "fix the quarterly report"
+
+
+def test_the_raise_to_full_names_the_words_and_where_they_came_from(project, capsys, monkeypatch):
+    say(capsys, monkeypatch, project, "look at the pull request on github")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    code, res = ah(capsys, project, "init", "check the form in a browser", "--mode", "light")
+    raised = res["mode_raised"]
+    assert code == 0 and res["mode"] == "full", res
+    assert re.search(r'"browser"[^()]* in the task text', raised), raised
+    assert re.search(r'"github"[^()]* in the user\'s message', raised), raised
+    assert not re.search(r'"github"[^()]* in the task text', raised), raised
+
+
+def test_a_skill_the_agent_already_has_covers_an_area(project):
+    user_skill = Path.home() / ".claude" / "skills" / "my-commits" / "SKILL.md"
+    user_skill.parent.mkdir(parents=True)
+    user_skill.write_text("---\nname: my-commits\ndescription: commits\n---\n", "utf-8")
+    plugin_skill = Path.home() / ".claude" / "plugins" / "cache" / "x" / "skills" / "deep-debug" / "SKILL.md"
+    plugin_skill.parent.mkdir(parents=True)
+    plugin_skill.write_text("---\nname: deep-debug\ndescription: debug\n---\n", "utf-8")
+    searches = [{"query": "git", "results": []}, {"query": "debug", "results": []}]
+    text = "commits: skill my-commits (searched: git); debugging: skill deep-debug (searched: debug)"
+    candidates = "my-commits: take, mine; deep-debug: take, a plugin's"
+    with pytest.raises(cli.HarnessError, match="my-commits"):
+        cli._check_domains(text, [], candidates, searches, (), ())
+    assert cli._check_domains(text, [], candidates, searches, (), (), ["my-commits", "deep-debug"]) == text
+
+
+def test_brief_takes_the_users_own_skill_as_an_areas_cover(project, capsys):
+    user_skill = Path.home() / ".claude" / "skills" / "my-commits" / "SKILL.md"
+    user_skill.parent.mkdir(parents=True)
+    user_skill.write_text("---\nname: my-commits\ndescription: commits\n---\n", "utf-8")
+    ah(capsys, project, "init", "fix the quarterly report")
+    project.task()._update_info(searches=[{"kind": "skill", "query": "git", "results": []}])
+    argv = list(BRIEF)
+    argv[argv.index("--domains") + 1] = ("commits: skill my-commits (searched: git); "
+                                         "layout: create test-layout (searched: git)")
+    argv[argv.index("--candidates") + 1] = "my-commits: take, the user's own"
+    argv[argv.index("--gaps") + 1] = "create test-layout: layout"
+    code, res = ah(capsys, project, *argv)
     assert code == 0, res
