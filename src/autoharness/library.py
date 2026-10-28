@@ -126,6 +126,111 @@ def check(src: Path) -> CheckResult:
 MAX_LINES = 500
 RETOLD_STEPS = re.compile(r"\bthen\b|->|→|\bstep \d", re.IGNORECASE)
 SHOUTING = re.compile(r"\b(?:MUST|NEVER|ALWAYS|CRITICAL|IMPORTANT)\b")
+# a skill that has the agent change a file a later run reads, with no word on how: written in place, a crash
+# leaves it half-written or empty (R1 of evidence.CODE_CHECKS). Judged sentence by sentence: one that names a
+# data file (or saved state) and tells the agent to change it. Not a script or page the agent produces, not a
+# file the sentence leaves alone or hands to the user, not what a tool does ("it updates the lock file").
+# R7: the name is bounded and starts at a name boundary, so a long run of word characters stays linear
+DATA_FILE = re.compile(r"(?<![\w./~-])[\w./~-]{0,200}?[\w-]\.(?:json|jsonl|ya?ml|toml|db|sqlite3?|csv|ini|lock|pickle|pkl)\b"
+                       r"(?![`'\"]?\s+(?:unchanged|untouched|as\s+is|for\s+the\s+user))", re.IGNORECASE)
+SAVED_STATE = re.compile(r"\b(?:state|cache|index|progress|settings|results?|history|checkpoint)\s+files?\b|"
+                         r"\b(?:sav(?:e|ing)|persist(?:ing)?|stor(?:e|ing)|writ(?:e|ing)|record(?:ing)?|keep(?:ing)?)\s+"
+                         r"(?:the\s+|its\s+|their\s+|your\s+)?(?:[\w-]+\s+)?state\b(?!\s+(?:of|machine))|"
+                         r"\bto\s+disk\b|\b(?:next|later|following)\s+(?:run|session)\b|\bbetween\s+(?:runs|sessions)\b|"
+                         r"состояни|кэш|прогресс", re.IGNORECASE)
+# a change the sentence asks for: the verb's base or "-ing" form anywhere in it, so "you must write", "please
+# save" and "make sure to update" count; English imperatives drop the subject and are negated with "don't"
+# (https://en.wikipedia.org/wiki/Imperative_mood), while "it updates" or "the CLI stores" describe someone else
+CHANGE = re.compile(r"(?<![\w.-])(?P<verb>"
+                    r"write|writing|overwrite|overwriting|rewrite|rewriting|save|saving|store|storing|persist|"
+                    r"persisting|dump|update|updating|append|appending|edit|editing|modify|change|"
+                    r"add|insert|log|track|put|mark|record|set|increment|bump|keep|serialize|serialise|"
+                    r"запис\w*|запиш\w*|перезапи\w*|пиши|сохран\w*|обнов\w*|добав\w*|измени\w*|отмет\w*|"
+                    r"внес\w*|внос\w*|полож\w*)(?![\w-]|\.\w)", re.IGNORECASE)
+# a negation reaches right only to the end of its clause: "the scope of a trigger term extends to the right of the
+# trigger term and ends at a termination term" (ConText, https://pmc.ncbi.nlm.nih.gov/articles/PMC2757457/), so
+# "if the user does not answer, save the state" still asks for the write; "don't forget to write" is no negation
+NEG_TRIGGER = re.compile(r"\b(?:do\s+not|does\s+not|don't|doesn't|never|not|no|без|не|нельзя)\b(?!\s+(?:forget|забы|забуд))",
+                         re.IGNORECASE)
+CLAUSE_END = re.compile(r"[,:;()]|\s[-–—]\s|\b(?:then|and|but|so|after|before|once|потом|затем|и|но|после)\b",
+                        re.IGNORECASE)
+# the verb used as a noun ("at write time", "the change log", "a record") or as a plan ("about to change")
+NOUN_USE = re.compile(r"\b(?:at|on|per|each|every|the|a|an|this|that|its|their|your|about\s+to|going\s+to)\s+$", re.IGNORECASE)
+# what gets written is code or a page that uses the data file, not the file: "write a test (a script) that parses
+# settings.json"
+CODE_OBJECT = re.compile(r"\s+(?:(?:a|an|the|new|small|unit|more|python|bash|shell|node|js|helper)\s+){0,3}"
+                         r"(?:tests?|scripts?|modules?|functions?|class(?:es)?|programs?|parsers?|pages?|components?|"
+                         r"code|tools?|helpers?|cli)\b", re.IGNORECASE)
+# a project's own manifests are edited by hand or by an editor tool, not kept as state between runs
+MANIFESTS = {"package.json", "package-lock.json", "tsconfig.json", "jsconfig.json", "vercel.json", "plugin.json",
+             "manifest.json", "pyproject.toml", "cargo.toml", "cargo.lock", "composer.json", "poetry.lock",
+             "uv.lock", "yarn.lock", "pnpm-lock.yaml", ".mcp.json", "mcp.json", "app.json", "deno.json"}
+SENTENCE = re.compile(r"(?<=[.!?;])\s+|\n")
+# a way of writing, said of a write; it covers the writes of its own paragraph, and the whole skill only when
+# what it says is written that way is state or files ("state files are written atomically"): "write the report
+# atomically" says nothing about queue.json elsewhere
+ATOMIC_WRITE = re.compile(r"\b(?:writ|sav|stor|persist)\w*\b[^.\n]{0,60}\batomically\b|"
+                          r"\batomic(?:ally)?\s+(?:write|replace|rename|save|swap)|атомарн", re.IGNORECASE)
+ATOMIC_BLANKET = re.compile(r"\b(?:state|data|json|cache|all|every|each|any)\b[^.\n]{0,30}\bfiles?\b[^.\n]{0,40}"
+                            r"\batomic|\batomic\w*\b[^.\n]{0,40}\b(?:state|data|every|all)\b[^.\n]{0,20}\bfiles?\b|"
+                            r"\b(?:state|data)\s+(?:is|are)\s+(?:always\s+)?(?:written|saved|stored)\s+atomically|"
+                            r"(?:все|любые)\s+файлы[^.\n]{0,40}атомарн", re.IGNORECASE)
+TEMP_FILE = re.compile(r"temp(?:orary)?\s+file|tempfile|временн\w*\s+файл", re.IGNORECASE)
+MOVED_OVER = re.compile(r"os\.replace|\b(?:rename|move|mv|replace)\w*\b|переимен\w*|замени\w*", re.IGNORECASE)
+# read, then write back: the in-place update R1 is about, whatever the file is called
+READ_THEN_WRITE = re.compile(r"\bread\w*\b[^\n]{0,60}\b(?:then|and)\s+(?:write|save|update|overwrite)\w*\s+(?:it|the\s+"
+                             r"file)\s+back\b|\bread\w*\b[^\n]{0,60}\bthen\s+(?:write|save|update|overwrite)\b|"
+                             r"\bчита\w*\b[^\n]{0,60}\b(?:потом|затем)\s+(?:пиш|запис|сохран)", re.IGNORECASE)
+
+
+def _negated(before: str) -> bool:
+    """Whether a negation stands in the verb's own clause, before it."""
+    return bool(NEG_TRIGGER.search(CLAUSE_END.split(before)[-1]))
+
+
+def _asks_change(sentence: str, data) -> bool:
+    for verb in CHANGE.finditer(sentence):
+        word, before = verb["verb"].lower(), sentence[:verb.start()]
+        if CODE_OBJECT.match(sentence, verb.end()) or _negated(before) or NOUN_USE.search(before):
+            continue
+        # "keep the session alive", "keep x.json lean": keep writes only into a file ("keep it in state.json")
+        if word.startswith("keep") and not (data and re.search(r"\bin\s+[`'\"]?" + re.escape(data.group(0)), sentence)):
+            continue
+        return True
+    return False
+
+
+def _covered(sentence: str, near: list[str], data) -> bool:
+    """A way of writing named beside this write: in the sentence itself, or in its paragraph as an atomic write,
+    a temp file renamed over, or a rename over this very file."""
+    if ATOMIC_WRITE.search(sentence) or TEMP_FILE.search(sentence) or "os.replace" in sentence:
+        return True
+    for other in near:
+        if ATOMIC_WRITE.search(other) or (TEMP_FILE.search(other) and MOVED_OVER.search(other)):
+            return True
+        if data and data.group(0) in other and MOVED_OVER.search(other):
+            return True
+    return False
+
+
+def writes_saved_state(skill_md: str) -> bool:
+    """Whether the skill tells the agent to change a file a later run reads without saying how to write it."""
+    body = re.sub(r"\A---\n.*?\n---\n", "", skill_md, flags=re.S)  # the frontmatter describes
+    if ATOMIC_BLANKET.search(body):
+        return False
+    for paragraph in re.split(r"\n\s*\n", body):
+        sentences = [s.strip() for s in SENTENCE.split(paragraph) if s.strip()]
+        for sentence in sentences:
+            if sentence.startswith("#"):  # a heading names a topic ("## queue.json update")
+                continue
+            data = next((m for m in DATA_FILE.finditer(sentence)  # not a manifest, not a URL
+                         if m.group(0).rsplit("/", 1)[-1].lower() not in MANIFESTS and sentence[m.start() - 1:m.start()] != ":"),
+                        None)
+            asked = (READ_THEN_WRITE.search(sentence) or re.search(r"\bjson\.dump\b", sentence)
+                     or ((data or SAVED_STATE.search(sentence)) and _asks_change(sentence, data)))
+            if asked and not _covered(sentence, sentences, data):
+                return True
+    return False
 
 
 def craft(description: str, skill_md: str) -> list[str]:
@@ -142,6 +247,10 @@ def craft(description: str, skill_md: str) -> list[str]:
     if len(SHOUTING.findall(skill_md)) >= 5:
         found.append("many MUST/NEVER/ALWAYS: say why a step matters, so an agent can handle the case the skill "
                      "did not foresee")
+    if writes_saved_state(skill_md):
+        found.append("the skill has the agent write a file or saved state but does not say how: say to write it "
+                     "atomically (a temp file in the same directory, then os.replace), or a crash can leave it "
+                     "half-written (R1)")
     return found
 
 

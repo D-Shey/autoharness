@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from autoharness import answers, cli, reviewers, runs
+from autoharness import answers, cli, evidence, library, reviewers, runs
 from conftest import TEST_DOMAINS, TEST_METHOD
 from autoharness.env import Project
 
@@ -833,6 +833,219 @@ def test_settled_points_and_the_users_rulings_reach_later_critics(project, capsy
     assert res["ruling"]["replaces"] == [2]                           # the same point ruled again
     code, res = ah(capsys, project, "ruling", "remove", "3")
     assert code == 0 and ah(capsys, project, "ruling", "list")[1]["rulings"][0]["by"] == "critic"
+
+
+# --- what reviewers are told: claimed checks, and the reliability list for code -----------
+
+RELIABILITY = [f"- R{i} " for i in range(1, 9)]
+
+
+def test_a_code_diff_brings_the_reliability_checklist_to_every_review(project, capsys):
+    briefed(capsys, project, "--review", "pair")
+    (project.root / "store.py").write_text("open('state.json', 'w').write('{}')\n", "utf-8")
+    code, res = ah(capsys, project, "evidence", "diff")
+    hint = res["next"]
+    assert code == 0 and all(r in hint for r in RELIABILITY) and "minimal mechanism" in hint
+    assert "did not run is said as not run" in hint
+    code, res = ah(capsys, project, "critic")
+    for prompt in (res["prompt"], res["quality"]["prompt"]):
+        assert all(r in prompt for r in RELIABILITY) and "hardening on top of the contract" in prompt
+        assert "presented as checked when it was not" in prompt
+
+
+def test_a_diff_without_code_gets_no_reliability_checklist(project, capsys, tmp_path):
+    briefed(capsys, project, "--review", "pair")
+    (project.root / "README.md").write_text("# Notes\n", "utf-8")
+    (project.root / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    code, res = ah(capsys, project, "evidence", "diff")
+    assert code == 0 and "- R1 " not in res["next"] and "did not run is said as not run" in res["next"]
+    code, res = ah(capsys, project, "critic")
+    for prompt in (res["prompt"], res["quality"]["prompt"]):
+        assert not any(r in prompt for r in RELIABILITY)
+        assert "presented as checked when it was not" in prompt   # claims are judged in any task
+    # an image result after an earlier code diff is not code either: the list follows the latest whole result
+    (project.root / "store.py").write_text("x = 1\n", "utf-8")
+    ah(capsys, project, "evidence", "diff")
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+    code, res = ah(capsys, project, "evidence", "add", str(shot), "--kind", "result")
+    assert code == 0 and "- R1 " not in res["next"]
+
+
+@pytest.mark.parametrize("name", ["ф.py", "Makefile", "app.vue"], ids=["quoted-path", "no-suffix", "vue"])
+def test_code_is_found_in_quoted_and_suffixless_paths(project, capsys, name):
+    git = lambda *a: subprocess.run(["git", *a], cwd=project.root, check=True, capture_output=True)  # noqa: E731
+    git("config", "core.quotePath", "true")   # git's default: "a/\321\204.py" in the diff header
+    (project.root / name).write_text("x = 1\n", "utf-8")
+    git("add", name)
+    git("commit", "-qm", "add")
+    briefed(capsys, project)
+    (project.root / name).write_text("x = 2\n", "utf-8")
+    code, res = ah(capsys, project, "evidence", "diff")
+    assert code == 0 and "- R1 " in res["next"]
+
+
+def test_a_lost_diff_file_keeps_the_checklist(project, capsys):
+    briefed(capsys, project)
+    (project.root / "README.md").write_text("# Notes\n", "utf-8")
+    ah(capsys, project, "evidence", "diff")
+    task = project.task()
+    Path(evidence.latest(task, "result")["file"]).unlink()
+    # unknown is neither "code" nor "no code": the reviewer is told so, and no checklist is added to a text task
+    assert evidence.code_changed(task) is None
+    hint = evidence.self_review_hint(task)
+    assert "could not be read" in hint and "- R1 " not in hint
+
+
+def test_code_is_read_from_file_headers_not_hunks():
+    patch = (b"diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n@@ -1,2 +1 @@\n"
+             b"--- a/x.py\n+++ b/y.py\n")      # a Markdown doc quoting a diff: its lines are content
+    assert evidence.diff_paths(patch) == ["notes.md", "notes.md", "notes.md"]
+
+
+def test_a_code_task_matched_to_an_image_still_gets_the_checklist(project, capsys, tmp_path):
+    briefed(capsys, project)
+    shot = tmp_path / "screen.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+    ah(capsys, project, "evidence", "add", str(shot), "--kind", "reference")
+    (project.root / "page.tsx").write_text("export const P = () => null\n", "utf-8")
+    code, res = ah(capsys, project, "evidence", "diff")
+    assert "did not run is said as not run" in res["next"] and "- R1 " in res["next"]   # the first result too
+    code, res = ah(capsys, project, "critic")
+    assert code == 0 and "- R1 " in res["prompt"]
+
+
+def test_a_code_file_added_as_the_result_gets_the_checklist(project, capsys, tmp_path):
+    briefed(capsys, project)
+    (tmp_path / "draft.md").write_text("# a\n", "utf-8")
+    ah(capsys, project, "evidence", "add", str(tmp_path / "draft.md"), "--kind", "result")
+    script = tmp_path / "tool.py"
+    script.write_text("print(1)\n", "utf-8")
+    code, res = ah(capsys, project, "evidence", "add", str(script), "--kind", "result")
+    assert code == 0 and "- R1 " in res["next"]
+
+
+def test_a_rename_from_code_counts_as_code(project, capsys):
+    git = lambda *a: subprocess.run(["git", *a], cwd=project.root, check=True, capture_output=True)  # noqa: E731
+    briefed(capsys, project)
+    git("mv", "a.py", "a.md")
+    code, res = ah(capsys, project, "evidence", "diff")
+    assert code == 0 and "- R1 " in res["next"]
+
+
+def test_a_self_review_of_code_that_names_no_check_is_warned(project, capsys):
+    briefed(capsys, project)
+    (project.root / "a.py").write_text("x = 2\n", "utf-8")
+    ah(capsys, project, "evidence", "diff")
+    code, res = ah(capsys, project, "review", "--by", "self", "--diff", "1 looks fine", "--worst", "none")
+    assert code == 0 and any("names no item of the reliability list" in w for w in res["review"]["warnings"])
+    code, res = ah(capsys, project, "review", "--by", "self", "--diff", "1 R1 n/a: no file writes", "--worst", "none")
+    assert not any("reliability list" in w for w in res["review"].get("warnings", []))
+
+
+@pytest.mark.parametrize("skill, warned", [
+    ("Read the state, then write the file back.\n", True),
+    ("Save the config to config.json when done.\n", True),
+    ("Сначала читай, потом пиши файл.\n", True),
+    ("Write the file atomically: a temp file, then os.replace.\n", False),
+    ("Всегда пиши атомарно.\n", False),
+    ("Сохрани состояние через временный файл.\n", False),
+    ("Write a short summary for the user.\n", False),
+    ("Write a script file, then run it.\n", False),        # a file the agent produces, not state
+    ("Open the page and save the HTML file.\n", False),
+    ("Persist the session state between runs.\n", True),
+    # round-1 critic: the ordinary ways a skill says it, and words that only sound like an atomic write
+    ("Update the state file after each step.\n", True),
+    ("Store the results in results.json for the next run.\n", True),
+    ("Save the settings to settings.yaml.\n", True),
+    ("Append each finding to findings.jsonl.\n", True),
+    ("Write the index to index.toml so the next run reads it.\n", True),
+    ("Keep the session state in session.db between runs.\n", True),
+    ("Save progress to notes.md and read it next session.\n", True),
+    ("Сохраняй прогресс в progress.yaml\n", True),
+    ("Save the state file. Use atomic commits.\n", True),
+    ("Save state.json. Rename the variable if needed.\n", True),
+    ("Record the results in the report.\n", False),         # prose, no file another run reads
+    ("Keep the session alive rather than relying on the URL between sessions.\n", False),
+    # round-2 critic: file names as SKILL.md writes them, saved state with no file word, negations
+    ("Write the current step to `state.json`.\n", True),
+    ("Write `state.json` with the current step.\n", True),
+    ("Write the result to .autoharness/state.json\n", True),
+    ("Update .claude/memory/notes.json after each step.\n", True),
+    ("Save the state to disk after each step.\n", True),
+    ("Save the task state after each step.\n", True),
+    ("Сохрани состояние задачи в конце.\n", True),
+    ("Записывай состояние задачи в файл.\n", True),
+    ("Save state.json. Delete the temp file afterwards.\n", True),
+    ("Do not write to settings.json.\n", False),
+    ("Keep config.yaml unchanged.\n", False),
+    ("Write the report to report.csv for the user.\n", False),
+    ("Run npm install; it updates package-lock.json.\n", False),
+    ("Use persistent state in the game loop.\n", False),
+    # round-3 critic: any verb that changes the file, and a temp file that is not the write's
+    ("Overwrite state.json with the new step.\n", True),
+    ("Edit state.json to mark the step done.\n", True),
+    ("Add an entry to log.jsonl for each run.\n", True),
+    ("Log each finding to findings.jsonl.\n", True),
+    ("Put the token in auth.json.\n", True),
+    ("Rewrite the cache file after each run.\n", True),
+    ("Write the state to state.json. Use a temp file for the download.\n", True),
+    ("1. Set `\"done\": true` in `.task/plan.json`.\n", True),
+    ("Внеси запись в journal.jsonl после шага.\n", True),
+    ("Write the state to a temp file, then rename it over state.json.\n", False),
+    ("Read config.yaml to find the port.\n", False),
+    ("Never edit lock.json by hand.\n", False),
+    ("The CLI stores its token in auth.json.\n", False),
+    ("Set `jsxImportSource` in `tsconfig.json`.\n", False),   # a project manifest, edited by hand
+    ("---\nname: x\ndescription: Create and edit state.json files\n---\n# x\n", False),  # frontmatter
+    # round-4 critic: a lead-in before the verb, a way of writing said of something else, a test as the object
+    ("You must write progress to progress.json after each step.\n", True),
+    ("Please save the queue to queue.json.\n", True),
+    ("Remember to update todo.json.\n", True),
+    ("Use json.dump to write the state.\n", True),
+    ("Не забудь записать результат в result.json.\n", True),
+    ("Write state.json. Commit atomically.\n", True),
+    ("Write state.json. Then use os.replace to rename the backup.\n", True),
+    ("State files are written atomically.\n\nUpdate queue.json after each task.\n", False),
+    ("Write a test that checks settings.json is parsed.\n", False),
+    ("Add tests for config.yaml parsing.\n", False),
+    ("Cache files are verified at write time.\n", False),
+    ("## queue.json update\n", False),
+    ("npx shadcn add https://example.com/r/item.json\n", False),
+    # round-5 critic: a negation in another clause, an atomic write of something else, code as the object
+    ("If the user does not answer, save the state to state.json.\n", True),
+    ("If state.json does not exist yet, create it and write the first step.\n", True),
+    ("Never skip a step: after each one, write progress to progress.json.\n", True),
+    ("Если ответа нет, сохрани состояние в state.json.\n", True),
+    ("Write the report atomically.\n\nUpdate queue.json after each task.\n", True),
+    ("Serialize the plan to plan.json at the end of the step.\n", True),
+    ("You should never modify history.jsonl.\n", False),
+    ("If the file is missing, don't create state.json.\n", False),
+    ("Write a Python script that parses data.json.\n", False),
+    ("All state files are written atomically.\n\nUpdate queue.json after each task.\n", False),
+    # round-6 critic: a verb at the start of a file name is part of the name
+    ("Read log.jsonl to find the last error.\n", False),
+    ("Parse record.csv and show totals.\n", False),
+], ids=["write-back", "save-config", "ru-write", "atomic", "ru-atomic", "ru-temp", "no-file", "script", "html",
+        "state", "state-file", "results-json", "yaml", "jsonl", "toml", "db", "next-session", "ru-yaml",
+        "atomic-commits", "rename-variable", "record-results", "keep-alive", "backticks", "backticks-first",
+        "dir-path", "dot-dir", "to-disk", "task-state", "ru-state", "ru-state-file", "temp-delete", "negated",
+        "unchanged", "for-user", "tool-writes", "persistent", "overwrite", "edit", "add-entry", "log", "put",
+        "rewrite", "temp-download", "set-list-item", "ru-entry", "temp-rename", "read-only", "never-edit",
+        "third-person", "manifest", "frontmatter", "must", "please", "remember", "json-dump", "ru-dont-forget",
+        "commit-atomically", "replace-backup", "atomic-elsewhere", "test-object", "tests-for", "noun-use",
+        "heading", "url", "if-not", "if-missing", "never-skip", "ru-if-no", "atomic-other", "serialize",
+        "never-modify", "dont-create", "script-object", "blanket-atomic", "log-file-name", "record-file-name"])
+def test_craft_asks_a_skill_that_writes_files_to_say_how(skill, warned):
+    found = [w for w in library.craft("Use when the user asks for a report", skill) if "(R1)" in w]
+    assert bool(found) is warned
+
+
+@pytest.mark.parametrize("line", ["a" * 40000, "a." * 20000, "x/" * 20000 + ".json"], ids=["word", "dots", "path"])
+def test_craft_reads_a_long_hostile_line_in_linear_time(line):
+    start = time.monotonic()
+    library.writes_saved_state("Write " + line + "\n")
+    assert time.monotonic() - start < 2       # was 84 s for "a." * 20000 before the name was bounded (R7)
 
 
 # --- a pair of reviewers: what was asked, and how it is done ------------------------------
