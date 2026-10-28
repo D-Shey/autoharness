@@ -1260,3 +1260,73 @@ def test_brief_takes_the_users_own_skill_as_an_areas_cover(project, capsys):
     argv[argv.index("--gaps") + 1] = "create test-layout: layout"
     code, res = ah(capsys, project, *argv)
     assert code == 0, res
+
+
+# --- items that say nothing to act on: warnings, never refusals ---------------------------------------
+
+def brief_creating(capsys, project, domains, gaps):
+    ah(capsys, project, "init", "fix the quarterly report")
+    project.task()._update_info(searches=[{"kind": "skill", "query": q, "results": []}
+                                          for q in ("payments", "webhooks")])
+    argv = list(BRIEF)
+    argv[argv.index("--domains") + 1] = domains
+    argv[argv.index("--gaps") + 1] = gaps
+    return ah(capsys, project, *argv)
+
+
+def test_a_create_that_only_restates_its_area_is_warned_about_not_refused(project, capsys):
+    code, res = brief_creating(capsys, project,
+                               "payments API: create payments-helper (searched: payments); "
+                               "webhooks: create payment-webhook-signature (searched: webhooks)",
+                               "create payments-helper: payments; create payment-webhook-signature: signatures")
+    assert code == 0, res
+    hollow = [w for w in res["warnings"] if "names nothing beyond" in w]
+    assert len(hollow) == 1 and "payments-helper" in hollow[0], res["warnings"]
+
+
+@pytest.mark.parametrize("text, loose", [
+    ("Когда правишь парсер, делай аккуратно, потому что легко сломать", True),
+    ("When writing hooks, follow best practices, because they run on every message", True),
+    ("Когда пишешь state.json, писать правильно: через временный файл и os.replace, потому что иначе он пустеет",
+     False),
+    ("When a test is flaky, run it with `pytest -x` before blaming the code", False),
+])
+def test_a_vague_lesson_is_recorded_with_a_warning(project, capsys, text, loose):
+    code, res = ah(capsys, project, "lesson", "add", text)
+    assert code == 0 and res["insight"]["text"]
+    assert bool(res.get("warnings")) == loose, res
+
+
+def test_craft_warns_on_a_step_that_names_nothing_concrete():
+    head = "---\nname: x\ndescription: use when the report totals are wrong\n---\n## Steps\n\n"
+    assert any("vague words" in w for w in library.craft("use when the report totals are wrong",
+                                                          head + "- Write clean code and test it properly.\n"))
+    assert not any("vague words" in w for w in library.craft("use when the report totals are wrong",
+                                                              head + "- Run `pytest -q` and read every failure.\n"
+                                                              "- Write it properly: a temp file, then os.replace.\n"))
+
+
+@pytest.mark.parametrize("step, loose", [
+    ("1. Check the result carefully against\n   `ref.png` at 100% zoom.", False),   # a wrapped item, read whole
+    ("- Be careful not to delete the user's drafts.", False),   # says what to do besides the vague word
+    ("- Read the reference image carefully before drawing the first line.", False),
+    ("1. Test it\n   properly.", True),
+    ("- Делай всё аккуратно и правильно.", True),
+])
+def test_a_skill_step_warns_only_when_it_is_nothing_but_vague_words(step, loose):
+    from autoharness import vague
+    assert bool(vague.vague_steps(f"## Steps\n\n{step}\n\n## How to verify\n\n- Write it properly.\n")) == loose
+
+
+@pytest.mark.parametrize("text", ["Do it carefully, i.e. properly.", "Делай аккуратно, т.е. правильно.",
+                                  "Write clean code and/or test properly."])
+def test_abbreviations_are_not_concrete(text):
+    from autoharness import vague
+    assert vague.vague(text)
+
+
+def test_a_short_name_part_said_by_the_query_is_hollow():
+    from autoharness import vague
+    assert vague.hollow_create("logs", "log", "logging")
+    for name, query in (("sqlite", "sql"), ("webhook", "web"), ("gitignore", "git")):
+        assert not vague.hollow_create("storage", name, query), name   # a short word does not cover a longer part

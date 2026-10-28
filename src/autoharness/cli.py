@@ -20,7 +20,7 @@ from importlib import resources
 from pathlib import Path
 
 from autoharness import (__version__, agents, answers, approvals, config, egress, evidence, followups, history, journal,
-                         lessons, library, recipes, registry, reviewers, rulings, runs, skilltests, text, vet)
+                         lessons, library, recipes, registry, reviewers, rulings, runs, skilltests, text, vague, vet)
 from autoharness.catalog import Catalog
 from autoharness.env import (GATEWAY_NAME, ContentChanged, HarnessError, Project, SkillRejected, Task,
                              missing_tools, npx_stage_skill, parse_skill_spec, skill_dir)
@@ -1158,6 +1158,8 @@ def cmd_brief(args, project, catalog):
     task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
         "no search ran for this task; run `autoharness search skill|mcp \"<query>\"` before deciding nothing fits"]
+    warnings += [w for e in domains.split(";") if (m := DOMAIN.match(e.strip())) and m["how"].lower() == "create"
+                 and (w := vague.hollow_create(m["area"], m["name"], m["query"]))]
     create = "".join(f" Create `{n}` now: `autoharness skill new {n} --description \"<when to use it>\"`, fill in "
                      f"When to use / Steps / How to verify from what you found, then follow it for this task and "
                      f"update it as you learn." for n in planned)
@@ -2804,7 +2806,11 @@ def cmd_lesson(args, project, catalog):
            f"Recorded as insight #{item['id']}; later tasks whose text shares its words are shown it.")
     if item["confirmed"] >= lessons.RIPE and not item.get("skill"):
         nxt += " " + RIPE_NEXT
-    out({"status": "ok", "insight": item, "merged": merged, "next": nxt})
+    loose = vague.vague(args.value or "")
+    out({"status": "ok", "insight": item, "merged": merged, "next": nxt}
+        | ({"warnings": [f"the insight leans on {', '.join(loose)} and names nothing concrete (a file, a command, "
+                         "a number, an identifier): say what exactly to do, or the next task cannot act on it"]}
+           if loose else {}))
     return 0
 
 
