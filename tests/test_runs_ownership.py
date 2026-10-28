@@ -1,7 +1,9 @@
 import io
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -397,6 +399,24 @@ def test_hook_hands_another_session_the_task_and_keeps_it_gated(project, capsys,
     assert hook(capsys, monkeypatch, project, owner) is None
     project.task()._update_info(owner="other-2")             # claimed
     assert hook(capsys, monkeypatch, project, write) is None
+
+
+def test_an_abandoned_task_of_another_session_does_not_hold_its_tools(project, capsys, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-1")
+    briefed(capsys, project)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    write = {"hook_event_name": "PreToolUse", "session_id": "other-2", "tool_name": "Write", "tool_input": {}}
+    assert denied(hook(capsys, monkeypatch, project, write))
+    old = time.time() - (cli.STALE_HOURS + 1) * 3600
+    for f in ("harness.md", "task.json"):
+        os.utime(project.task().dir / f, (old, old))
+    prompt = {"hook_event_name": "UserPromptSubmit", "session_id": "other-3", "prompt": "please refactor the module"}
+    ctx = hook(capsys, monkeypatch, project, prompt)["hookSpecificOutput"]["additionalContext"]
+    assert "looks abandoned" in ctx and "does not hold this session's tools" in ctx
+    assert hook(capsys, monkeypatch, project, write) is None
+    teardown = {"hook_event_name": "PreToolUse", "session_id": "other-2", "tool_name": "Bash",
+                "tool_input": {"command": "autoharness teardown"}}
+    assert denied(hook(capsys, monkeypatch, project, teardown))   # its own commands still need a claim
 
 
 def test_hook_leaves_alone_only_the_reviewer_of_a_pending_prompt(project, capsys, monkeypatch):
