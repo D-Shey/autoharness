@@ -311,9 +311,16 @@ def cmd_init(args, project, catalog):
         result["mode_raised"] = f"to {floor} by the min_mode setting ({floor_source})"
         task.log(f"mode raised to {floor} by the min_mode setting ({floor_source})")
     if lightened:
-        result["mode_raised"] = (f"to full: the task needs {', '.join(needs)}, and light mode is for chores that "
-                                 "need none (a typo, a commit). Prepare as full mode asks")
-        task.log(f"light raised to full: the task needs {', '.join(needs)}")
+        # which words raised it, and from where: a word from the user's message may belong to another request
+        in_task = {c.name: set(words) for c, words in catalog.classify(args.task)}
+        why = ", ".join(f"{c.name} (" + "; ".join(
+            f"{', '.join(chr(34) + w + chr(34) for w in group)} in {source}" for group, source in (
+                ([w for w in words if w in in_task.get(c.name, ())], "the task text"),
+                ([w for w in words if w not in in_task.get(c.name, ())], "the user's message")) if group) + ")"
+            for c, words in classified)
+        result["mode_raised"] = (f"to full: the task needs {why}, and light mode is for chores that need none (a "
+                                 "typo, a commit). Prepare as full mode asks")
+        task.log(f"light raised to full: the task needs {why}")
     if routine:
         task.log(f"light kept although the task needs {', '.join(needs)}: {routine}")
     if restarted:
@@ -899,10 +906,10 @@ MIN_DOMAINS = 2
 
 
 def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict], builtin=(),
-                   kept=()) -> str:
+                   kept=(), have=()) -> str:
     """The brief's areas of know-how, each covered by a skill or a server found by a search of this task (or built
-    into the agent, or a skill an earlier task kept in the project), or by a skill this task creates. Raises when an
-    area is covered by nothing, or its search was never run."""
+    into the agent, or a skill an earlier task kept in the project, or one the agent already has: `have`), or by a
+    skill this task creates. Raises when an area is covered by nothing, or its search was never run."""
     usage = ("--domains splits the task into the areas of know-how it takes, the way an engineer splits building "
              "a machine into its disciplines, and says how each is covered: `<area>: skill <name> (searched: "
              "<query>); <area>: mcp <name> (searched: <query>); <area>: create <skill-name> (searched: <query>)`. "
@@ -930,11 +937,13 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
             raise HarnessError(f"area `{m['area'].strip()}` creates `{name}`: name it in --gaps too "
                                f"(`create {name}: <capability>`)")
         found = next((s.get("results", []) for s in searches if s["query"].strip().lower() == query), [])
-        real = how == "skill" and (library.exists(name) or name in kept) or how == "mcp" and name in builtin or any(
+        real = how == "skill" and (library.exists(name) or name in kept or name in have) or (
+            how == "mcp" and name in builtin) or any(
             r.lower() == name.lower() or re.search(rf"[@/]{re.escape(name.lower())}$", r.lower()) for r in found)
         if how in ("skill", "mcp") and not real:
             raise HarnessError(f"area `{m['area'].strip()}`: `{name}` is not among what the search `{query}` found"
-                               + (" nor a skill in your library or kept in this project" if how == "skill" else "")
+                               + (" nor a skill you have (your library, kept in this project, or the agent's project, user "
+                                  "and plugin skills)" if how == "skill" else "")
                                + ": name a "
                                f"{how} that search returned (" + (", ".join(found) or "it found nothing") + "), "
                                "or create the skill (`create <skill-name>`)")
@@ -1112,7 +1121,8 @@ def cmd_brief(args, project, catalog):
                                f"{project.agent.skills_dir}/{name}/SKILL.md in place with what this task teaches")
     _check_constraints(args.constraints, task)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []),
-                             [b.name for b in agents.builtin_mcp(project.agent.name)], kept)
+                             [b.name for b in agents.builtin_mcp(project.agent.name)], kept,
+                             [p.parent.name for p in _agent_skills(project)])
     live = [c.name for c, _ in catalog.classify(task.about()) if c.interactive]
     if live and not any((m := DOMAIN.match(e.strip())) and m["how"].lower() == "mcp" for e in domains.split(";")):
         raise HarnessError(
@@ -2399,10 +2409,14 @@ def cmd_hook(args, project, catalog):
                                               started_by=saved_state.get("prompt"))
                 except OSError:
                     pass   # a lost note must never block the user's message
-            if state in ("done", "waived") or active:
+            if active:
                 return 0
-            if sid:   # the prompt that sets the task: some agents send it again on every step, and it is not a note
+            # with no task open, the latest message is the one that sets the next task, also after a task ended or
+            # was waived: init reads it, and an older one would raise a chore to full for what that one asked
+            if sid:
                 set_session_state(sid, **(saved_state | {"prompt": data.get("prompt", "")[:PROMPT_KEPT]}))
+            if state in ("done", "waived"):
+                return 0
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
             if not ctx:
                 return 0
