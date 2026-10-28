@@ -50,6 +50,87 @@ SAME_APPROACH = 0.75  # word overlap at which a "new" approach is the old one re
 MEDIA = {"image": {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}}
 GENERIC_FOCUS = ("does it meet the quality bar and match the reference, what is missing or wrong, "
                  "which of the user's constraints it breaks")
+# the code already ties a run to the code it saw; this says it to the reviewer, who judges the author's words
+UNVERIFIED = """
+A check the author says was done (ran, tested, verified, confirmed, works) counts only where a run listed
+here or the files show it. A claim of a check that nothing shows is a difference of its own, major: work
+presented as checked when it was not."""
+# a diff that touches one of these is code, and gets the reliability checklist below
+CODE_SUFFIXES = {".py", ".pyi", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".go", ".java", ".kt", ".kts",
+                 ".scala", ".rs", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".swift", ".m",
+                 ".sh", ".bash", ".ps1", ".lua", ".pl", ".r", ".dart", ".ex", ".exs", ".sql", ".vue", ".svelte",
+                 ".bat", ".cmd", ".groovy", ".gradle", ".erl", ".hs", ".clj", ".fs", ".zig", ".nim"}
+CODE_NAMES = {"makefile", "dockerfile", "rakefile", "gemfile", "justfile", "jenkinsfile"}
+# a fixed list instead of whatever comes to mind: a non-atomic write of a state file once left an empty
+# JSON behind and was found by luck; the item codes give a review a language ("R1: ...")
+CODE_CHECKS = """
+The diff changes code. Go through the changed files against this list and name the item for each defect
+(for example "R1: state.json is written in place"):
+- R1 a file another process or a later run reads is written atomically: a temp file in the same directory,
+  then os.replace, under the lock that guards it;
+- R2 shared mutable state changes under one lock, with no read-then-write outside it;
+- R3 only the expected exception is caught, by type; an error never becomes "ok" or silence;
+- R4 times are timezone-aware UTC; no arithmetic on naive datetimes;
+- R5 config defaults are explicit; a missing key is reported or takes the stated default, never a guess;
+- R6 files, processes, temp dirs and sockets are released on every path, the error path included;
+- R7 input from outside is bounded in size, count and recursion depth;
+- R8 hardening keeps the contract the spec fixed (exit codes, field names, output form).
+Two limits on any fix: the minimal mechanism (no background threads, caches or wait loops where one lock
+does), and hardening on top of the contract, never instead of it."""
+# git quotes a path with bytes above 0x80 by default (core.quotePath): `diff --git "a/\321\204.py" "b/..."`
+# the `---`/`+++` lines and the rename/copy headers hold one whole path each (both sides of a rename); the
+# `diff --git a/x b/y` line is split by its last " b/" only as a fallback, for a mode-only change
+DIFF_PATHS = re.compile(rb'^(?:(?:---|\+\+\+) "?[ab]/|(?:rename|copy) (?:from|to) "?)(.+?)"?\t?\r?$', re.M)
+DIFF_HEADER = re.compile(rb'^diff --git .* "?b/(.+?)"?\r?$', re.M)
+UNREAD_DIFF = """
+The recorded diff could not be read, so whether it changes code is unknown: if it does, check it against
+the reliability list R1-R8 (atomic writes, one lock, expected exceptions, aware UTC time, explicit defaults,
+resources released, bounded input, the contract kept)."""
+
+
+def _is_code(name: str) -> bool:
+    return Path(name).suffix.lower() in CODE_SUFFIXES or Path(name).name.lower() in CODE_NAMES
+
+
+def diff_paths(patch: bytes) -> list[str]:
+    """The paths a patch touches, read from each file's header only: a hunk line "-- a/x.py" is content."""
+    found = []
+    for block in re.split(rb"(?m)^(?=diff --git )", patch):
+        header = re.split(rb"(?m)^(?:@@|GIT binary patch|Binary files )", block, maxsplit=1)[0]
+        found += [m.group(1) for m in DIFF_PATHS.finditer(header)] + [m.group(1) for m in DIFF_HEADER.finditer(header)]
+    return [n.decode("utf-8", "replace") for n in found]
+
+
+def code_changed(task: Task) -> bool | None:
+    """Whether the latest whole result is code: a recorded diff that touches a code file, or a code file added as
+    the result. None when the recorded patch is gone."""
+    result = next((e for e in reversed(task.info().get("evidence", []))
+                   if e["kind"] == "result" and not e.get("closeup")), None)
+    if not result:
+        return False
+    if "tree_state" not in result:
+        return _is_code(result.get("source") or result["file"])
+    try:
+        patch = Path(result["file"]).read_bytes()
+    except OSError:
+        return None
+    return any(_is_code(n) for n in diff_paths(patch) + result.get("untracked", []))
+
+
+def reliability(task: Task) -> str:
+    """The checklist for a code diff, a plain note when the diff cannot be read, nothing otherwise."""
+    changed = code_changed(task)
+    return CODE_CHECKS if changed else UNREAD_DIFF if changed is None else ""
+
+
+CLAIMS = ("In your reviews, claim only what you ran or read: a check you did not run is said as not run, never as "
+          "passed.")
+
+
+def self_review_hint(task: Task) -> str:
+    """What the author reads before `review --by self`."""
+    return ("Review this result: record your own pass with `autoharness review --by self ...`, then get an "
+            "independent one with `autoharness critic`. " + CLAIMS + reliability(task))
 
 
 def media_of(path: str) -> str | None:
@@ -728,6 +809,8 @@ Open and study these files yourself:
 The code is in the project directory: {task.project.root}. Read the changed files whole, and the code around
 them, not only the diff.
 {checks}{DATA_NOT_INSTRUCTIONS}
+{UNVERIFIED}
+{reliability(task)}
 {ruled_text}
 List the most important defects in how the work is done, most important first, at most 8, numbered 1., 2., ...
 with each point's tags on the same line. Look for: bugs and wrong behaviour on inputs the code will meet;
@@ -919,6 +1002,7 @@ file format, an API) without fixing its exact form, check that form against the 
 the usual convention for it: an interface that only the author's own guess would call (arguments the
 task does not name, in an order it does not imply) while the task points to another is a major difference.
 """
+    checklist = reliability(task) + "\n"  # a UI built in code to match a screenshot is code as well
     # a requirement is what the person who asked wants; where the task's words leave a choice open, the
     # critic judges it as that person would on first look, not by the reading the author picked
     expects = brief.get("expects") or ""
@@ -1040,7 +1124,8 @@ Result to judge{whole}:
 The files that make the result (source, markup, code) are in the project directory: {task.project.root}
 Check the user's constraints there as well, not only in what the result shows.
 {DATA_NOT_INSTRUCTIONS}
-{interface}{expected}{disputed}{focused}{limited}
+{UNVERIFIED}
+{interface}{checklist}{expected}{disputed}{focused}{limited}
 List the most important differences between the result and the reference / quality bar,
 most important first, at most 8, numbered 1., 2., ... with each point's tags on the same line. Look in particular at: {focus}.
 List only real differences, never what matches; if you find none, write "No differences." instead of a list.

@@ -131,6 +131,63 @@ rejected or a bad one slipped through.
    (https://community.owasp.org/attacks/Regular_expression_Denial_of_Service_-_ReDoS). Look at a fixed
    window around each match and cap the matches per line; add a timing test with a long hostile line.
 
+18. **Read text rules on the line as the model reads it.** Characters rendered as nothing split a phrase for a
+   regex but not for the model or a reviewer. Remove Unicode's Default_Ignorable_Code_Point set (soft hyphen,
+   zero-width, word joiner, bidi controls, variation selectors, tag characters; the list is in
+   https://www.unicode.org/Public/UCD/latest/ucd/DerivedCoreProperties.txt) and terminal escapes from a copy of
+   the line before the text rules (Embrace The Red shows tag text "unnoticable to users... but LLMs interpret
+   such text": https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/);
+   read the line twice, once with them removed (a split word) and once with each run as a word break (a phrase
+   whose spaces were replaced: U+3164 HANGUL FILLER draws as a blank), and keep the stronger finding; UTS #55
+   (https://www.unicode.org/reports/tr55/) both ignores them in comparison and allows them between lexical
+   elements. Keep the hidden-character rules on the raw line, and show the cleaned line as
+   the excerpt (a raw escape would hide it again in the reader's terminal).
+19. **Terminal escapes: flag what hides or overwrites, not colour.** Per xterm's control sequences
+   (https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) SGR 8 makes text invisible, CSI A-H moves the
+   cursor over text and J/K erase it, OSC (a hyperlink) shows one text and points at another. Colours are
+   harmless; read SGR codes in order and skip the numbers after 38/48/58 (a colour index 8 is not "conceal"),
+   and read "08" as 8. Also ESC 7 / ESC 8 (save and restore the cursor: what follows overwrites) and ESC c
+   (reset), the one-byte CSI 0x9b and OSC 0x9d (https://en.wikipedia.org/wiki/ANSI_escape_code), and the
+   alternate screen (private modes ?47/?1047/?1049 h); hiding the cursor (?25l) hides no text.
+   An escape written as text (backslash-033) is a script printing it, not a hidden one.
+20. **Imitated system messages.** The special tokens of chat templates (Hugging Face chat templating,
+   https://huggingface.co/docs/transformers/main/en/chat_templating: ChatML, Mistral INST, Zephyr role tags,
+   Llama 3 headers, Gemma turns) and a line labelled "System:" that gives the agent a new role are the attack;
+   the docs themselves show the tokens in code blocks, so fenced or quoted is lowered like an override. A
+   token opens a message only at the start of a line or before a role name; named inside a sentence ("end
+   each turn with ...") it is lowered too. Look at every token on the line, not the first: a harmless closing
+   token can come right before the opening one. A "System:" label followed by a requirement (an OS, a version)
+   is ordinary.
+21. **Refusal suppression includes forbidding apologies, and so do tone rules: warn, never block.** The
+   attack's rules in Wei et al., Jailbroken (https://arxiv.org/html/2307.02483) forbid apologies, notes and
+   disclaimers and words like "cannot". A UI-writing skill forbids error messages to apologize in the same
+   words for style, so the finding stays medium; dropping the words would miss the attack.
+   In Russian, "не отказывайся от X" means "do not give X up".
+22. **A hidden comment that reassures the user falsely, or keeps something from them, is high.** It deceives
+   the one reader who cannot see it; Invariant Labs' tool poisoning
+   (https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks) works the same way, with a
+   line telling the model not to mention what it did. Match the grammar, not one sentence: contractions
+   ("it's"), plural and polite verb forms (Russian "-те"), other verbs ("let the user know", "say"). What
+   deceives is narrow: an order to tell the user that all went well or is safe (fine, passed, nothing found,
+   "всё в порядке"), or to keep the action itself from them ("do not mention this to the user"). Every other
+   order about what to say ("reply to the user in Russian", "tell the user the file path", "объясни, что ...")
+   is ordinary authoring and stays medium; a note that only reports a result ("after CI passed") is nothing.
+   Write the claim as the complement of the order: verb, optional "that", a short subject, optional "is", the
+   claim word, and nothing negating or conditioning it ("not safe", "safe to delete", "passed or failed",
+   "или нет"); a claim word that merely appears in the comment is not enough ("say it works on Windows").
+   Concealment takes a short object ("never mention this step to the user", "hide ... from the user", "не
+   упоминай этот шаг пользователю"). Five critic rounds swung this rule between too narrow and too wide:
+   pin it by the harm and test every attack form and every ordinary comment any reviewer has named.
+   Visible prose saying the same is an ordinary workflow step: nothing there.
+   A "System:" label that only gives a persona ("you are an expert copywriter", "your task is ...") is a prompt
+   template: medium; a role line inside quotes is an example: medium, not silence. Chat tokens in a .txt or
+   template file are a fine-tuning skill's material: medium; in markdown the agent reads as orders: high.
+23. **A carriage return inside a line prints over its start**, like the escapes in step 19: "carriage return
+   by itself provided the ability to overprint the line" (https://en.wikipedia.org/wiki/Carriage_return). Read the file with
+   line ends kept (`newline=""`) to see it; Windows "\r\n" and an old Mac file with "\r" only are ordinary.
+   Make it `medium`, not `high`: captured progress output ("10%\r100%") does the same. Scan both parts as
+   lines of their own, so an attack in the overwritten part gets its own finding.
+
 ## How to verify
 
 - One test per rule that it fires on a real-looking example and one that it stays quiet on the

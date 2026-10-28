@@ -498,8 +498,7 @@ def cmd_evidence(args, project, catalog):
         item = evidence.add_diff(task, project.root, args.base, args.note or "")
         out({"status": "ok", "evidence": item,
              "next": "Recorded as a new version of the whole result: the critic sees the latest diff, not earlier "
-                     "ones. Review this diff: record your own pass with `autoharness review --by self ...`, then get "
-                     "an independent one with `autoharness critic`."})
+                     "ones. " + evidence.self_review_hint(task)})
         return 0
     if not args.file or not args.kind:
         raise HarnessError("usage: autoharness evidence add <file> --kind reference|facts|result [--note ...]")
@@ -513,10 +512,10 @@ def cmd_evidence(args, project, catalog):
            "right, no detail or polish yet. Add it as a result and run `autoharness critic` on it before you add "
            "any detail: a wrong base costs every round after it."
            if args.kind == "facts" else
-           "This is the base: run `autoharness critic` on it now, before any detail."
+           "This is the base: run `autoharness critic` on it now, before any detail. " + evidence.CLAIMS
+           + evidence.reliability(task)
            if first else
-           "Review this result: record your own pass with `autoharness review --by self ...`, then get an "
-           "independent one with `autoharness critic`.")
+           evidence.self_review_hint(task))
     if item.get("closeup"):
         nxt = (f"Recorded as a close-up or part of result #{item['closeup']}: the critic sees it with that whole "
                "result. If it is a new version of the whole, add it again without --closeup"
@@ -626,6 +625,11 @@ def cmd_review(args, project, catalog):
         diff, worst = args.diff, args.worst or ("major" if args.fixable == "yes" else "none")
         if args.by == "critic":
             warnings.append(RETOLD)
+        elif evidence.code_changed(task) and not re.search(r"\bR[1-8]\b", diff):
+            warnings.append("the diff changes code and your review names no item of the reliability list (R1-R8, "
+                            "in the hint of `evidence diff` and `evidence add`): go through it, or say which items do "
+                            "not apply. "
+                            + evidence.CLAIMS)
     ran = getattr(args, "critic_run", None)
     extra = {"answer_id": answer["id"]} | {k: answer[k] for k in ("coverage", "unrequested") if answer[k]} \
         | ({"previous_review": answer["previous"]} if answer["previous"] else {}) | ({"ran": ran} if ran else {}) \

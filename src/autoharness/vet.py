@@ -32,21 +32,30 @@ def constraints(task: Task) -> str:
 
 
 def _skill_files(root: Path) -> tuple[str, list[str]]:
-    shown, listing, total = [], [], 0
+    """What the reviewer reads, and the file listing; whatever is cut or left out is said, never silent."""
+    shown, listing, total, unseen, unseen_chars = [], [], 0, 0, 0
     files = sorted(p for p in root.rglob("*") if p.is_file())
     files.sort(key=lambda p: p.name != "SKILL.md")  # SKILL.md first: it is the main content
     for p in files:
         rel = p.relative_to(root).as_posix()
-        listing.append(f"{rel} ({p.stat().st_size} bytes)")
+        size = f"{rel} ({p.stat().st_size} bytes)"
         try:
             text = p.read_text("utf-8")
         except (UnicodeDecodeError, OSError):
+            listing.append(f"{size} - not shown: not readable as text")
             continue
-        if total >= MAX_TOTAL:
-            continue
-        part = text[:min(MAX_FILE, MAX_TOTAL - total)]
+        part = text[:min(MAX_FILE, max(MAX_TOTAL - total, 0))]
         total += len(part)
-        shown.append(f"--- {rel}{' (truncated)' if len(part) < len(text) else ''}\n{part}")
+        cut = len(text) - len(part)
+        unseen, unseen_chars = unseen + bool(cut), unseen_chars + cut
+        if not part and text:
+            listing.append(f"{size} - not shown: over the reading limit ({cut} characters)")
+            continue
+        listing.append(size)
+        shown.append(f"--- {rel}{f' (truncated: {cut} more characters not shown)' if cut else ''}\n{part}")
+    if unseen and total >= MAX_TOTAL:  # under the limit each cut file says so itself
+        shown.append(f"--- NOT SHOWN: {unseen} file(s) cut or left out, {unseen_chars} characters of text not shown; "
+                     "what they hold is unseen")
     return "\n\n".join(shown), listing
 
 
@@ -75,6 +84,8 @@ only against the user's constraints, quoted verbatim below. Read what the candid
 its name. A candidate breaks a constraint when its main content or what it runs does what the constraint
 rules out (for example generator scripts under "no generators", a hosted API under "must run offline").
 Something it merely mentions, or an optional part the task will not use, does not break it: say so.
+A file marked truncated or not shown was not read by you: what it holds is unknown, so do not take it as
+fitting; name it in your answer, and if a constraint turns on it, that is a risk to state.
 
 USER CONSTRAINTS:
 {constraints(task)}

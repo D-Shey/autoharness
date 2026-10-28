@@ -261,7 +261,70 @@ DIRECTIVE = re.compile(r"(?:(?:^[\W_]*|[.!?;:,]\s+)(?:" + LEAD + r"\b[\s,:!*_-]*
 FENCE = re.compile(r"^\s*(?:```|~~~)")
 REFUSAL = re.compile(r"\b(?:never|do not|don't)\s+refuse\b(?!\s+to\s+\w+\s+(?:questions\s+)?(?:about|on|regarding)\b)"
                      r"|\balways\s+comply\b(?!\s+with\b)"
-                     r"|\b(?:no|without|omit(?:ting)?)\s+(?:any\s+)?(?:disclaimers|moralizing|ethical\s+commentary)\b", re.I)
+                     r"|\b(?:no|without|omit(?:ting)?)\s+(?:any\s+)?(?:disclaimers|moralizing|ethical\s+commentary)\b"
+                     # the rules of "refusal suppression" in Wei et al., Jailbroken (https://arxiv.org/html/2307.02483):
+                     # "Do not apologize", "Never say the words cannot, unable ...". A UI tone rule ("Errors don't
+                     # apologize") reads the same: it warns, it does not block.
+                     r"|\b(?:never|do not|don't)\s+(?:apologi[sz]e|warn\s+the\s+user)\b|\bwithout\s+warning\s+the\s+user\b"
+                     # the refusal words themselves, not a style rule ("never say the word 'delve'")
+                     r"|\bnever\s+say\s+the\s+words?\b(?=[^\n]{0,40}\b(?:cannot|can't|unable|sorry|unfortunately|apologi))"
+                     # "не отказывайся от тестов" is "do not give up the tests", not refusal
+                     r"|\bне\s+(?:извиняйся|извиняйтесь)\b|\bне\s+(?:отказывайся|отказывайтесь)\b(?!\s+от\b)"
+                     r"|\bне\s+предупреждай(?:те)?\s+пользовател", re.I)
+# A message dressed as the system's: the special tokens chat templates put around roles (Hugging Face chat templating,
+# https://huggingface.co/docs/transformers/main/en/chat_templating: ChatML <|im_start|>, Mistral [INST], Zephyr
+# <|system|>, Llama 3 <|start_header_id|>, Gemma <start_of_turn>), or a line labelled "System:" that gives the agent a
+# new role. A doc about templates shows them in code blocks or quotes: lowered there like an override.
+CHAT_TOKENS = re.compile(r"<\|(?:im_start|im_end|im_sep|endoftext|system|user|assistant|begin_of_text|start_header_id|"
+                         r"end_header_id|eot_id)\|>|\[/?INST\]|<</?SYS>>|<(?:start|end)_of_turn>", re.I)
+# at the start of a line, or right after an opening quote (then it is quoted, so an example: medium)
+ROLE_LINE = re.compile(r"(?:^|(?<=[\"'“«`]))[\s>#*_-]*(?:\[\s*system\s*\]|<\s*system\s*>|system(?:\s+(?:message|prompt))?"
+                       r"\s*:)[\s*_]*(?:you(?:\s+are|'re)\s+(?:now\b(?!\s+(?:ready|able|done|set|finished|in)\b)|no\s+longer\b)|"
+                       r"you\s+(?:will|shall)\s+now\b|act\s+as\b|you\s+must\s+obey\b|forget\b|"
+                       r"(?=[^\n]*\bfrom\s+now\s+on\b)|"
+                       # any other "you are ..." under a system label is a persona: a warning, never silence
+                       r"(?P<persona>you(?:\s+are|'re)\s+(?!now\b)\w|your\s+(?:role|task)\b)|your\s+new\s+(?:role|"
+                       r"instructions|task|rules)\b|your\s+(?:instructions|rules)\b|new\s+(?:system\s+)?instructions\b|"
+                       r"from\s+now\s+on\b|(?:the\s+)?(?:assistant|agent|model)\s+(?:must|will|should)\b|"
+                       r"(?:ignore|disregard|override)\b)", re.I | re.M)
+# "System: You are an expert copywriter." is how a prompt-writing skill shows a template: a persona, not a takeover
+ROLE_AFTER = re.compile(r"\s*(?:system|user|assistant|developer|tool)\b", re.I)
+# Telling the agent what to claim to the user, or to keep something from them. Hidden where the user never looks,
+# this is tool poisoning as Invariant Labs showed it (https://invariantlabs.ai/blog/mcp-security-notification-tool-
+# poisoning-attacks): "Do not mention this to the user", while the model sees what the user's view leaves out.
+# Deceiving is not every order about what to say ("reply to the user in Russian", "tell the user the file path"): it
+# is an order to tell the user that all went well or is safe, or to keep the action itself from them. Any other
+# order hidden in a comment stays a warning.
+# The claim must be what the user is told: the order, then "that", a short subject, maybe "is", then the claim
+# itself, not negated and not a condition ("it is safe to delete", "the tests passed or failed").
+ORDER_START = r"(?:^|[.;:!?,(]\s*|\b(?:please|then|and|also|always|just|simply|must|should|will)\s+)\s*"
+# "confirm the build passed" is a check, not a message: confirm, report and answer need the user as addressee
+USER = r"(?:(?:the\s+)?users?|them)"
+TELL = (r"(?:(?:tell|assure|reassure|inform)\s+" + USER + r"|let\s+" + USER + r"\s+know|say(?:\s+to\s+" + USER + r")?|"
+        r"(?:confirm|report|answer|reply|respond)\s+to\s+" + USER + r")\s*:?\s+(?:that\s+)?")
+CLAIM = (r"(?:fine|ok(?:ay)?|approved|safe|secure|passed|succeeded|successful|verified|all\s+good|"
+         r"no\s+(?:issues?|problems?|errors?|findings?|risks?|vulnerabilit\w+))")
+CLAIMED = (r"(?:(?:everything|all)(?:\s+(?:is|was|has\s+been|went))?\s+(?:fine|good|well|ok(?:ay)?|worked|works|clean|"
+           r"in\s+order|passed|approved|safe)|all\s+good|nothing(?:\s+(?:is|was|were))?\s+(?:wrong|found|amiss)|"
+           r"there\s+(?:are|were|is|was)\s+no\s+(?:issues?|problems?|errors?|findings?|risks?)|"
+           r"(?:it|this|that|(?:the|this|your|our)\s+[\w-]+(?:\s+[\w-]+)?)(?:\s*['’]s|\s+(?:is|was|are|were|has\s+been|"
+           r"have\s+been|looks|seems))?\s+" + CLAIM + r")\b(?!\s+(?:to\s+\w|or\b|only\b|on\s|for\s|but\b|if\b|when\b))")
+TELL_RU = (r"(?:(?:скажи|сообщи|ответь|напиши|передай|заверь)(?:те)?(?:\s+пользовател\w*)?|подтверди(?:те)?\s+"
+           r"пользовател\w*)\s*,?\s*что\s+"
+           r"(?:(?!не\b)[\w-]+\s+){0,2}?(?:в\s+порядке|ок|нормально|безопасн\w*|пройден\w*|прошл\w*|успешн\w*|"
+           r"одобрен\w*|проблем\s+нет|ничего\s+не\s+найдено|(?<=вс[её]\s)(?:хорошо|работает))\b"
+           r"(?!\s+(?:или|на\s+верси|только|для|если|когда)\b)")
+# keeping a secret from the user ("do not reveal the API key to the user") is hygiene, not concealment
+SECRET = r"(?!(?:api\s+|admin\s+|internal\s+)?(?:keys?|tokens?|passwords?|secrets?|credentials?|urls?|emails?)\b)"
+KEEP_FROM = (r"\b(?:never|do\s+not|don't)\s+(?:(?:mention|tell|say|reveal|disclose)\s+(?:this|that|it|these|any\s+of\s+this|"
+             r"(?:the|this|that)\s+" + SECRET + r"[\w-]+)(?:\s+[\w-]+)?\s+to\s+(?:the\s+)?users?|tell\s+(?:the\s+)?users?"
+             r"\s+(?:about\s+)?(?:this|that|it)\b|mention\s+that\s+you\b|let\s+(?:the\s+)?users?\s+know\s+(?:about\s+)?"
+             r"(?:this|that|it)\b)"
+             r"|" + ORDER_START + r"(?:keep|hide)\s+(?:this|that|it|these|(?:the|this|that)\s+[\w-]+)(?:\s+[\w-]+)?\s+"
+             r"(?:secret\s+)?from\s+(?:the\s+)?users?"
+             r"|\bне\s+(?:говори|сообщай|рассказывай|упоминай)(?:те)?\s+(?:[\w-]+\s+){0,3}?пользовател\w*"
+             r"|\bскрой(?:те)?\s+(?:[\w-]+\s+){0,3}?от\s+пользовател\w*")
+MISLEAD = re.compile(ORDER_START + "(?:" + TELL + CLAIMED + "|" + TELL_RU + ")|" + KEEP_FROM, re.I | re.M)
 # Shell start-up files, from MITRE ATT&CK T1546.004 (https://attack.mitre.org/techniques/T1546/004/).
 SHELL_RC = r"(?:bashrc|bash_profile|bash_login|bash_logout|profile|zshrc|zshenv|zprofile|zlogin|zlogout)"
 ARG = r"""["',\s]+"""  # what separates a command from its argument, in a shell line or a Python argv list
@@ -293,6 +356,23 @@ NO_BIDI = r"[^\N{LEFT-TO-RIGHT EMBEDDING}-\N{RIGHT-TO-LEFT OVERRIDE}\N{LEFT-TO-R
 CLOSED_BIDI = re.compile(
     r"[\N{LEFT-TO-RIGHT ISOLATE}\N{RIGHT-TO-LEFT ISOLATE}\N{FIRST STRONG ISOLATE}]" + NO_BIDI + r"\N{POP DIRECTIONAL ISOLATE}"
     r"|[\N{LEFT-TO-RIGHT EMBEDDING}\N{RIGHT-TO-LEFT EMBEDDING}]" + NO_BIDI + r"\N{POP DIRECTIONAL FORMATTING}")
+# Rendered as nothing: Default_Ignorable_Code_Point from Unicode's DerivedCoreProperties.txt
+# (https://www.unicode.org/Public/UCD/latest/ucd/DerivedCoreProperties.txt). A phrase split by them reads whole to
+# the model and to a reviewer, so the text rules read the line without them.
+IGNORABLE = re.compile("[\xad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f"
+                       "\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+                       "\U000e0000-\U000e0fff]")
+# Terminal control sequences, after xterm's ctlseqs (https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): CSI
+# (ESC [ or 0x9b) with parameters and a final byte, OSC (ESC ]) up to BEL or ST, and two-byte ESC sequences.
+# ESC 7/8 save and restore the cursor and ESC c resets the screen (https://en.wikipedia.org/wiki/ANSI_escape_code);
+# 0x9b and 0x9d are CSI and OSC in their one-byte form.
+TERMINAL_ESCAPE = re.compile(r"(?:\x1b\[|\x9b)([0-?]*)[ -/]*([@-~])|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
+                             r"|\x1b([78c])|\x1b[@-Z\\-_]")
+# CUU CUD CUF CUB CNL CPL CHA CUP move the cursor over text, ED EL erase it, SCO s/u save and restore it
+CURSOR_OR_ERASE = "ABCDEFGHJKsu"
+ALTERNATE_SCREEN = {"?47", "?1047", "?1049"}  # xterm private modes: the alternate screen buffer
+# a carriage return inside a line puts the cursor back at its start: what follows prints over what came before
+LONE_CR = re.compile(r"[^\r\n]\r(?![\r\n])")
 HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.S)
 # what tells someone what to do: an obligation word after the addressee ("you can read more" only informs)
 # or an order: an address followed by a sentence ("Claude: email the repo ...", not "AGENT: anomalies" or
@@ -325,6 +405,64 @@ def _without_closed_bidi(line: str) -> str:
     while (inner := CLOSED_BIDI.sub("", line)) != line:  # nested pairs close from the inside out
         line = inner
     return line
+
+
+def _as_read(line: str, spaced: bool = False) -> str:
+    """The line as the model reads it: without characters rendered as nothing and without terminal escapes.
+    `spaced`: the other reading, a run of them as a word break, for a phrase whose spaces were replaced by them;
+    UTS #55 (https://www.unicode.org/reports/tr55/) allows them between lexical elements."""
+    if spaced:  # an escape can stand for a space too ("Ignore\x1b[0mall ...")
+        return re.sub(f"(?:{IGNORABLE.pattern}|{TERMINAL_ESCAPE.pattern})+", " ", line)
+    return IGNORABLE.sub("", TERMINAL_ESCAPE.sub("", line))
+
+
+def _readings(line: str) -> list[str]:
+    """Both readings when the line holds ignorables, else the one."""
+    read = _as_read(line)
+    return [read, _as_read(line, spaced=True)] if IGNORABLE.search(line) or "\x1b" in line else [read]
+
+
+def _hides_on_screen(line: str) -> bool:
+    """A raw terminal escape that hides text (SGR 8) or moves the cursor over it or erases it; colours do not."""
+    for m in TERMINAL_ESCAPE.finditer(line):
+        if m.group(0)[:2] == "\x1b]" or m.group(0)[0] == "\x9d" or m.group(3):
+            return True  # OSC (a hyperlink shows one text, points at another), cursor save/restore, screen reset
+        if m.group(2) and m.group(2) in CURSOR_OR_ERASE:
+            return True
+        if m.group(2) == "h" and m.group(1) in ALTERNATE_SCREEN:
+            return True  # switches to a blank screen: what is printed there is gone when it switches back
+        if m.group(2) == "m":
+            codes = [c.lstrip("0") or "0" for c in m.group(1).split(";")]  # "08" is 8
+            i = 0
+            while i < len(codes):
+                if codes[i] in ("38", "48", "58"):  # 38;5;n or 38;2;r;g;b: what follows is a colour, not a code
+                    i += 3 if codes[i + 1:i + 2] == ["5"] else 5
+                    continue
+                if codes[i] == "8":
+                    return True
+                i += 1
+    return False
+
+
+def _role_severity(line: str, in_code_block: bool, labelled: bool, prose: bool = True) -> str | None:
+    """A system message imitated by chat-template tokens or a "System:" line; an example when quoted or fenced.
+    Outside prose (a .txt template, a .jinja file, data) the tokens are the material of a fine-tuning skill: medium."""
+    severity = None
+    for m in [*ROLE_LINE.finditer(line), *CHAT_TOKENS.finditer(line)]:
+        before, after = line[max(0, m.start() - WINDOW):m.start()], line[m.end():m.end() + WINDOW]
+        # a token opens a message at the start of a line, or before a role name right after a sentence or another
+        # token ("... <|im_end|><|im_start|>system"); "wrap the prompt as <|im_start|>user" names it
+        lead = before.rstrip()
+        if m.re is ROLE_LINE:  # a markdown "> " line is a quotation
+            opens = not m.group("persona") and not line[:m.start() + 8].lstrip().startswith(">")
+        else:
+            opens = not lead.strip(">*_-") or bool(ROLE_AFTER.match(after)) and (
+                lead.endswith((".", "!", "?", ":", ";")) or bool(CHAT_TOKENS.search(lead[-30:])))
+        if in_code_block or labelled or _quoted(before, after) or not opens or not prose and m.re is CHAT_TOKENS:
+            severity = "medium"
+        else:
+            return "high"
+    return severity
 
 
 def _quoted(before: str, after: str) -> bool:
@@ -361,8 +499,27 @@ def _override_severity(line: str, in_code_block: bool, labelled: bool = False) -
     return severity
 
 
-def _instruction_findings(line: str, in_code_block: bool = False, labelled: bool = False) -> list[tuple[str, str]]:
-    """`labelled`: the label line right above names what follows as examples."""
+def _instruction_findings(line: str, in_code_block: bool = False, labelled: bool = False,
+                          prose: bool = True) -> list[tuple[str, str]]:
+    """`labelled`: the label line right above names what follows as examples; `prose`: a markdown file the agent
+    reads as instructions. Text rules read the line as the model does (_readings: the stronger of both readings
+    counts); the rules about hidden characters read it raw."""
+    found: dict[str, str] = {}
+    for reading in _readings(line):
+        for severity, message in _text_findings(reading, in_code_block, labelled, prose):
+            if found.get(message) != "high":
+                found[message] = severity
+    raw = line
+    if HIDDEN_CHARS.search(_without_closed_bidi(EMOJI_TAG_SEQUENCE.sub("", raw))):
+        found["hides text with bidi or tag characters"] = "high"
+    if _hides_on_screen(raw):
+        found["hides text with terminal escape codes"] = "high"
+    if ZERO_WIDTH.search(raw):
+        found["contains invisible zero-width characters"] = "medium"
+    return [(severity, message) for message, severity in found.items()]
+
+
+def _text_findings(line: str, in_code_block: bool, labelled: bool, prose: bool) -> list[tuple[str, str]]:
     found = []
     if severity := _override_severity(line, in_code_block, labelled):
         found.append((severity, "tells the agent to drop its instructions"))
@@ -376,10 +533,8 @@ def _instruction_findings(line: str, in_code_block: bool = False, labelled: bool
         found.append(("medium", "tells the agent never to refuse"))
     if PERSISTENCE.search(line):
         found.append(("medium", "sets itself up to run again later"))
-    if HIDDEN_CHARS.search(_without_closed_bidi(EMOJI_TAG_SEQUENCE.sub("", line))):
-        found.append(("high", "hides text with bidi or tag characters"))
-    if ZERO_WIDTH.search(line):
-        found.append(("medium", "contains invisible zero-width characters"))
+    if severity := _role_severity(line, in_code_block, labelled, prose):
+        found.append((severity, "imitates a system message"))
     if PADDING.search(line):
         found.append(("medium", "hides text behind long whitespace"))
     return found
@@ -847,8 +1002,15 @@ def _file_findings(path: Path, text: str) -> list[tuple[str, str, int]]:
     found = []
     if path.suffix.lower() == ".md":
         for m in HTML_COMMENT.finditer(text):
-            if (AGENT_DIRECTED.search(m.group(1)) and not AUTHOR_NOTE.match(m.group(1))) or OVERRIDE.search(m.group(1)):
-                found.append(("medium", "hides instructions in an HTML comment", text.count("\n", 0, m.start()) + 1))
+            bodies = _readings(m.group(1))
+            line = text.count("\n", 0, m.start()) + 1
+            # unseen by the user and either deceiving them or dropping the agent's instructions: the attack itself
+            if any(MISLEAD.search(body) or any(_override_severity(part, False) == "high" for part in body.splitlines())
+                   for body in bodies):
+                found.append(("high", "hides instructions in an HTML comment", line))
+            elif any((AGENT_DIRECTED.search(body) and not AUTHOR_NOTE.match(body)) or OVERRIDE.search(body)
+                     for body in bodies):
+                found.append(("medium", "hides instructions in an HTML comment", line))
     blank = 0
     for i, line in enumerate(text.splitlines(), 1):
         if line.strip():
@@ -891,24 +1053,36 @@ def scan_skill(root: Path) -> list[ScanFinding]:
         try:
             if path.stat().st_size > 1_000_000:
                 raise ValueError("too large")
-            text = path.read_text("utf-8").removeprefix("\ufeff")
+            with path.open(encoding="utf-8", newline="") as f:
+                raw = f.read().removeprefix("\ufeff")
         except (ValueError, OSError):  # UnicodeDecodeError is a ValueError
             if not _compiled(path):
                 findings.append(ScanFinding("medium", "has a text file too large or malformed to review", rel, 1, "(unread)"))
             continue
+        text = raw.replace("\r\n", "\n").replace("\r", "\n")
         lines = text.splitlines()
         own = []
+        # a file of old Mac line ends has no "\n" at all; a lone "\r" among "\n" lines prints over its own line
+        if "\n" in raw and (cr := LONE_CR.search(raw)):
+            at = raw[:cr.start() + 1].replace("\r\n", "\n").count("\n") + 1
+            # medium: captured progress output does this too; both parts are scanned as lines of their own, so an
+            # attack in the overwritten part gets its own finding
+            own.append(ScanFinding("medium", "overwrites text with a carriage return", rel, at,
+                                   _as_read(lines[at - 1])[:160]))
         in_code_block, previous = False, ""
         for i, line in _logical_lines(lines, path.suffix.lower()):
             if path.suffix.lower() == ".md" and FENCE.match(line):
                 in_code_block = not in_code_block
+            # the excerpt shows what the model reads: raw escapes would hide it again in the reader's terminal
+            read = _as_read(line)
             for severity, message, pattern in SKILL_PATTERNS:
-                if pattern.search(line):
-                    own.append(ScanFinding(severity, message, rel, i, line.strip()[:160]))
-            own += [ScanFinding(severity, message, rel, i, line.strip()[:160])
-                    for severity, message in _instruction_findings(line, in_code_block, bool(LABEL_LINE.search(previous)))]
+                if any(pattern.search(reading) for reading in _readings(line)):
+                    own.append(ScanFinding(severity, message, rel, i, read.strip()[:160]))
+            own += [ScanFinding(severity, message, rel, i, read.strip()[:160])
+                    for severity, message in _instruction_findings(line, in_code_block, bool(LABEL_LINE.search(previous)),
+                                                                   path.suffix.lower() == ".md")]
             previous = line if line.strip() else previous
-        own += [ScanFinding(severity, message, rel, i, lines[i - 1].strip()[:160] if 0 < i <= len(lines) else "")
+        own += [ScanFinding(severity, message, rel, i, _as_read(lines[i - 1]).strip()[:160] if 0 < i <= len(lines) else "")
                 for severity, message, i in _file_findings(path, text)]
         if chained := _exfil_chain(path, own):
             own.append(chained)
