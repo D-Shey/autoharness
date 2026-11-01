@@ -49,6 +49,24 @@ def test_classify_matches_english():
     assert "browser-automation" in names and "debugging" in names
     names = [c.name for c, _ in cat.classify("migrate the postgres schema")]
     assert "postgres" in names
+    names = [c.name for c, _ in cat.classify("search the codebase for authentication symbols")]
+    assert "codebase-search" in names
+
+
+def test_codebase_search_capability():
+    cat = Catalog.load()
+    assert "codebase-search" in cat.capabilities
+    cap = cat.capabilities["codebase-search"]
+    assert "leann-server" in cap.mcp
+    assert "leann-server" in cat.mcp_servers
+    report, source = cli.resolve_mcp(cat, "leann-server")
+    assert source == "catalog"
+    assert report["score"] == 90
+    assert report["level"] == "high"
+    assert report["config"]["command"] == "uvx"
+    assert report["config"]["args"] == ["leann==0.3.8", "leann_mcp"]
+    assert report["permissions"]["network"] == "none"
+    assert report["permissions"]["filesystem"] == "read-write"
 
 
 # --- every language autoharness reads: the cases in tests/lang/<code>.json ---------

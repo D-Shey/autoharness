@@ -24,6 +24,14 @@
       "search": ["library documentation"],
       "exclude": ["standard library", "third party libraries", "external libraries"]
     },
+    "codebase-search": {
+      "description": "Semantic code search and structural codebase indexing across large repositories.",
+      "keywords": ["codebase", "symbol", "ast", "navigate", "architecture", "monorepo", "find code", "code search"],
+      "mcp": ["leann-server"],
+      "skills": [],
+      "search": ["semantic code search", "codebase retrieval"],
+      "review": "relevant files and architectural dependencies identified before changes; search queries and retrieved symbols match actual codebase definitions"
+    },
     "github": {
       "description": "Issues, pull requests, code search and repos on GitHub.",
       "keywords": ["github", "pull request", "pr", "issue"],
@@ -128,6 +136,10 @@
     "context7": {
       "config": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@4.1.1"]},
       "permissions": {"network": "context7.com", "filesystem": "none", "shell": false, "secrets": []}
+    },
+    "leann-server": {
+      "config": {"command": "uvx", "args": ["leann==0.3.8", "leann_mcp"]},
+      "permissions": {"network": "none", "filesystem": "read-write", "shell": false, "secrets": []}
     },
     "github": {
       "config": {"type": "http", "url": "https://api.githubcopilot.com/mcp/", "headers": {"Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"}},

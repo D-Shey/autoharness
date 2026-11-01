@@ -8,6 +8,7 @@ a constraint while the brief has any.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import tempfile
@@ -31,6 +32,76 @@ def constraints(task: Task) -> str:
     return "" if NO_CONSTRAINTS.match(text) else text
 
 
+def _non_nested_funcs(tree: ast.AST) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Top-level functions and class methods, excluding closures and inner functions."""
+    funcs = []
+
+    def visit(node: ast.AST, inside_func: bool = False) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not inside_func:
+                funcs.append(node)
+            inside_func = True
+        for child in ast.iter_child_nodes(node):
+            visit(child, inside_func)
+
+    visit(tree)
+    return funcs
+
+
+def outline_python(text: str) -> tuple[str, int] | None:
+    """Fold function and method bodies in Python code, preserving declarations, docstrings, and imports.
+
+    Returns (outlined_text, omitted_lines) or None if parsing fails or nothing was folded.
+    """
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+
+    funcs = _non_nested_funcs(tree)
+    if not funcs:
+        return None
+
+    funcs.sort(key=lambda n: getattr(n, "lineno", 0), reverse=True)
+    lines = text.splitlines(keepends=True)
+    total_omitted = 0
+
+    for f in funcs:
+        if not f.body or not hasattr(f, "end_lineno"):
+            continue
+
+        first_stmt = f.body[0]
+        has_docstring = (
+            isinstance(first_stmt, ast.Expr)
+            and isinstance(getattr(first_stmt, "value", None), ast.Constant)
+            and isinstance(first_stmt.value.value, str)
+        )
+
+        if has_docstring:
+            if len(f.body) <= 1:
+                continue
+            start_line = f.body[1].lineno - 1
+            indent_col = getattr(f.body[1], "col_offset", 4)
+        else:
+            start_line = first_stmt.lineno - 1
+            indent_col = getattr(first_stmt, "col_offset", 4)
+
+        end_line = f.end_lineno
+        lines_to_omit = end_line - start_line
+        if lines_to_omit <= 2:
+            continue
+
+        indent = " " * indent_col
+        fold_marker = f"{indent}...  # {lines_to_omit} lines omitted\n"
+        lines[start_line:end_line] = [fold_marker]
+        total_omitted += lines_to_omit - 1
+
+    if total_omitted <= 0:
+        return None
+
+    return "".join(lines), total_omitted
+
+
 def _skill_files(root: Path) -> tuple[str, list[str]]:
     """What the reviewer reads, and the file listing; whatever is cut or left out is said, never silent."""
     shown, listing, total, unseen, unseen_chars = [], [], 0, 0, 0
@@ -44,7 +115,39 @@ def _skill_files(root: Path) -> tuple[str, list[str]]:
         except (UnicodeDecodeError, OSError):
             listing.append(f"{size} - not shown: not readable as text")
             continue
-        part = text[:min(MAX_FILE, max(MAX_TOTAL - total, 0))]
+        budget = min(MAX_FILE, max(MAX_TOTAL - total, 0))
+        if len(text) <= budget:
+            part = text
+            total += len(part)
+            listing.append(size)
+            shown.append(f"--- {rel}\n{part}")
+            continue
+
+        # File exceeds budget: try AST-aware structural outline for Python code
+        outline_res = outline_python(text) if p.suffix.lower() in (".py", ".pyi") else None
+        if outline_res is not None:
+            outline, omitted_lines = outline_res
+            if len(outline) <= budget:
+                part = outline
+                total += len(part)
+                cut = len(text) - len(part)
+                unseen, unseen_chars = unseen + bool(omitted_lines), unseen_chars + cut
+                listing.append(size)
+                shown.append(f"--- {rel} (AST outline: {omitted_lines} lines folded)\n{part}")
+                continue
+            part = outline[:budget]
+            total += len(part)
+            cut = len(text) - len(part)
+            unseen, unseen_chars = unseen + True, unseen_chars + cut
+            if not part and text:
+                listing.append(f"{size} - not shown: over the reading limit ({cut} characters)")
+                continue
+            listing.append(size)
+            shown.append(f"--- {rel} (AST outline truncated: {cut} more characters not shown)\n{part}")
+            continue
+
+        # Fallback / non-Python truncation
+        part = text[:budget]
         total += len(part)
         cut = len(text) - len(part)
         unseen, unseen_chars = unseen + bool(cut), unseen_chars + cut

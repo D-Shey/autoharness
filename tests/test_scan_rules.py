@@ -904,3 +904,144 @@ def test_vet_says_what_the_reviewer_did_not_see(tmp_path):
     small.mkdir()
     (small / "SKILL.md").write_bytes(b"short\n")
     assert _skill_files(small) == ("--- SKILL.md\nshort\n", ["SKILL.md (6 bytes)"])
+
+
+def test_vet_outline_python():
+    import ast
+    from autoharness.vet import outline_python
+
+    # Syntax error yields None
+    assert outline_python("def broken(: pass") is None
+
+    # Code without functions yields None
+    assert outline_python("x = 1\ny = 2\n") is None
+
+    # Short function (2 lines or less) is not folded
+    short_code = "def short():\n    a = 1\n    return a\n"
+    assert outline_python(short_code) is None
+
+    # Function with docstring only is not folded
+    doc_only = 'def doc_only():\n    """Only doc."""\n'
+    assert outline_python(doc_only) is None
+
+    # Long functions, methods, async functions, decorators, and imports
+    sample_code = (
+        "import os\n"
+        "import sys\n"
+        "\n"
+        "CONSTANT = 42\n"
+        "\n"
+        "@decorator\n"
+        "def top_func(x: int) -> int:\n"
+        '    """Calculate square."""\n'
+        "    step1 = x * x\n"
+        "    step2 = step1 + 1\n"
+        "    step3 = step2 * 2\n"
+        "    return step3\n"
+        "\n"
+        "class Worker:\n"
+        '    """Worker class docstring."""\n'
+        "\n"
+        "    def __init__(self, name: str):\n"
+        "        self.name = name\n"
+        "        self.ready = True\n"
+        "        self.count = 0\n"
+        "\n"
+        "    async def run(self):\n"
+        '        """Run worker."""\n'
+        "        for i in range(10):\n"
+        "            self.count += i\n"
+        "            await sleep(1)\n"
+        "        return self.count\n"
+    )
+
+    res = outline_python(sample_code)
+    assert res is not None
+    outline, omitted_lines = res
+    assert omitted_lines > 0
+    assert "import os" in outline
+    assert "import sys" in outline
+    assert "CONSTANT = 42" in outline
+    assert "@decorator" in outline
+    assert "def top_func(x: int) -> int:" in outline
+    assert '"""Calculate square."""' in outline
+    assert "class Worker:" in outline
+    assert '"""Worker class docstring."""' in outline
+    assert "def __init__(self, name: str):" in outline
+    assert "async def run(self):" in outline
+    assert '"""Run worker."""' in outline
+    assert "...  # 4 lines omitted" in outline
+    assert "...  # 3 lines omitted" in outline
+
+    # The resulting outline must still be valid Python code
+    parsed = ast.parse(outline)
+    assert len(parsed.body) >= 4
+
+
+def test_vet_skill_files_ast_outline_and_fallback(tmp_path):
+    from autoharness.vet import MAX_FILE, _skill_files
+
+    # 1. Large Python file that gets compressed by AST outline to under MAX_FILE
+    py_dir = tmp_path / "py_skill"
+    py_dir.mkdir()
+    (py_dir / "SKILL.md").write_text("Skill documentation\n", encoding="utf-8")
+
+    # Generate a python file with 10 functions, each with a long body
+    funcs = []
+    for i in range(10):
+        body_lines = "\n".join(f"    v_{i}_{j} = {j} * 100" for j in range(25))
+        funcs.append(
+            f"def func_{i}(arg: int) -> int:\n"
+            f'    """Docstring for func {i}."""\n'
+            f"{body_lines}\n"
+            f"    return arg\n"
+        )
+    big_py_content = "import os\nimport sys\n\n" + "\n".join(funcs)
+    assert len(big_py_content) > MAX_FILE
+
+    (py_dir / "tool.py").write_text(big_py_content, encoding="utf-8")
+    text, listing = _skill_files(py_dir)
+
+    # Outline succeeded and fitted within MAX_FILE
+    assert "--- tool.py (AST outline:" in text
+    assert "lines folded)" in text
+    assert "def func_0(" in text
+    assert "def func_9(" in text  # Bottom function is preserved and visible!
+    assert "tool.py" in listing[1]
+
+    # 2. Large Python file with syntax error falls back to raw truncation
+    broken_py_dir = tmp_path / "broken_py"
+    broken_py_dir.mkdir()
+    (broken_py_dir / "SKILL.md").write_text("Skill doc\n", encoding="utf-8")
+    broken_content = "def invalid_syntax(\n" + ("x = 1\n" * (MAX_FILE // 6 + 10))
+    (broken_py_dir / "broken.py").write_text(broken_content, encoding="utf-8")
+    text_broken, _ = _skill_files(broken_py_dir)
+    assert "--- broken.py (truncated:" in text_broken
+
+    # 3. Large Python file where even the AST outline exceeds MAX_FILE
+    huge_outline_dir = tmp_path / "huge_outline"
+    huge_outline_dir.mkdir()
+    (huge_outline_dir / "SKILL.md").write_text("Skill doc\n", encoding="utf-8")
+    # Many functions with large signatures / docstrings so the outline itself > MAX_FILE
+    huge_funcs = []
+    for i in range(120):
+        huge_funcs.append(
+            f"def very_long_function_name_with_lots_of_details_number_{i}(param_a: str, param_b: int) -> str:\n"
+            f'    """Detailed docstring describing function {i} extensively."""\n'
+            f"    a = 1\n    b = 2\n    c = 3\n    return 'done'\n"
+        )
+    huge_py_content = "\n".join(huge_funcs)
+    (huge_outline_dir / "huge.py").write_text(huge_py_content, encoding="utf-8")
+    text_huge, _ = _skill_files(huge_outline_dir)
+    assert "--- huge.py (AST outline truncated:" in text_huge
+    # 4. Large Python file when budget is completely exhausted (MAX_TOTAL reached)
+    exhausted_dir = tmp_path / "exhausted"
+    exhausted_dir.mkdir()
+    (exhausted_dir / "SKILL.md").write_text("Skill doc\n", encoding="utf-8")
+    for i in range(5):
+        (exhausted_dir / f"filler{i}.md").write_text("x" * MAX_FILE, encoding="utf-8")
+    (exhausted_dir / "late.py").write_text(big_py_content, encoding="utf-8")
+    text_ex, listing_ex = _skill_files(exhausted_dir)
+    assert any("late.py" in line and "not shown: over the reading limit" in line for line in listing_ex)
+    assert "--- late.py" not in text_ex
+
