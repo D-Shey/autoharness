@@ -343,6 +343,42 @@ def test_lessons_relevant_matches_variants(project):
     assert res_variant and res_variant[0]["id"] == 1
 
 
+def test_llms_txt_and_full_index_exist_and_conform_to_spec():
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+
+    # 1. llms.txt validation
+    llms_txt = root / "llms.txt"
+    assert llms_txt.is_file()
+    txt = llms_txt.read_text("utf-8")
+    assert txt.startswith("# AutoHarness")
+    assert "\n> " in txt or "\r\n> " in txt
+    assert "## Core Documentation" in txt
+
+    # Check that all markdown links point to existing files
+    links = re.findall(r"\[.*?\]\((.*?)\)", txt)
+    assert len(links) >= 8
+    for target in links:
+        rel_file = target.split("#")[0]
+        assert (root / rel_file).exists(), f"Broken link {target} in llms.txt"
+
+    # 2. llms-full.txt validation
+    llms_full = root / "llms-full.txt"
+    assert llms_full.is_file()
+    full_txt = llms_full.read_text("utf-8")
+    assert full_txt.startswith("# AutoHarness Full Documentation")
+    assert len(full_txt) > 20000
+
+    # 3. Generator script exists and succeeds
+    import sys
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from scripts.generate_llms_txt import generate_llms_txt, generate_llms_full_txt
+    assert generate_llms_txt() == txt
+    assert len(generate_llms_full_txt()) > 20000
+
+
 def test_cli_add_requires_approval_for_secret_server(project, capsys):
     cli.main(["--project", str(project.root), "init", "open a github PR"])
     code = cli.main(["--project", str(project.root), "add", "mcp", "github"])

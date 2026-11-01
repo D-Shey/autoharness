@@ -1,0 +1,1397 @@
+# AutoHarness Full Documentation
+
+> Complete concatenated documentation for AutoHarness, optimized for LLM context ingestion.
+
+---
+
+<!-- START FILE: README.md (Project Overview & Workflow) -->
+## Project Overview & Workflow (`README.md`)
+
+<div align="center">
+
+# AutoHarness
+
+**Engineering discipline for coding agents.**<br>
+Prepare before building. Check against the original. Let someone else judge the result.
+
+[![Tests](https://github.com/D-Shey/autoharness/actions/workflows/tests.yml/badge.svg)](https://github.com/D-Shey/autoharness/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
+![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+Works with **Claude Code** · **Codex CLI** · **Gemini CLI** · **Antigravity CLI** · **Qwen Code** · **GigaCode** · **Strands**
+
+[How it works](#the-process) · [Quick start](#quick-start) · [Example](#example) · [Security](docs/security.md) · [Reference](docs/reference.md)
+
+</div>
+
+---
+
+AutoHarness keeps an agent from taking on a task unprepared. The agent works out what the task needs,
+gathers the know-how and tools for it, and an independent critic checks the result until the quality
+is acceptable.
+
+| An agent on its own | The same agent with AutoHarness |
+|---|---|
+| Writes from memory | Gets the original first: the real API response, the data sample, the mockup |
+| Guesses how the work is done | Finds and reads how it is done well, and cites it |
+| Installs whatever looks right | Installs only what passes a trust check and the user's constraints |
+| Fills open questions with its own habits | Picks what the person who asked would expect, and writes it down |
+| Marks its own work "done" | A fresh reviewer that did not do the work rules on it |
+| Loops on the same fix | Changes approach, then asks an arbiter, then the user |
+| Forgets everything after the session | Keeps what it learned as skills and recipes for the next task |
+
+A coding agent (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands)
+usually goes at a task head-on. It writes from memory without looking at what the result has to
+match, without finding out how such work is done well, and then marks its own work "done". The
+ceiling on quality is then whatever the model remembers. It shows on any task: an integration with
+someone else's API, tests, setting up an environment, a page built from a mockup, a drawing that
+has to match a reference image.
+
+Engineers do not work that way. Nobody builds an aircraft from memory: the work is split into
+disciplines (aerodynamics, materials, strength, control), what is already known in each is looked
+up, hypotheses are checked on models, and only then is it built. AutoHarness brings that order to
+the agent:
+
+```mermaid
+flowchart LR
+    A[Analysis<br><code>init</code>] --> P[Preparation<br>areas · method · reference · facts]
+    P --> B[Brief<br>the plan, recorded]
+    B --> I[Install<br>trust · constraints]
+    I --> S[Base<br>block-in first]
+    S --> R{Review<br>independent critic}
+    R -- blocking --> L[Learn<br>update the skill, then fix]
+    L --> R
+    R -- minor or none --> T[Teardown<br>skills · recipes · lessons]
+    P -. nothing fits .-> W[Write a skill<br>from the sources read]
+    W --> B
+```
+
+The two sides split the work: **the agent thinks, the CLI keeps count and guards the order**. The
+agent decides what the task needs and whether the result is good. The `autoharness` CLI searches
+registries, scores trust, installs and removes tools, keeps the records, and does not let the agent
+move on until the previous step is done. Every command answers in JSON with a `next` field that
+says what to do next. Exit code `3` always means one thing: *stop and ask the user*.
+
+## The process
+
+### 1. Analysis: `init`
+
+```bash
+autoharness init "<the user's task, verbatim>" --mode light|full|reviewed|auto
+```
+
+- `light`: a chore that needs no capability from the catalog (a typo, a commit). No search and no
+  brief: do the work, check it, `teardown`. A task that needs any capability (an API, a browser,
+  tests, debugging, an image) is raised to `full` by `init`, whatever the agent chose.
+- `full`: something is missing: what to check against, know-how, a way to verify. The full cycle
+  below applies.
+- `reviewed`: the full cycle plus a mandatory independent critic before the end.
+
+`init` searches [skills.sh](https://skills.sh) and the [official MCP
+registry](https://registry.modelcontextprotocol.io) for the task right away. It shows similar saved
+setups (`recipes`), candidates earlier tasks rejected (with the reason), and open follow-ups. A
+running task can be raised without starting over: `autoharness mode full`.
+
+### 2. Preparation: areas of know-how, search, method
+
+This is where quality is decided, and it is the step agents usually skip.
+
+- **Areas of know-how.** The agent splits the task into the areas the work itself is made of: for a
+  service, its protocol, data model and concurrency; for a drawing, figures, anatomy and light. For
+  each, it looks for something ready-made (`autoharness search skill|mcp "<query>"`,
+  `autoharness need`) and takes what fits. If nothing fits, it writes its own skill from the
+  sources it read.
+- **Method.** How this kind of work is done well: the algorithm, the order, the known pitfalls. The
+  agent takes it from sources it found and read, with links, not from memory.
+- **Input.** The original the result has to match: the API's real response, a data sample, the
+  mockup, the reference image. A description of it does not count. A search page, a gallery or
+  someone's version of it (fan art, a mockup, a blog example) is not the original either.
+- **Facts.** Before the first result the agent measures with a tool what the result will be judged
+  on: fields and values, sizes, positions, proportions, timings. Then it records them
+  (`evidence add <file> --kind facts`).
+- **Open choices.** Where the task leaves a choice open (a format, a value or a formula, what a field
+  holds) and the user cannot be asked, the agent picks what the person who asked would take for
+  granted on first look: the plain, simple form, nothing they did not ask for. A tool's or a skill's
+  advice does not decide it.
+
+These are not suggestions. The CLI requires each part:
+
+| What | How it is enforced |
+|---|---|
+| Every area is covered | `brief --domains "<area>: skill\|mcp\|create <name> (searched: <query>)"`. The search must actually have run in this task, and the skill or server must be among its results. "I already know how" is not accepted: that knowledge goes into a skill |
+| Method from sources | `brief --method "<technique>: <url>; …; searched: <queries>"`. Without links only an explicit `nothing usable; searched: …` is accepted |
+| Open choices settled | `brief --expects "<open choice>: <pick> - <why they would expect it>; …"` or `none: <why>`. Each becomes a brief item the critic checks |
+| Skills in use, not in words | The first result is refused until the skills taken are installed and the skills to create are created and filled in |
+| Facts from the reference | `--kind facts` is refused without a reference. The first result is refused until there are facts taken after the reference |
+
+### 3. Brief: the plan before the work
+
+```bash
+autoharness brief --goal "<quality bar>" --domains "..." --method "..." \
+  --inputs "<what is missing and where to get it>" --expects "<open choice>: <pick> - <why>; ..." \
+  --constraints "<the user's constraints, verbatim>" \
+  --verify "<how to check, against what>" --candidates "<name>: take|skip, why; …" \
+  --gaps "create <skill>: <what it does>; …"
+```
+
+The brief records what a good result is and how it will be checked, the user's constraints verbatim
+("no new dependencies", "offline only"), and a verdict on every candidate. Work that is judged by eye
+needs `--fidelity`: the level the result is judged at ("stylised poster, not a photograph"). Browser,
+API, log and database checks have ready templates
+(`--verify-template browser|api|api-client|logs|database`). With the [hook](docs/installation.md)
+the agent cannot change anything until the brief is recorded.
+
+### 4. Install: trust and constraints
+
+```bash
+autoharness inspect mcp <name>        # trust score, secrets, where the server connects
+autoharness add mcp <name>  |  autoharness add skill <owner/repo@skill>
+```
+
+- **Trust score.** The curated catalog is trusted. Registry servers are scored by namespace, pinned
+  version and publisher. Anything not "high", anything with secrets and anything remote is
+  installed only after an explicit "yes" from the user.
+- **Skill scan.** A skill is downloaded to a temporary folder and checked for dangerous patterns:
+  `~/.ssh`, `curl | sh`, "don't tell the user", obfuscation.
+- **Constraints.** When the brief has any, a fresh subagent checks the candidate against them
+  (`vet`), not the agent that wants to install it.
+- **Network.** With `allowed_hosts` set, a server outside the list is installed only with the
+  user's consent.
+
+After installing, the agent makes one cheap call to try it. If it does not work: `remove` and the
+next candidate. There is no point spending long on fixing someone else's tool.
+
+### 5. Base: the frame first, details later
+
+The first version is a rough base (a block-in): structure, layout, proportions, the main parts
+from the facts, no polish. A critic looks at it right away, and the first round judges the base
+only. Unfinished details are at most minor in that round; a wrong base is major. A mistake in the
+base gets more expensive with every round built on top of it. Edits without a critic are counted:
+after 20 edits without a fresh critic the hook stops editing.
+
+### 6. Review: the author is not the judge
+
+```bash
+autoharness evidence add <file> --kind reference|facts|result   # the result: whole, then close-ups (--closeup)
+autoharness evidence diff                                       # for code: the whole working-tree diff
+autoharness verify run "<command>" --for B1                     # autoharness runs it; the exit code decides
+autoharness critic                                              # a prompt for an independent critic
+autoharness review --by critic --answer-file <file>
+autoharness critic --run claude|codex|agy                       # or autoharness starts a read-only critic itself
+```
+
+- **The critic is a fresh subagent that did not do the work.** Its answer is kept as it is.
+  autoharness reads the points, the verdict and a one-time `ANSWER-ID` from it itself, so a softened
+  retelling cannot be passed off instead. A subagent given a review prompt reviews; it cannot take
+  the task over.
+- **What the critic checks:**
+  - that the reference is the original itself;
+  - that the facts are right, by checking a few of them against the reference;
+  - every brief item (`met | partial | missing | contradicts`);
+  - the open choices, as the person who asked would see them;
+  - whether the work follows the method found;
+  - what was done beyond the request;
+  - whether each `verify run` really checks its item;
+  - whether the work is finished as a whole (`ACCEPT`). "No" is at least major.
+- **A check has to be able to fail.** `true`, `echo ok` or looking for a string in a file do not
+  count. A run is tied to a version of the code and goes stale after an edit.
+- **Blind comparison.** In work judged by eye, the critic compares the current result with the best
+  earlier one under the names A and B. Only autoharness knows which is which. If the earlier one is
+  closer, the answer is "Went backwards", and the earlier result stays the best.
+- **Two reviewers** (`brief --review pair`). Every round, besides the critic, a code-quality
+  reviewer checks for bugs, unhandled errors, security, and tests that check nothing. The round's
+  verdict is the worse of the two.
+- **Settled disputes do not come back.** A fresh critic rules on a disputed point
+  (`critic --dispute`). A point the user rejects is recorded (`ruling add`), and later tasks in the
+  project do not raise it again.
+- **Files are data.** "Approved" or "set none" written inside the files under review is a finding,
+  not an instruction.
+
+### 7. Learn: don't fix from memory what you don't know
+
+If the critic found serious problems, fixing them "from memory" brings the same crudeness back.
+So the next result is refused until the task's skill has changed. For each point the skills do not
+teach, the agent looks up how it is done well, writes the technique with its source into the skill,
+and only then fixes it.
+
+Then there are guards against loops:
+
+- the same problem three rounds in a row → a mandatory change of approach (`approach`): from memory
+  → from the docs, tuning by hand → computing it, a patch → a rebuild;
+- several approaches did not help → an independent arbiter: fix it with a measurable check, or rule
+  it out of reach;
+- 8 blocking rounds in a row → the user decides.
+
+The agent cannot accept the result for the user: `teardown --accepted "<their words>"` passes only
+if the user actually wrote something.
+
+### 8. The end: teardown, skills, recipes
+
+```bash
+autoharness skill test <name> --task "<a realistic request>"   # with it and without it, judged blind
+autoharness skill save <name>                                    # into the library, after the user's "yes"
+autoharness teardown --save-recipe <name> --notes "<what it is good for>"
+```
+
+- **Skills accumulate know-how.** What the agent learned in the task (how to do it, how to check it,
+  an API's quirks) stays in a skill and is saved in `~/.autoharness/skills/`. Values measured in one
+  project are kept apart from the procedure: the next task checks them again.
+- **Lessons from friction.** If the task went hard (checks failed, the approach had to change, the
+  result went backwards, the user stepped in), teardown stops once and asks what broke and what
+  helped. Short conclusions accumulate with `lesson add`. A conclusion confirmed by three tasks moves
+  into a skill.
+- **A recipe** remembers the setup and the queries that found it. A similar task gets it right away,
+  and the queries run again to find something better if it appeared.
+- **What stays in the project** is set by the `teardown` setting: `keep` (the default) or `remove`.
+  `autoharness config set teardown remove [--global]`.
+
+## Example
+
+Task: *"accept payments through a payment provider's API; the webhooks must be secure"*. The session
+is illustrative and the CLI's answers are shortened.
+
+```bash
+autoharness init "accept payments through a payment provider's API, secure webhooks" --mode reviewed
+
+autoharness search skill "payment webhooks"         # what already exists for this area
+autoharness search mcp "payments api"
+autoharness search skill "idempotency"
+
+autoharness brief --goal "a payment goes through, a repeated webhook does not charge twice, a forged one is refused" \
+  --domains "payments API: mcp <server from the search> (searched: payments api); \
+             webhook signatures: skill <skill from the search> (searched: payment webhooks); \
+             idempotency: create idempotent-handlers (searched: idempotency)" \
+  --method "verify the signature over the raw body, an idempotency key, retries with backoff: <url>; …; searched: …" \
+  --inputs "real responses and webhooks of a sandbox account" \
+  --expects "amounts: integer minor units - what the provider's API takes" \
+  --constraints "no new dependencies" \
+  --verify "tests on real saved webhooks: forged, repeated, out of order" \
+  --candidates "<server>: take, …; <skill>: take, …" --gaps "create idempotent-handlers: …"
+
+autoharness add mcp <server>  &&  autoharness add skill <skill>
+autoharness skill new idempotent-handlers --description "…"     # filled from what was read
+
+autoharness evidence add webhook-samples.json --kind reference  # real saved webhooks
+autoharness evidence add webhook-facts.md --kind facts          # fields, the signature header, event order
+# base: the handler, signature check, key storage, nothing around them
+autoharness evidence diff && autoharness critic                 # → major: the signature is computed over parsed JSON
+# learn: why the signature is computed over the raw body → into the skill, then the fix
+autoharness verify run "uv run pytest tests/test_webhooks.py" --for B2
+autoharness evidence diff && autoharness critic                 # → minor
+autoharness teardown --save-recipe payments-webhooks --notes "accepting payments with secure webhooks"
+```
+
+A task with a mockup, a reference image, logs or an environment goes the same way. Only the areas,
+the sources and the way to check change.
+
+## Languages
+
+autoharness reads a task in any language it has a language file for. English is built in; Russian
+ships as `src/autoharness/data/lang/ru.json`. A language file lists, per catalog capability, the
+words that point to it, plus stopwords, common word endings, the ways to say "no constraints" and
+dependency headings. To add a language, add `data/lang/<code>.json` (or `~/.autoharness/lang/<code>.json`
+for yourself) and a matching `tests/lang/<code>.json` with the cases it must understand; no code
+changes are needed.
+
+## Gateway: servers without a restart
+
+An agent usually sees a new MCP server only after a restart. The gateway removes that. One server,
+`autoharness`, is added to the agent's config once; from then on `add mcp` writes new servers to
+`.autoharness/gateway.json` and the gateway starts them on the fly. It gives the agent two
+permanent tools: `harness_tools` and `harness_call(server, tool, arguments)`. It also publishes
+native `<server>__<tool>` tools with `tools/list_changed`. In Claude Code they appear without a
+restart; in Codex and Gemini CLI the meta-tools are the reliable path. A server that arrived in
+`gateway.json` through `git pull` does not start without approval on this machine
+(`autoharness gateway approve`).
+
+## Security in short
+
+- Only what passed the trust check, or what the user said "yes" to, is installed.
+- Skills are scanned before they are copied into the project. Secrets are never written into
+  configs, only `${ENV_VAR}`.
+- An independent subagent checks the user's constraints, not the agent that wants to install.
+- Task records are signed (HMAC, the key lives outside the project). An edit that goes around
+  autoharness shows at teardown, and the hook keeps tools away from the key.
+- Only what autoharness installed on this machine is removed.
+- The hook and `--approve` frame the procedure; they are not a sandbox. Where each protection ends
+  is described in [docs/security.md](docs/security.md).
+
+## Quick start
+
+```bash
+uv tool install git+https://github.com/D-Shey/autoharness   # the CLI (needs uv; skills and MCP need Node.js)
+autoharness agents                                          # which agents are found
+cd /path/to/your/project
+autoharness --agent claude install-skill                    # the skill for the agent (--user --all: every agent)
+autoharness --agent claude gateway install                  # optional: MCP servers without restarts
+autoharness --agent agy gateway install --user              # the same for every project (agy, Gemini, Qwen, GigaCode)
+autoharness install-hook                                    # optional: Claude Code does not start without a brief
+autoharness --agent agy install-hook                        # the same for Antigravity CLI
+```
+
+If `autoharness` is not found, run `uv tool update-shell` and open a new terminal. Restart the agent
+and give it a task.
+
+| Agent | `--agent` |
+|---|---|
+| Claude Code | `claude` |
+| Codex CLI | `codex` |
+| Gemini CLI | `gemini` |
+| Qwen Code | `qwen` |
+| GigaCode CLI | `gigacode` |
+| [Strands harness](https://github.com/strands-agents/harness-sdk) | `strands` |
+| Antigravity CLI | `agy` |
+
+## Documentation
+
+- [docs/reference.md](docs/reference.md): every command and where everything is kept. It also covers
+  follow-ups found outside the task (`followup`), measuring the benefit (`eval record|batch|compare`),
+  settled disputes (`ruling`) and settings (`config`).
+- [docs/installation.md](docs/installation.md): installing for every agent, the gateway, the hook,
+  uninstalling.
+- [docs/security.md](docs/security.md): how each protection works and where it ends.
+- [docs/design/](docs/design/): the specs and plans features were built from.
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md).
+
+## Limitations
+
+- Quality still depends on the model. AutoHarness makes it prepare, check itself against the
+  original and learn, but it does not draw or write code for it.
+- autoharness's checks are formal. It sees that a search ran, a skill changed, facts were recorded,
+  but not how good they are. The substance is judged by the critic, and the critic is a model too.
+- A task's text can leave a choice open that only its author could settle. The brief and the critic
+  pick what a person would most likely expect, which is not always what a hidden check wants.
+- The gateway does not do OAuth sign-in or the legacy SSE transport: such servers go into the agent's
+  config and need a restart.
+- `allowed_hosts` limits remote servers only. A local process connects wherever it wants.
+
+## Development
+
+```bash
+git clone https://github.com/D-Shey/autoharness.git && cd autoharness
+uv tool install -e .            # the autoharness command sees edits right away
+uv run --extra dev pytest       # tests; uv creates .venv and installs pytest itself
+```
+
+<!-- END FILE: README.md -->
+
+---
+
+<!-- START FILE: docs/installation.md (Installation and Agent Setup) -->
+## Installation and Agent Setup (`docs/installation.md`)
+
+# Installation
+
+What autoharness is and how it works is in the [README](../README.md). This page covers installation
+only.
+
+Installation has three steps: install the CLI (once per machine), give the agent the skill (in the
+project or globally), and optionally connect the gateway so new MCP servers work without restarting
+the agent. Claude Code and Antigravity CLI have an optional fourth step: the hook.
+
+## 1. The `autoharness` CLI
+
+It is installed with [uv](https://docs.astral.sh/uv/) as a standalone tool: uv picks a suitable
+Python (3.11+) itself and puts the `autoharness` command into its folder for executables. There are
+no external dependencies.
+
+If uv is not installed yet:
+
+```bash
+# Linux/macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Install autoharness straight from GitHub:
+
+```bash
+uv tool install git+https://github.com/D-Shey/autoharness
+autoharness agents        # check: prints the supported agents and the one detected
+```
+
+The `autoharness` command must be on `PATH`: both the agent and the gateway call it. uv puts it into
+`~/.local/bin` (on Windows `%USERPROFILE%\.local\bin`; the exact path is `uv tool dir --bin`). If
+`autoharness agents` answers "command not found", run `uv tool update-shell` and open a new
+terminal. Start the agent from a new terminal as well, or it will not see the updated `PATH`.
+
+Upgrading and uninstalling:
+
+```bash
+uv tool upgrade autoharness       # pull the latest commit from GitHub
+uv tool uninstall autoharness
+```
+
+If you work on autoharness itself, install it from a local clone in editable mode, so changes to the
+code are seen by the `autoharness` command right away:
+
+```bash
+git clone https://github.com/D-Shey/autoharness.git
+cd autoharness
+uv tool install -e .
+```
+
+Most skills and MCP servers in the catalog also need Node.js (`npx`, including `npx skills` for
+installing skills); Python servers run through `uvx`, which comes with uv.
+
+## 2. The skill for the agent
+
+The skill is a `SKILL.md` from which the agent learns how to use autoharness. Each agent gets its own
+version: with the right agent name, the path to its MCP config and the hint about restarting. That
+is why **the agent has to be named explicitly**: in a plain terminal autoharness does not know whom
+it installs for and defaults to `claude`.
+
+`--agent` is a global flag and goes **before** the subcommand:
+
+```bash
+cd /path/to/your/project                       # commands work on the current folder (or --project)
+
+autoharness --agent claude   install-skill     # into the project: .claude/skills/autoharness/SKILL.md
+autoharness --agent codex    install-skill --user   # globally: ~/.agents/skills/autoharness/SKILL.md
+autoharness install-skill --all                # into the project, for every agent at once
+```
+
+| Agent | `--agent` | Skill in the project | Skill globally (`--user`) |
+|---|---|---|---|
+| Claude Code | `claude` | `.claude/skills/autoharness/` | `~/.claude/skills/autoharness/` |
+| Codex CLI | `codex` | `.agents/skills/autoharness/` | `~/.agents/skills/autoharness/` |
+| Gemini CLI | `gemini` | `.gemini/skills/autoharness/` | `~/.gemini/skills/autoharness/` |
+| Qwen Code | `qwen` | `.qwen/skills/autoharness/` | `~/.qwen/skills/autoharness/` |
+| GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
+| Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (strands does not read it by itself: pass the path to `create_harness(skills=...)`) |
+| Antigravity CLI | `agy` | `.agents/skills/autoharness/` | `~/.gemini/config/skills/autoharness/` |
+
+Codex and Antigravity CLI read the same `.agents/skills`, so they share the project's `SKILL.md`: it
+names `--agent` and the MCP config for each of the two agents. Their global skills differ: agy does
+not read `~/.agents/skills`. In `/skills`, agy 1.4.0 suggests `~/.gemini/antigravity-cli/skills` for
+global skills but loads them only from `~/.gemini/config/skills`, so `--user` writes there.
+
+Project or global:
+
+- **in the project**: the skill works only in this project; it can be committed and the whole team
+  gets it;
+- **globally (`--user`)**: the skill is there in every project on this machine.
+
+Agents read skills when a session starts: start a new session after installing. Running
+`install-skill` again overwrites `SKILL.md`, which is how it is updated after autoharness is
+upgraded. `init` warns when an installed `SKILL.md` is out of date.
+
+## 3. The gateway (optional, recommended)
+
+Without the gateway every new MCP server is written straight into the agent's config, and the agent
+has to be restarted. With the gateway only one restart is needed, after the gateway itself is
+installed (how it works is in the [README](../README.md#gateway-servers-without-a-restart)):
+
+```bash
+autoharness --agent claude gateway install     # writes the `autoharness` server into the agent's config
+autoharness --agent claude gateway status      # whether it is installed and which servers run
+```
+
+The gateway is installed into the project and **separately for each agent**: `gateway install` has no
+`--all`, so repeat the command with each `--agent`. `add mcp` goes through the gateway only for an
+agent that has the gateway installed. `--user` installs it into the agent's own config for every
+project (agy, Gemini, Qwen, GigaCode).
+
+Codex may need one more restart when a new server needs an environment variable the gateway does not
+pass yet. `add` and `gateway approve` say so and write its name into `env_vars`; set the value in the
+environment Codex is started from.
+
+What to do in each agent after `gateway install`:
+
+| Agent | Where the gateway is written | How the agent picks it up |
+|---|---|---|
+| Claude Code | `.mcp.json` | restart Claude Code (or `/mcp`) and **approve** the project server `autoharness` |
+| Codex CLI | `.codex/config.toml` | restart Codex; the project config is read only if the project is marked **trusted** |
+| Gemini CLI | `.gemini/settings.json` | restart or run `/mcp refresh` |
+| Qwen Code | `.qwen/settings.json` | restart or run `/mcp refresh` |
+| GigaCode CLI | `.gigacode/settings.json` | restart or run `/mcp refresh` |
+| Strands harness | `.agent/mcp.json` | pass `create_harness(mcp_servers=".agent/mcp.json")` and create the agent again |
+| Antigravity CLI | `.agents/mcp_config.json` | restart `agy` |
+
+Check: the tools `harness_tools` and `harness_call` should appear in the agent. In Claude Code they
+may arrive deferred; tool search finds them.
+
+The config gets the full path to the current Python and the command
+`-m autoharness --project <absolute project path> gateway serve`. That rules out starting another
+installation from `PATH` by accident, or picking another project by the working directory. It works
+as long as that Python is there: after `uv tool uninstall` or a reinstall, run `gateway install`
+again, with `autoharness` on `PATH`.
+
+## 4. The hook for Claude Code and Antigravity CLI (optional)
+
+Without the hook the agent goes through autoharness when it decides by itself that the skill fits.
+The hook makes it mandatory: on the first real request of a session it reminds the agent to call the
+skill, and until a brief is recorded it denies the tools that change things (`Write`, `Edit`, shell
+commands that write, MCP tools). Reading files, and shell commands that only list or read (`ls`,
+`cat`, `git status`, `Get-ChildItem`), stay open.
+
+The hook also:
+
+- always denies writes to the task records in `.autoharness/`, by write tools and by the obvious
+  shell commands (`>`, `tee`, `sed -i`, `Set-Content`, `Out-File`, `cp`/`mv`/`rm`, writes from
+  `python -c`), and any tool's access to the `integrity.key`. The exception is
+  `.autoharness/config.json`, the user's settings. This guards against shortcuts; it is not a
+  sandbox: what gets past it is caught by the signature of `task.json` at teardown;
+- stops a loop: the sixth identical tool call in a row (the same command, the same input) is denied.
+  The agent is told to change the call, find what is missing (`autoharness need`) or ask the user.
+  Any other call resets the count;
+- leaves alone a subagent that was given a review prompt of the task (a critic or a vet reviewer): it
+  reviews, it does not own the task and cannot claim it;
+- in Claude Code (the `Stop` event) sends the agent back when it ends its turn while its own task is
+  still open: to finish the check, the critic and `teardown`, or to tell the user what it is waiting
+  for. It sends it back once per state of the task. If the agent stops again and nothing changed, the
+  turn ends, so a question to the user still gets through. agy has no such event.
+
+```bash
+autoharness install-hook            # into the project's .claude/settings.json
+autoharness install-hook --user     # into ~/.claude/settings.json, for every project
+autoharness install-hook --remove   # take it out
+```
+
+It applies in new sessions (or open `/hooks` in the current one). To skip autoharness in one session
+because the user said so: `autoharness waive <session id> --reason "<their words>"`.
+
+### Antigravity CLI (agy)
+
+```bash
+autoharness --agent agy install-hook          # into the project's .agents/hooks.json
+autoharness --agent agy install-hook --user   # into ~/.gemini/config/hooks.json, for every project
+autoharness --agent agy install-hook --remove
+```
+
+agy has no event for the user's request, so the reminder comes from `PreInvocation` on the first
+model call of a turn (`invocationNum` 0): the hook takes the request's text from the transcript and
+answers with an `ephemeralMessage`. `PreToolUse` closes `write_to_file`, `replace_file_content`,
+`run_command`, `call_mcp_tool` and the like with `{"decision": "deny"}`. A session is a
+`conversationId`; `waive` takes it. agy runs the hook through `cmd /c` in the folder of `hooks.json`,
+and the project comes from `workspacePaths`. Note: if the hook did not run (no `autoharness` on
+`PATH`, a start error), agy denies the tool call, and it treats an empty `{}` from the hook as a
+denial too. If every agy tool is suddenly refused with `pre-tool hook`, check `autoharness hook` in
+the same console or remove the hook with `--remove`. It applies after agy restarts; a project
+`hooks.json` is loaded once the folder is trusted.
+
+## Checking the whole setup
+
+Ask the agent in a new session: "run autoharness init for the task 'read https://example.com' and add
+fetch". Expected: the agent calls `autoharness init`, then `autoharness add mcp fetch`; with the
+gateway the answer contains `"via": "gateway"`, and the page is read through `harness_call` without a
+restart.
+
+## Several agents in one project
+
+```bash
+autoharness install-skill --all
+autoharness --agent claude gateway install
+autoharness --agent codex  gateway install
+```
+
+Tasks and the gateway are shared by the agents (`.autoharness/`); the configs are each agent's own.
+Inside a session the agent is detected by the environment variables it sets for its commands
+(`CLAUDECODE`, `CODEX_THREAD_ID`, `GEMINI_CLI`, `ANTIGRAVITY_AGENT`, …). `ANTIGRAVITY_AGENT` is
+checked first: agy started from Claude Code inherits its `CLAUDECODE`. The order is `--agent`, then
+`$AUTOHARNESS_AGENT`, then detection, else `claude`; the agent is stored in the task at `init`. If
+detection fails, set `AUTOHARNESS_AGENT=<agent>` in the environment you start the agent from.
+
+## How autoharness writes the configs of different agents
+
+| `--agent` | Project MCP config | Project skills |
+|---|---|---|
+| `claude` (Claude Code) | `.mcp.json` | `.claude/skills` |
+| `codex` (Codex CLI) | `.codex/config.toml` | `.agents/skills` |
+| `gemini` (Gemini CLI) | `.gemini/settings.json` | `.gemini/skills` |
+| `qwen` (Qwen Code) | `.qwen/settings.json` | `.qwen/skills` |
+| `gigacode` (GigaCode CLI) | `.gigacode/settings.json` | `.gigacode/skills` |
+| `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
+| `agy` (Antigravity CLI) | `.agents/mcp_config.json` | `.agents/skills` |
+
+Lockfiles and recipes keep a config in one canonical form (the `.mcp.json` format, secrets as
+`${VAR}`), and the adapter translates it on write: for the Gemini family remote servers become
+`httpUrl`/`url`; for Codex secrets go to `env_vars`, `bearer_token_env_var`, `env_http_headers`.
+Codex does not expand `${VAR}` in `args`; then `add` returns `warnings`. Antigravity CLI does not
+expand `${VAR}` either, but passes its environment to servers: `"K": "${K}"` is simply not written,
+remote servers become `serverUrl`, and for `${VAR}` in headers, `args` and renamed variables `add`
+returns `warnings`. Codex reads the project `.codex/config.toml` only for trusted projects. Edits to
+TOML are wrapped in `# >>> autoharness:<name>` markers, so comments and the rest of the user's config
+are left alone.
+
+## Uninstalling
+
+```bash
+autoharness --agent claude gateway uninstall   # removes `autoharness` from the agent's config
+autoharness install-hook --remove              # removes the hook
+autoharness prune                              # removes everything tasks left in the project
+```
+
+The skill is removed with the `autoharness` folder in the skills directory (table above). The CLI:
+`uv tool uninstall autoharness`.
+
+<!-- END FILE: docs/installation.md -->
+
+---
+
+<!-- START FILE: docs/reference.md (CLI Command Reference) -->
+## CLI Command Reference (`docs/reference.md`)
+
+# Reference
+
+How all this fits into one cycle is in the [README](../README.md#the-process).
+
+Every command prints JSON. Exit code `3` means the user's consent is needed. `--agent` and
+`--project` are global flags and go before the subcommand.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `init "<task>" [--mode light\|full\|reviewed\|auto]` | starts a task; `full` by default; `light` uses the tools at hand (output without catalog or search); `reviewed` is the full cycle with a mandatory critic; `auto` picks light/full from the catalog; `--profile quick\|standard\|reviewed` is an old synonym. Open follow-ups show in any mode; the full mode also shows `rejected_before`, candidates earlier tasks rejected, with the reason |
+| `mode full\|reviewed` | raises a running task: a light one to the full mode with a search for candidates, or any task to a mandatory critic |
+| `plan "<task>"` | the same without side effects |
+| `need <capability> --reason ...` | records a capability gap and returns curated candidates and your own skills |
+| `search mcp\|skill <query>` | MCP: Anthropic's plugin marketplace (claude-plugins-official, names `claude-plugins-official/<plugin>`), then the official MCP registry; skills: skills.sh; with a trust score |
+| `inspect mcp\|skill <name>` | a detailed trust report; for MCP also `egress`, where the server may connect |
+| `brief --goal ... --domains ... --method ... --expects ... --constraints ... [--verify ... \| --verify-template browser\|api\|logs\|database] [--review critic]` | the task's plan: the goal; the areas of know-how (`<area>: skill\|mcp\|create <name> (searched: <query>)`, at least two; the search must actually have run through `autoharness search`, what is taken is `take` in candidates, what is created is in gaps; created skills are filled in before the first result); the method (how such work is done well, from sources found and read, with URLs and `searched:` queries, or `nothing usable; searched: ...`; the critic checks the result against it); the open choices (`<choice>: <pick> - <why the person who asked would expect it>; ...` or `none: <why>`; each becomes a brief item E1, E2, …); inputs, constraints, the check, verdicts on candidates |
+| `verify guide browser\|api\|api-client\|logs\|database` | the steps and expected evidence of a standard check |
+| `verify record KIND --passed yes\|no --evidence FILE` | saves a check's outcome and its evidence file |
+| `verify run "<command>" --for <brief item>` | runs a check itself; the exit code decides, the output is kept |
+| `decision mcp\|skill NAME select\|skip --reason TEXT` / `audit [TASK_ID]` | the reason for a choice, and the structured decision log |
+| `followup add "<what, where>"` / `followup list [--all]` / `followup done N [--note ...]` | findings outside the task: kept in the project, shown by `teardown` and the next `init` |
+| `vet mcp\|skill <name> [--answer-file F \| --run claude\|codex\|agy]` | a prompt for an independent check of a candidate against the constraints; records the answer |
+| `add mcp <name>` / `add skill owner/repo@skill` | installs into the MCP config (or the gateway) and the agent's skills folder, writes the lockfile |
+| `add mcp <name> --direct` | past the gateway, straight into the agent's config |
+| `remove mcp\|skill <name> [--reason TEXT]` | removes what this task installed, or what an earlier one kept in the project; the current task's reason for removing goes into the audit |
+| `prune` | removes everything earlier tasks kept in the project |
+| `evidence add <file> --kind reference\|facts\|result` / `evidence diff [--base REV]` | a reference, the facts from it (taken with a tool; when the requirements include a reference, the first result is refused without them), or a round's result; for code, the whole diff. The first version is a block-in of the base, and the first critic round judges only that; edits after the first result without a critic are counted. `--closeup` (`--part`) is a close-up or a part of the latest whole result (a crop smaller than the whole is recognised by itself). The critic sees the latest version of each kind of result (diff, render, report) with its parts, not every draft; `verify record` evidence goes alongside and does not push the work out |
+| `review` / `critic [--run claude\|codex\|agy]` | a review round; a prompt for an independent critic. The critic also judges each check from `verify run` (the "Runs" section): a check that only looks for a name or a string in a file stops counting for its brief item |
+| `approach` / `arbiter` / `arbitrate` / `check` | a change of approach to a part that does not pass review; the arbiter and its check |
+| `teardown [--keep\|--remove] [--save-recipe NAME --notes ... --query kind:q] [--accepted ...]` | ends the task; `--accepted`/`--force` only in the user's words, and the hook refuses them until the user has written something since the task started |
+| `claim [<session id>] --reason ...` | takes the task over from the agent session that started it: another session gets a summary of that task from the hook and stays blocked; only on the user's decision or if that session is gone. A session given a review prompt of the task cannot claim it |
+| `status [--full]` | the current harness, what is kept in the project, the log; compact by default (a search is one line per query, the log its last 30 lines) |
+| `eval record --case NAME --variant baseline\|harness --passed yes\|no [--seconds N] [--task-id ID] [--tokens N] [--cost N] [--tool-calls N]` | saves a run's measurement; a finished task supplies the time and CLI statistics |
+| `eval batch --dataset FILE --variant baseline\|harness -- RUNNER [ARGS]` | runs an external runner on each JSONL case and records the measurements |
+| `eval compare` | compares only the cases that have runs of both variants |
+| `skill new\|test\|save\|list\|delete` | the agent's own skills and the local library; `test` has fresh agents do 1-3 tasks with and without the skill and a blind judge compare |
+| `recipe list\|match\|show` | saved setups; `show` reruns the recipe's queries and returns what is new in `fresh` |
+| `lesson add` | a short conclusion from a task's friction; one confirmed by three tasks moves into a skill |
+| `journal` | the draft of this task's entry in the project's journal, and where it goes |
+| `ruling add` | a review point the user rejected, so later critics in the project do not raise it again |
+| `config get\|set [teardown keep\|remove \| allowed_hosts "<hosts>" \| min_mode any\|full\|reviewed \| journal "<path>"\|off] [--global]` | settings |
+| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart; `--user` puts it into the agent's own config (agy, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
+| `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
+| `agents` | the supported agents and their paths |
+
+## Where everything is kept
+
+| Path | What is there |
+|---|---|
+| `.autoharness/tasks/<id>/` | the task's state: `task.json`, lockfiles, `harness.md`, `events.jsonl`, `decisions.jsonl`, evidence, reviewers' answers |
+| `.autoharness/evals.jsonl` | run measurements; a local file, ignored by Git |
+| `.autoharness/kept.json`, `config.json`, `gateway.json`, `followups.json` | what stayed in the project, project settings, gateway servers, deferred findings; they can be committed (`.autoharness/.gitignore` lets only them through), the rest of the state stays out of git |
+| `.autoharness/gateway.log` | the gateway's log |
+| `~/.autoharness/` | `recipes/`, the library of your own skills `skills/`, the global `config.json`, gateway approvals, your own language files `lang/` (`AUTOHARNESS_HOME` overrides) |
+| `src/autoharness/data/catalog.json` | the curated catalog of capabilities, servers and trusted publishers |
+| `src/autoharness/data/lang/<code>.json` | the words of each language autoharness reads a task in |
+| `src/autoharness/skill/SKILL.md` | the agent's instructions that `install-skill` installs |
+
+<!-- END FILE: docs/reference.md -->
+
+---
+
+<!-- START FILE: docs/security.md (Security & Trust Architecture) -->
+## Security & Trust Architecture (`docs/security.md`)
+
+# Security: the details
+
+The trust model in short is in the [README](../README.md#security-in-short). This page covers how
+each protection works and where it ends.
+
+## Trust score and the catalog
+
+- **The curated catalog** (`src/autoharness/data/catalog.json`) is the trusted base: capabilities,
+  vetted MCP servers, trusted server publishers and skill owners.
+- **MCP servers from the registry** get a score: a verified namespace, a pinned package version, a
+  publisher from the trusted list. Anything not "high", anything that needs secrets and any remote
+  server is installed only with `--approve` after an explicit "yes" from the user.
+  The publisher writes `repository.url` itself, so the trusted-list bonus is given only when the
+  namespace `io.github.<owner>` was verified by the registry against the same owner, or when the DNS
+  namespace (`com.stripe/…`) is in the catalog's curated table `trusted_mcp_namespaces` (domain →
+  publisher) exactly, without subdomains: a subdomain can belong to anyone
+  (`<bucket>.s3.amazonaws.com`). Other DNS namespaces prove the domain but not who is behind it, and
+  get no bonus: such a server is installed after a "yes".
+- **Skills** are first downloaded into a temporary staging folder, scanned statically (reading
+  `~/.ssh`, `curl | sh`, "don't tell the user", obfuscation), and only then copied into the project.
+  High findings block the install (`rejected`).
+- Secrets are never written: a config holds only `${ENV_VAR}`.
+
+## Checking candidates against the constraints (`vet`)
+
+Curated local MCP servers and the skills installer run with exact package versions. Recipes save the
+commands with those versions. That does not pin transitive dependencies, the contents of remote
+services or revisions of external skills. Configs created earlier with `@latest` are not rewritten
+automatically.
+
+When the brief records the user's `--constraints`, `add` does not install a skill or a server
+without the verdict of an independent check (status `vet_required`). `autoharness vet skill <spec>`
+stages the skill in a temporary folder and builds a prompt from the constraints verbatim and the
+contents of its files (for MCP: the config, permissions and `egress`). The prompt goes to a fresh
+subagent, whose answer is saved to a file unedited and recorded with `--answer-file <file>`. Where
+autoharness can start a reviewer of the agent's kind itself (`vet … --run claude|codex|agy`), a verdict
+typed in by the agent (`--verdict`) is refused: the reviewer answers. On `breaks`, `add` answers with
+code `3`: install only if the user agrees. If a skill's files at install time differ from the vetted
+ones, `add` warns. Your own skills from the library (`local:`) need no check.
+
+## Reviewers' answers are recorded as they are
+
+To judge the work, `.autoharness/tasks/<id>/events.jsonl` records only the CLI command's name, its
+exit code and time; arguments and secret values never go there. `.autoharness/evals.jsonl` keeps the
+results of comparison runs locally and is ignored by Git. The fields `passed`, `tokens` and `cost` are
+data from the agent or the user and are not certified by AutoHarness.
+
+`critic`, `arbiter` and `vet` prompts get a one-time `ANSWER-ID`. The agent saves the subagent's
+answer to a file unedited and passes it with `--answer-file`: autoharness checks that the id was
+issued by this task for such a prompt and not used yet, and takes the list, `VERDICT`, `CHECK` and
+`REASON` from the answer itself. `--worst` cannot be milder than the critic's `VERDICT`. This guards
+against a retelling and against passing off an old or someone else's answer, not against forgery: the
+id is visible to the agent in the prompt, and the agent could technically write a file "from the
+critic" itself. Honesty here rests on the skill's instructions, not on cryptography; `critic --run`
+and `vet --run` take the agent out of the loop where the agent's CLI is installed. A copy of the
+answer stays in `.autoharness/tasks/<id>/answers/`. The old way (`--diff`/`--worst`,
+`--verdict`/`--text`) still works but is flagged with a warning: it is the author's retelling.
+
+A subagent that was given a pending review prompt of the task (it names the prompt's `ANSWER-ID` or
+its file) is recognised as that reviewer: the hook lets it read, and it cannot `claim` the task from
+the session that owns it.
+
+`teardown` warns when the working tree changed after the last review of a recorded `evidence diff`:
+nobody checked those changes. `autoharness evidence diff [--base REV]` saves as a result the whole
+diff of the working copy against `REV` (`HEAD` by default), including new untracked files, without
+touching the index.
+
+## Where MCP servers may connect (`allowed_hosts`)
+
+The `allowed_hosts` setting is a comma-separated list of host patterns (`api.github.com,*.example.com`);
+empty (the default) means no limit. What it can honestly do:
+
+- a **remote** server (HTTP/SSE) lives on one known host: for a host not on the list `add` asks the
+  user's consent (code `3`), and the gateway does not connect to it and disconnects one already
+  running if the list is narrowed later (within a second);
+- a **local process** (`npx`, `uvx`, `docker`) connects wherever it wants; autoharness does not limit
+  that. So with a list set, such a server is also installed only with the user's consent.
+
+```bash
+autoharness config set allowed_hosts "api.githubcopilot.com,*.context7.com"
+autoharness inspect mcp github      # the egress field: host, enforced, ok, reason
+```
+
+## What the gateway passes to servers
+
+The gateway's HTTP client refuses redirects, including when a session ends. `url` must name the
+final MCP endpoint. Authorization headers and the session id are not sent to the address in
+`Location`, even if the first host is allowed.
+
+For Codex the gateway explicitly gets `AUTOHARNESS_HOME`, `AUTOHARNESS_GATEWAY_TIMEOUT` and the
+variables the approved server configs refer to. Only names are written to `env_vars`. If `add` or
+`gateway approve` adds a new name, the CLI warns that Codex needs a restart: the environment of a
+running process cannot be changed.
+
+Local servers and HTTP servers with headers (a token from the environment) go through the gateway.
+Servers with OAuth sign-in and `add mcp --direct` are written into the agent's config directly.
+Secrets are filled in from the agent process's environment; the log is `.autoharness/gateway.log`.
+
+A local server inherits **only** a fixed safe set from the agent's environment: where the system, the
+user, temporary folders, locale, certificates and proxies are (`PATH`, `HOME`, `SystemRoot`, `APPDATA`,
+`TEMP`, `LC_*`, `XDG_*`, `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY`, `SSH_AUTH_SOCK`, configuration and
+account selection such as `DOCKER_*`, `AWS_PROFILE`, `KUBECONFIG`, `GH_HOST`, the caches
+`npm_config_*`/`UV_*`/`PIP_*`, `PLAYWRIGHT_*` and the like; see `PASS_ENV` in `mcp_client.py`). Even
+from those, names that look like secrets and URLs with a password inside (except proxies) are dropped.
+If a server fails to start, the error lists the names (not the values) of the variables it did not
+get.
+
+Everything else, including `DB_PASS`, connection strings, webhook URLs and paths to key files
+(`GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE`), a server sees only if it is named
+in its `env` as `${VAR}`. Such `${VAR}` are shown at `add` and need the user's consent: all of them,
+not only those the registry marks as secret. To pass one more variable, add it to the server's `env`
+in `gateway.json` and run `autoharness gateway approve <name>`. Servers written directly into the
+agent's config (`--direct`) are started by the agent itself; none of this applies to them.
+
+## Approving `gateway.json` on each machine
+
+`gateway.json` can be committed, so after `git pull` it may contain someone else's command. The gateway
+starts a server only if **exactly this config** was approved on this machine: `add mcp` records the
+approval itself, and a server that came from the repository (or was changed there) waits with the
+status `not approved`. Approvals are kept outside the repository, in `~/.autoharness/gateway-approved.json`
+(or `$AUTOHARNESS_HOME`), by the project's absolute path: after the project moves to another folder
+they have to be given again. `init`, `status` and `gateway status` show which servers wait for approval.
+
+```bash
+autoharness gateway status            # the unapproved field: what waits for approval
+autoharness gateway approve <name>    # shows the config, code 3; with --approve after the user's "yes"
+autoharness gateway approve --all     # the same for everything waiting
+```
+
+**After upgrading autoharness**, servers added through the gateway by an older version have no
+approvals yet and do not start until the user runs `autoharness gateway approve --all` once (after
+looking at the configs). Approvals cannot be seeded automatically: anything in the project, including
+`kept.json` and `.autoharness/tasks/`, can arrive in a commit (`git add -f` bypasses `.gitignore`).
+
+The agent runs `--approve`, and that the user really said "yes" rests on the skill's instructions,
+as with every other `--approve`: this guards against a `gateway.json` swapped in through a pull, not
+against an agent that decided to go around the user.
+
+## Only what autoharness installed is removed
+
+Installing an MCP server and installing the gateway write a change journal outside the repository:
+`$AUTOHARNESS_HOME/transactions/` (`~/.autoharness/transactions/` by default). CLI operations are
+serialised by a project lock. If a write is interrupted, the next CLI operation finishes it from the
+journal. User files changed after the failure are not overwritten: recovery stops with the path to
+the conflict and the journal. Removing tools and copying skills are not yet part of such
+transactions.
+
+Your own MCP servers and skills are never overwritten or removed; a skill changed after it was
+installed is backed up (caches such as `__pycache__` do not count as a change). `kept.json` is
+committed, so `remove`/`prune` take off by themselves only what a task left on this machine (recorded
+in `~/.autoharness/kept-here.json`). An entry only the file knows about (a pull, an older autoharness,
+another clone, a moved project) waits for the user's "yes": code `3`, nothing changes;
+`prune --approve` / `remove … --approve` take it off. Likewise a task started on another machine
+(`.autoharness/tasks/` can be committed too) removes nothing by its lockfiles: end it with
+`teardown --keep`, then `prune --approve`.
+
+Names from lockfiles and `kept.json` are compared with the folder listing letter for letter, so
+`Mine`, `mine.` or `nul` do not open someone else's folder; autoharness does not touch a link
+(symlink, junction); `add` does not replace a folder that differs from the one the task installed.
+`prune` and `teardown --remove` check everything first and only then remove anything.
+
+## Your own skills
+
+`skill save` blocks secrets (tokens, private keys, `password=…`) and dangerous patterns, warns about
+absolute paths and emails, and saves nothing without `--approve`. It also warns when a skill was never
+tested with `skill test` or lost its last test, and when its description retells the steps instead of
+saying when to use it.
+
+## The hook
+
+Before the brief, the hook (`install-hook`) lets through `autoharness …` as a command of its own,
+plus shell commands that only list or read (`ls`, `cat`, `git status`, `Get-ChildItem`). An
+`autoharness` command may have `cd <dir> &&` or `cd <dir>;` in front; in Bash, `\` line breaks, `\"`
+inside double quotes and `AUTOHARNESS_*=…` before the command; and at the end, `2>&1` and read-only
+filters (`| head`, `| tail`, `| jq`, `| grep` with arguments without substitutions,
+`| Select-Object -First N`, `| Out-String`, `| ConvertFrom-Json`). No other `;`, `|`, `&&`, `#` or
+redirections, and `$(…)` and backticks only inside single quotes. Any call that names the
+`integrity.key` is denied first, whatever it looks like. This frames the procedure; it is not a
+sandbox: the agent can also `waive`.
+
+<!-- END FILE: docs/security.md -->
+
+---
+
+<!-- START FILE: docs/design/README.md (Architecture & Design Philosophy) -->
+## Architecture & Design Philosophy (`docs/design/README.md`)
+
+# Design notes
+
+The specs and implementation plans AutoHarness features were built from, kept as written at the time.
+They record why things are the way they are; the current behaviour is described in the
+[README](../../README.md) and the [reference](../reference.md).
+
+| Date | Spec | Plan |
+|---|---|---|
+| 2026-09-21 | [Gateway: MCP servers without a restart](specs/2026-09-21-gateway-design.md) | [plan](plans/2026-09-21-gateway.md) |
+| 2026-09-21 | [Generating your own skills](specs/2026-09-21-generated-skills-design.md) | [plan](plans/2026-09-21-generated-skills.md) |
+| 2026-09-24 | Reliability and the Codex integration | [plan](plans/2026-09-24-hardening-codex.md) |
+| 2026-09-25 | Modes and run comparison | [plan](plans/2026-09-25-modes-and-evals.md) |
+
+<!-- END FILE: docs/design/README.md -->
+
+---
+
+<!-- START FILE: docs/design/specs/2026-09-21-gateway-design.md (Specification: MCP Gateway) -->
+## Specification: MCP Gateway (`docs/design/specs/2026-09-21-gateway-design.md`)
+
+# Gateway MCP: design
+
+Date: 2026-09-21. Status: in review.
+
+## Why
+
+Agents read MCP servers from their config only when a session starts, so `autoharness add mcp` needs a
+restart. The gateway removes that limit: autoharness itself becomes an MCP server that is registered
+in the agent once and from then on runs the added servers inside itself, without restarting the
+agent.
+
+### Why not just `tools/list_changed`
+
+The MCP protocol lets a server tell the agent that its tool list changed. As of September 2026 this
+cannot be relied on:
+
+| Agent | State |
+|---|---|
+| Claude Code | the docs claim support since 2.1.0, but new tools do not reach deferred tool search: issue anthropics/claude-code#77314 (2.1.198), closed as not planned |
+| Codex | does not request `tools/list` again after the notification: openai/codex#33266 (0.144.1), open |
+| Gemini CLI | the code is merged but does not work: google-gemini/gemini-cli#19509, open, P1 |
+| Qwen Code, GigaCode | no data; Qwen Code is a fork of Gemini CLI |
+
+So the main path is **a fixed set of meta-tools** that work in any agent. Native tools with the
+notification are an addition where the agent handles it.
+
+## Out of scope
+
+- OAuth sign-in for remote servers (such servers go into the agent's config, as now).
+- The legacy SSE transport (`type: "sse"`): also straight into the agent's config.
+- Notifications from HTTP servers (the Streamable HTTP GET stream): the gateway does not listen for
+  them; `list_changed` is accepted from stdio servers only.
+- Requests from child servers to the client (`sampling`, `roots/list`, `elicitation`): the answer is
+  `-32601 Method not found`.
+- Call cancellation and progress.
+
+## Installing the gateway
+
+`autoharness gateway install` (for the project's agent, `--agent` as usual):
+
+1. Writes a server named `autoharness` into the agent's MCP config:
+   - `{"command": "autoharness", "args": ["gateway", "serve"]}` if `autoharness` is on `PATH`;
+   - otherwise `{"command": "<sys.executable>", "args": ["-m", "autoharness", "gateway", "serve"]}`.
+   If an `autoharness` server is already in the config and autoharness did not write it, it is an
+   error, as for any foreign server.
+2. Creates or updates `.autoharness/gateway.json`: `installed` gets the agent's name.
+3. The answer: `next` asks the user to restart the agent (one last time) and approve the project
+   server.
+
+`gateway uninstall` is the reverse; the servers in `gateway.json` stay recorded, but while the gateway
+is not installed, `add mcp` writes into the agent's config again.
+`gateway status`: whether the gateway is installed for the agent, which servers are in
+`gateway.json`, errors from the last run (if the gateway wrote `gateway.state.json`, see below).
+
+`.autoharness/.gitignore` lets `gateway.json` through as well (like `config.json` and `kept.json`).
+
+## `.autoharness/gateway.json`
+
+```json
+{
+  "installed": ["claude"],
+  "servers": {
+    "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp"]},
+    "github": {"type": "http", "url": "https://api.githubcopilot.com/mcp/",
+               "headers": {"Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"}}
+  }
+}
+```
+
+Configs are in the canonical form (the `.mcp.json` format, secrets as `${VAR}`), the same as in the
+lockfile. Who owns an entry is still known by the task's lockfile and `kept.json`; `gateway.json` only
+says "what should be running".
+
+## The `add mcp` route
+
+A server goes through the gateway when all of these hold:
+
+- `.autoharness/gateway.json` has the current agent in `installed` **and** the agent's config has the
+  `autoharness` server;
+- the config can be proxied: it has `command` (stdio) **or** `type == "http"` with non-empty `headers`
+  (a remote server without headers may need OAuth and goes direct);
+- `--direct` was not passed.
+
+Then:
+
+- the entry is added to `gateway.json["servers"]`, nothing is written to the agent's config;
+- the lockfile entry gets `"via": "gateway"`;
+- `add` answers `"via": "gateway"`, and `next`: the server is available now; call `harness_tools`,
+  then `harness_call` (or the native `<server>__<tool>` if the agent shows them); no restart is
+  needed. If secrets are needed, it names the variables and says the agent's process must see them.
+
+Otherwise the behaviour is as before, and if the gateway is not installed, `next` adds a hint: offer
+the user `autoharness gateway install` once, so later servers need no restart.
+
+`remove_mcp`, `teardown` (`remove`), `Project.remove_kept` and `prune` remove a server from
+`gateway.json` instead of the agent's config for entries with `via: gateway`. `keep` leaves it in
+`gateway.json`. The "already there and not ours" check for a name takes `gateway.json` into account
+too.
+
+## `gateway serve`
+
+An MCP server on stdio (line-delimited JSON-RPC 2.0, one message per line, UTF-8).
+
+**Finding the project.** From the current directory up to the first one that has
+`.autoharness/gateway.json`; if there is none, it runs with an empty set and says so in
+`harness_tools`.
+
+**`initialize`.** The answer: `protocolVersion` is the one the agent asked for if it is in
+`SUPPORTED = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")`, otherwise the first in the
+list; `capabilities: {"tools": {"listChanged": true}}`; `serverInfo: {"name": "autoharness", "version"}`;
+`instructions`: a short note on `harness_tools` / `harness_call`.
+
+**`tools/list`.** The meta-tools, then the native tools of every running server.
+
+```json
+{"name": "harness_tools",
+ "description": "List MCP servers autoharness added for this task and their tools (with input schemas). Call this after `autoharness add mcp`.",
+ "inputSchema": {"type": "object", "properties": {"server": {"type": "string"}}}}
+{"name": "harness_call",
+ "description": "Call a tool of an MCP server autoharness added: harness_call(server, tool, arguments).",
+ "inputSchema": {"type": "object", "properties": {"server": {"type": "string"}, "tool": {"type": "string"},
+                 "arguments": {"type": "object"}}, "required": ["server", "tool"]}}
+```
+
+The native name: `re.sub(r"[^a-zA-Z0-9_-]", "_", f"{server}__{tool}")[:64]`; when names collide, the
+first server alphabetically gets it, the rest are reachable only through `harness_call`.
+
+**`tools/call`.** `harness_tools` → text with the JSON
+`{"servers": {name: {"status": "running|starting|error", "error"?, "transport": "stdio|http",
+"tools": [{"name", "native_name"|null, "description", "inputSchema"}]}}, "project": path|null}`.
+`harness_call` and native names → `tools/call` of the child server; the result (`content`, `isError`,
+`structuredContent`) is returned unchanged. An unknown server or tool → a result with
+`isError: true` and text saying what to do (`harness_tools`).
+
+**`ping`** → `{}`. Other methods → `-32601`. Notifications from the agent
+(`notifications/initialized`, `notifications/cancelled`) are accepted silently.
+
+**Watching.** A thread checks the `mtime` of `gateway.json` once a second. On a change: new servers
+start (in the background, status `starting`), removed ones stop, changed ones restart; then
+`notifications/tools/list_changed` goes to the agent. The same happens when a stdio server sends
+`list_changed` itself (the gateway reads its `tools/list` again). The notification is sent only after
+the agent has sent `notifications/initialized`.
+
+**State for `gateway status`.** After every change the gateway writes
+`.autoharness/gateway.state.json`: `{"pid", "updated", "servers": {name: {"status", "error"?, "tools": n}}}`.
+
+## Child servers (`mcp_client.py`)
+
+The common interface: `start()`, `list_tools() -> list[dict]`, `call_tool(name, arguments) -> dict`,
+`close()`; at start: `initialize` (our latest version from `SUPPORTED`, `capabilities: {}`,
+`clientInfo: {"name": "autoharness-gateway"}`) → `notifications/initialized` → `tools/list` (paged by
+`nextCursor`).
+
+**Filling in secrets.** `${VAR}` in `command`, `args`, `env`, `url`, `headers` is replaced with values
+from the gateway's environment. A missing variable → the server gets the status
+`error: set <VAR> in the environment the agent is started from`, and the process does not start.
+
+**stdio.** `subprocess.Popen` with `shutil.which(command)` (on Windows it finds `npx.cmd`); the
+environment is the gateway's plus the config's `env`; `stdin/stdout` are pipes, `stderr` goes to
+`.autoharness/gateway.log`. A reader thread parses lines: answers are matched with waiting requests
+by `id`, `notifications/tools/list_changed` triggers a re-read, requests from the server get
+`-32601`. Non-line output on the child's stdout is written to the log and skipped.
+
+**HTTP (Streamable HTTP).** `urllib.request`, `POST url`, headers
+`Content-Type: application/json`, `Accept: application/json, text/event-stream`, the config's headers,
+and after `initialize`, `MCP-Protocol-Version` and `Mcp-Session-Id` (if the server issued one). An
+`application/json` answer is the whole message; with `text/event-stream`, `data:` events are read
+until the answer with our `id`; `202` to a notification is fine. `close()` sends `DELETE` with
+`Mcp-Session-Id` and ignores errors.
+
+**Timeouts and failures.** A request to a child server waits `AUTOHARNESS_GATEWAY_TIMEOUT` seconds
+(120 by default) → a result with `isError: true` "timed out after N s". A crashed stdio process →
+status `error`; the next call tries to restart it once, and on failure returns `isError: true` with the
+last lines of the log. On exit (EOF on stdin, a signal) the gateway closes all children.
+
+**The gateway's stdout** carries JSON-RPC only. Everything else goes to stderr and
+`.autoharness/gateway.log`.
+
+## Instructions to the agent (`SKILL.md`)
+
+- Step 3: if `add mcp` answered `via: gateway`, the server is available right away: `harness_tools`,
+  then `harness_call`, or the native `<server>__<tool>` if they appeared. No restart is needed.
+- If the gateway is not installed and `add mcp` suggested `gateway install`, offer it to the user
+  once, explaining that it is the last restart.
+- The paragraph "New MCP servers load at session start" stays for the case without the gateway.
+
+README: a "Gateway" section, a row in the command table, and the item in "MVP limitations" becomes the
+gateway's limits (OAuth and SSE go direct; native tools depend on `list_changed` in the agent).
+
+## Where it goes in the code
+
+| File | What |
+|---|---|
+| `src/autoharness/mcp_client.py` (new) | `expand_secrets`, `StdioClient`, `HttpClient`, `make_client(name, config, log)` |
+| `src/autoharness/gateway.py` (new) | the `gateway.json` registry (`load`, `save`, `is_installed`, `proxyable`), `Gateway` (the JSON-RPC server), `serve()` |
+| `src/autoharness/env.py` | the route in `Task.add_mcp` / `remove_mcp` / `_keep_all` / `Project.remove_kept`, `STATE_GITIGNORE` |
+| `src/autoharness/cli.py` | `gateway install|uninstall|status|serve`, `add mcp --direct`, the `add` answers |
+| `tests/fake_mcp_server.py` (new) | a fake stdio MCP server for tests |
+
+## Errors
+
+| Situation | Behaviour |
+|---|---|
+| `gateway install` while an `autoharness` server already exists and is foreign | the error "not managed by autoharness" |
+| `gateway.json` does not parse | the gateway keeps the previous set; the error goes to the log and to `harness_tools` (`registry_error`) |
+| no environment variable for a secret | status `error` with the variable's name |
+| command not found | status `error: command not found: <cmd>` |
+| a child server did not answer `initialize` within the timeout | status `error`, the process is stopped |
+
+## Tests
+
+No network and no Node: a fake stdio server `tests/fake_mcp_server.py` (tools `echo` and `slow`; on
+the `add_tool` command it sends `list_changed` itself) and a fake HTTP server on `http.server` in a
+thread (JSON and SSE answers, `Mcp-Session-Id`).
+
+1. `StdioClient`: initialize, list_tools, call_tool, `-32601` to a request from the server,
+   `list_changed` from the server triggers a re-read.
+2. `HttpClient`: a JSON answer, an SSE answer, passing `Mcp-Session-Id`, `${VAR}` in headers.
+3. `expand_secrets`: substitution and the error for a missing variable.
+4. End to end: `gateway serve` as a process; `initialize` → `tools/list` (two meta-tools) → a fake
+   server written into `gateway.json` → `list_changed` arrives → `tools/list` contains `fake__echo` →
+   `harness_call` and a direct `fake__echo` return the result → removal from `gateway.json` →
+   `list_changed`, the tool is gone.
+5. A timeout (`slow`) → `isError: true`; a crashed server → `error` in `harness_tools`.
+6. The `add mcp` route: with the gateway installed (stdio → gateway, http with headers → gateway,
+   http without headers → direct, `--direct` → direct); without the gateway → direct, with a hint.
+7. `teardown remove` and `prune` remove from `gateway.json`; `keep` leaves it.
+8. `gateway install` / `uninstall` / `status`; refusal when a foreign `autoharness` server exists.
+
+Manual check after implementation: `gateway install` in a test project, restart Claude Code,
+`add mcp fetch` without a restart; record whether Claude Code sees the native tools or only the
+meta-tools work.
+
+<!-- END FILE: docs/design/specs/2026-09-21-gateway-design.md -->
+
+---
+
+<!-- START FILE: docs/design/specs/2026-09-21-generated-skills-design.md (Specification: Generated Skills) -->
+## Specification: Generated Skills (`docs/design/specs/2026-09-21-generated-skills-design.md`)
+
+# Generating your own skills: design
+
+Date: 2026-09-21. Status: in review.
+
+## Why
+
+During a task the agent learns things no installed skill has: how to build this particular project,
+how to check the result with the means at hand (for example, exporting .pptx slides to PNG through
+PowerPoint COM when there is no LibreOffice), what an API's quirks are. Today that knowledge is lost
+with the session.
+
+The goal is **carrying experience over**: at the end of a task the agent writes what it learned into
+a skill, the skill goes into the autoharness library and is installed in other projects together with
+a recipe.
+
+The agent writes the skill: autoharness has no LLM. autoharness gives the template, the checks, the
+lockfile records, the user's consent and the storage.
+
+Out of scope: publishing on skills.sh, syncing the library between machines, generating a skill in
+the middle of a task in place of one not found (the mechanism is the same, but the agent's
+instructions describe only the "at the end of a task" scenario).
+
+## Terms
+
+- **The library**: `~/.autoharness/skills/<name>/` (`AUTOHARNESS_HOME` overrides the root).
+- **A generated skill**: a skill created by `skill new` in the current task.
+- **A local spec**: `local:<name>`, a reference to a skill in the library. It lives next to
+  `owner/repo@skill` in lockfiles, `kept.json` and recipes.
+
+## Commands
+
+All print JSON; exit code `3` means the user's consent is needed.
+
+| Command | Needs an active task | What it does |
+|---|---|---|
+| `skill new <name> --description "<text>"` | yes | a template in the agent's skills folder + a lockfile entry |
+| `skill save <name> [--approve]` | no | checks; with `--approve`, a copy into the library |
+| `skill list` | no | the library's contents |
+| `skill delete <name>` | no | removal from the library |
+| `add skill local:<name>` | yes | install from the library |
+
+### `skill new`
+
+- The name: `^[a-z0-9][a-z0-9-]{1,63}$`. An error if a folder with that name already exists in the
+  project's skills or a skill with that name is in the library (the library is overwritten only by
+  `skill save` of an installed `local:` skill, see below).
+- Writes `<skills_dir>/<name>/SKILL.md`:
+
+  ```markdown
+  ---
+  name: <name>
+  description: <description>
+  ---
+
+  # <name>
+
+  ## When to use
+  <!-- autoharness: fill in -->
+
+  ## Steps
+  <!-- autoharness: fill in -->
+
+  ## How to verify
+  <!-- autoharness: fill in -->
+  ```
+
+- An entry in the task's `skills.lock.json`: `spec: "local:<name>"`, `source: "generated"`, the
+  template's `sha256`, `trust: {"level": "high", "score": 100}`, `findings: []`. From then on this
+  skill is like any other for teardown, `keep`/`remove` and `status`.
+
+### `skill save`
+
+Looks the skill up by name: first in the active task's lockfile, then in the project's `kept.json`.
+Only a skill with the spec `local:<name>` (created by `skill new` or installed from the library) can
+be saved. Otherwise it is an error: other people's skills are not copied into the library.
+
+The checks in order; the first group that finds something decides the answer:
+
+1. **Format** → `status: "invalid"`, code 1.
+   No `SKILL.md`; no frontmatter; `name` ≠ the folder name; an empty `description`; the marker
+   `<!-- autoharness: fill in -->` left in any file.
+2. **Secrets** → `status: "blocked"`, code 1. Consent does not help; the agent must remove them.
+   Patterns: `ghp_[A-Za-z0-9]{20,}`, `github_pat_`, `sk-[A-Za-z0-9_-]{20,}`, `AKIA[0-9A-Z]{16}`,
+   `xox[abpr]-`, `-----BEGIN [A-Z ]*PRIVATE KEY-----`,
+   `(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*['"]?[^\s'"$<{]{8,}`
+   (values like `${VAR}` and `<...>` do not count).
+3. **Static scan** (`trust.scan_skill`) → high findings: `status: "blocked"`, code 1.
+4. **Privacy** → does not block, goes into `warnings`: absolute paths `[A-Za-z]:\\Users\\[^\\\s]+`,
+   `/home/[^/\s]+/`, `/Users/[^/\s]+/`; email addresses. Medium/low scan findings also go into
+   `warnings`.
+
+If nothing blocks:
+
+- without `--approve` → `status: "approval_required"`, code 3, the answer has `name`, `description`,
+  `files`, `warnings`, `overwrites` (true if a skill with that name is already in the library), and
+  `next`: show it to the user and repeat with `--approve` only after their "yes";
+- with `--approve` → a copy (without `RUNTIME_JUNK`) into `~/.autoharness/skills/<name>/`, the previous
+  version is replaced entirely. Next to it, `~/.autoharness/skills/<name>.meta.json`:
+  `{"name", "description", "capabilities", "task", "project", "saved", "sha256"}`, where
+  `capabilities` are the task's capabilities at the time of saving. A line about the save goes into
+  the task's log (if there is a task).
+
+`meta.json` lies next to the folder, not inside it, so it does not end up in the skill itself when
+installed.
+
+### `add skill local:<name>`
+
+- Not in the library → an error with the hint `skill list`.
+- The trust report: `score 100, level high`, the reason "saved to the local library with the user's
+  approval"; no consent needed.
+- The install goes through the same `Task.add_skill` with another stager: it copies the folder from
+  the library instead of `npx skills`. The static scan runs as usual.
+- Already kept in the project (`kept.json`) → `already_installed`, as for any skill.
+
+### `skill list`, `skill delete`
+
+- `list`: `[{name, description, capabilities, saved}]` from `*.meta.json`.
+- `delete <name>`: removes the folder and `meta.json`. Copies already installed into projects are
+  left alone. Not found → an error.
+
+## How it connects to the rest
+
+- **`parse_skill_spec`** accepts `local:<name>` and returns `("local", name)`.
+- **Recipes.** `recipes.save` already takes specs from the lockfile, so `local:<name>` gets there by
+  itself. `teardown --save-recipe` adds `warnings` to the answer if the recipe has a `local:<name>`
+  that is not in the library.
+- **Teardown.** For a skill with `source: "generated"` that is not in the library:
+  - `keep`: it stays in the project, the answer has `unsaved_generated: [name]`;
+  - `remove`: before removal, a copy goes to `.autoharness/tasks/<id>/generated-skills/<name>/`, and
+    the answer has `unsaved_generated` with the copy's path.
+- **`need <capability>`** adds `local: [{name, description}]`: library skills whose `meta.json` has
+  that capability.
+- **autoharness's `SKILL.md`**, step 6, a new item before teardown: if you learned something reusable
+  that the installed skills do not have, `skill new` → fill it in → `skill save` → show it to the
+  user → `--approve` after a "yes"; write it in general terms, without absolute paths, secrets or the
+  names of people and clients. Step 2: `need` first, it shows the library as well.
+- **README**: a "Your own skills" section, a row in the command table, remove the item from "MVP
+  limitations".
+
+## Where it goes in the code
+
+- `src/autoharness/library.py`, a new module: library paths, `save(src_dir, meta)`, `list_skills()`,
+  `delete(name)`, `stage_from_library(repo, skill, stage_dir)` (a stager),
+  `check(skill_dir) -> CheckResult` (format, secrets, scan, privacy).
+- `env.py`: `Task.new_skill(name, description)`; `parse_skill_spec` for `local:`; handling unsaved
+  generated skills in `teardown`.
+- `cli.py`: the subcommands `skill new|save|list|delete`, the `local:` branch in `resolve_skill` and
+  the stager choice in `cmd_add`, `local` in `need`, recipe warnings in `teardown`.
+- `trust.py` does not change; the secret and privacy checks live in `library.py`: they serve another
+  purpose (a leak out of the project, not a threat to the agent).
+
+## Errors
+
+| Situation | Answer |
+|---|---|
+| `skill new` without an active task | the error "no active task" (as for `add`) |
+| the name is invalid or taken | an error with the reason |
+| `skill save` for a non-`local:` skill | the error "only skills created with `skill new` or installed from the library" |
+| the skill is found neither in the task nor in `kept.json` | an error |
+| a damaged `meta.json` | `skill list` skips the entry and adds it to `warnings` |
+
+## Tests
+
+1. The full cycle: `skill new` → fill in → `skill save` (code 3, `approval_required`) →
+   `skill save --approve` → in another project `add skill local:<name>` installs it, and the lockfile
+   has `local:<name>`.
+2. An unfilled template → `invalid`, code 1.
+3. A secret (`ghp_…`) → `blocked`, code 1, even with `--approve`.
+4. An absolute path → `approval_required` with `warnings`.
+5. Saving again → `overwrites: true`; after `--approve` the library has the new version.
+6. A recipe with an unsaved `local:` → `warnings` in the teardown answer.
+7. `teardown --remove` with an unsaved generated skill → a copy in `generated-skills/`,
+   `unsaved_generated` in the answer.
+8. `need` shows a library skill with a matching capability.
+9. `skill delete` removes it from the library; the copy installed in a project stays.
+10. `skill save` for an ordinary `owner/repo@skill` → an error.
+
+<!-- END FILE: docs/design/specs/2026-09-21-generated-skills-design.md -->
+
+---
+
+<!-- START FILE: CONTRIBUTING.md (Contributing Guidelines) -->
+## Contributing Guidelines (`CONTRIBUTING.md`)
+
+# Contributing to AutoHarness
+
+Thanks for taking the time. AutoHarness is a small, dependency-free Python CLI; most contributions
+fit in one pull request.
+
+## Set up
+
+```bash
+git clone https://github.com/D-Shey/autoharness.git && cd autoharness
+uv tool install -e .            # the autoharness command sees your edits right away
+uv run --extra dev pytest       # the whole suite; it needs no network
+```
+
+## What makes a good change
+
+- **General, not task-specific.** AutoHarness works for any task an agent takes on: code, QA,
+  environment setup, documents, visual work. A fix that only helps one benchmark or one prompt is not
+  a fix. Describe the class of failure it closes.
+- **A test first.** Pin the defect down with a failing test, then fix it. Tests live in `tests/` and
+  run offline; fake registries and servers are already there (`tests/fake_mcp_server.py`,
+  `fake_registry` in `tests/test_autoharness.py`).
+- **No new runtime dependencies.** The CLI uses the standard library only.
+- **Words for the agent are part of the interface.** Every command's `next` and every error tell the
+  agent what to do. Keep them concrete: what is wrong, and the exact command that fixes it.
+- **Match the code around you**: naming, comment density, and the way existing messages are phrased.
+
+## Adding a language
+
+AutoHarness reads tasks in every language it has a language file for. To add one:
+
+1. Create `src/autoharness/data/lang/<code>.json` with any of: `keywords` and `exclude` per catalog
+   capability, `stopwords`, `endings`, `no_constraints`, `dependency_headings`
+   (see `ru.json` for a complete example).
+2. Create `tests/lang/<code>.json` with the cases the language must handle: `classify`, `word_forms`,
+   `filler_words`, `recipe`, `no_constraints`, `constraints`, `non_ascii_command`. The tests pick
+   them up by themselves.
+3. Run `uv run --extra dev pytest -k every_language`.
+
+No code changes are needed.
+
+## Adding a capability to the catalog
+
+`src/autoharness/data/catalog.json` lists capabilities (with keywords, curated MCP servers and skills,
+search queries and what a critic should look at) and trusted publishers. A new entry needs a reason it
+is trustworthy (official publisher, pinned version) and a test in `tests/` that a typical task text
+selects it and an unrelated one does not.
+
+## Pull requests
+
+- One topic per pull request, with the failing test and the fix together.
+- `uv run --extra dev pytest` passes on your machine; CI runs it on Linux and Windows with Python
+  3.11 to 3.13.
+- Update `README.md` or `docs/` when behaviour the user sees changes, and add a line to
+  `CHANGELOG.md`.
+
+## Reporting a security issue
+
+Please do not open a public issue; see [SECURITY.md](SECURITY.md).
+
+<!-- END FILE: CONTRIBUTING.md -->
+
+---
