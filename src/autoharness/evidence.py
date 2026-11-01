@@ -744,7 +744,7 @@ def needs_facts(catalog, task: Task) -> str | None:
         return None
     return ("before the first result, write down the facts the result must match, taken from the reference with a "
             "tool, not by eye: sizes, positions and proportions of its main parts (crops, a grid, coordinates), "
-            "names, values and formats (quoted or extracted), whatever the task is judged on. Save them to a file "
+            "names, values and formats (quoted or extracted; for code, exact AST definitions via xerj/codebase-search), whatever the task is judged on. Save them to a file "
             "and `autoharness evidence add <file> --kind facts`; then build from them")
 
 

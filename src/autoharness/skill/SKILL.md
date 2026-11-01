@@ -82,7 +82,7 @@ autoharness search mcp|skill "<query>"            # MCP registry, skills.sh
 ```
 
 Prefer local skill → curated entry → high-trust result → nothing. Install only what beats the
-tools you have: a CLI (`gh`, `psql`) needs no MCP server. A skill is know-how, not a tool: when you
+tools you have: a CLI (`gh`, `psql`, `xerj`) needs no MCP server. A skill is know-how, not a tool: when you
 have to see and operate something live (a page, an app), step by step, cover it with an MCP server
 (`brief` asks for one); a script written blind does not show you what is on screen.
 
@@ -175,7 +175,7 @@ A browser tool that refuses `file://` (Playwright MCP does) opens a local page o
 
 Matching a reference (an API's response, a sample file, a layout, a picture, the old behaviour)?
 Take its facts from the reference itself with a tool, not from memory: field names and values,
-sizes, positions, timings, the exact output. Save them to a file and record it before the first
+sizes, positions, timings, the exact output. For codebases, avoid burning tokens reading whole files or searching blind with grep: extract exact definitions, signatures, and file:line coordinates with AST tools (`xerj def <symbol>`, `xerj search -k 3` or codebase MCP servers). Save them to a file and record it before the first
 result (`autoharness evidence add <file> --kind facts`); the critic checks the result against them.
 Build the first version as a block-in from these facts: layout, proportions and main structure,
 no detail yet, and run the critic on it before adding detail. A wrong base costs every later round.

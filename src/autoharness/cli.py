@@ -512,7 +512,7 @@ def cmd_evidence(args, project, catalog):
     item = evidence.add(task, Path(args.file), args.kind, args.note or "", closeup=args.closeup)
     first = args.kind == "result" and not any(e["kind"] == "result" and e["n"] != item["n"]
                                               for e in task.info().get("evidence", []))
-    nxt = ("Study it, then take from it with a tool what the result must match (measure, crop, extract, quote), "
+    nxt = ("Study it, then take from it with a tool what the result must match (measure, crop, extract, quote; for code, exact AST definitions), "
            "save those facts to a file and `autoharness evidence add <file> --kind facts`."
            if args.kind == "reference" else
            "Build the first version as a block-in from these facts: the layout, proportions and main structure "
@@ -1879,7 +1879,8 @@ PROMPT_KEPT = 20000   # the prompt a session started with: the user's own words,
 def set_session_state(session_id: str, **state) -> None:
     f = session_file(session_id)
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(state, ensure_ascii=False), "utf-8")
+    from autoharness.transactions import atomic_write
+    atomic_write(f, json.dumps(state, ensure_ascii=False).encode("utf-8"))
 
 
 # commands that change the active task: only the agent session that started it (or claimed it) runs them

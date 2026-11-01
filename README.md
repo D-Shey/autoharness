@@ -100,7 +100,9 @@ This is where quality is decided, and it is the step agents usually skip.
   mockup, the reference image. A description of it does not count. A search page, a gallery or
   someone's version of it (fan art, a mockup, a blog example) is not the original either.
 - **Facts.** Before the first result the agent measures with a tool what the result will be judged
-  on: fields and values, sizes, positions, proportions, timings. Then it records them
+  on: fields and values, sizes, positions, proportions, timings. For code, extract exact symbol
+  definitions, signatures and coordinates using AST-aware tools (`xerj def`, codebase search)
+  rather than blowing the context budget on full-file dumps. Then it records them
   (`evidence add <file> --kind facts`).
 - **Open choices.** Where the task leaves a choice open (a format, a value or a formula, what a field
   holds) and the user cannot be asked, the agent picks what the person who asked would take for

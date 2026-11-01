@@ -27,7 +27,7 @@
     "codebase-search": {
       "description": "Semantic code search and structural codebase indexing across large repositories.",
       "keywords": ["codebase", "symbol", "ast", "navigate", "architecture", "monorepo", "find code", "code search"],
-      "mcp": ["leann-server"],
+      "mcp": ["xerj", "leann-server"],
       "skills": [],
       "search": ["semantic code search", "codebase retrieval"],
       "review": "relevant files and architectural dependencies identified before changes; search queries and retrieved symbols match actual codebase definitions"
@@ -137,6 +137,10 @@
       "config": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@4.1.1"]},
       "permissions": {"network": "context7.com", "filesystem": "none", "shell": false, "secrets": []}
     },
+    "xerj": {
+      "config": {"command": "xerj", "args": ["mcp"]},
+      "permissions": {"network": "none", "filesystem": "read-only", "shell": false, "secrets": []}
+    },
     "leann-server": {
       "config": {"command": "uvx", "args": ["leann==0.3.8", "leann_mcp"]},
       "permissions": {"network": "none", "filesystem": "read-write", "shell": false, "secrets": []}
@@ -154,7 +158,7 @@
       "permissions": {"network": "any", "filesystem": "none", "shell": false, "secrets": []}
     }
   },
-  "trusted_mcp_publishers": ["microsoft", "github", "modelcontextprotocol", "anthropics", "upstash", "cloudflare", "stripe", "supabase", "vercel", "googleapis", "aws", "awslabs", "chromedevtools", "getsentry", "neondatabase", "grafana"],
-  "trusted_mcp_namespaces": {"com.microsoft": "microsoft", "com.github": "github", "io.modelcontextprotocol": "modelcontextprotocol", "com.anthropic": "anthropics", "com.upstash": "upstash", "com.cloudflare": "cloudflare", "com.stripe": "stripe", "com.supabase": "supabase", "com.vercel": "vercel", "com.google": "googleapis", "com.amazonaws": "aws", "com.amazon.aws": "aws", "io.sentry": "getsentry", "tech.neon": "neondatabase", "com.grafana": "grafana"},
+  "trusted_mcp_publishers": ["microsoft", "github", "modelcontextprotocol", "anthropics", "upstash", "cloudflare", "stripe", "supabase", "vercel", "googleapis", "aws", "awslabs", "chromedevtools", "getsentry", "neondatabase", "grafana", "xerj-org", "xerj"],
+  "trusted_mcp_namespaces": {"com.microsoft": "microsoft", "com.github": "github", "io.modelcontextprotocol": "modelcontextprotocol", "com.anthropic": "anthropics", "com.upstash": "upstash", "com.cloudflare": "cloudflare", "com.stripe": "stripe", "com.supabase": "supabase", "com.vercel": "vercel", "com.google": "googleapis", "com.amazonaws": "aws", "com.amazon.aws": "aws", "io.sentry": "getsentry", "tech.neon": "neondatabase", "com.grafana": "grafana", "org.xerj": "xerj-org"},
   "trusted_skill_owners": ["anthropics", "microsoft", "obra", "vercel-labs", "github", "openai", "google", "cloudflare"]
 }

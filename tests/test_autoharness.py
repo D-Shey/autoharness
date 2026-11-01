@@ -57,8 +57,8 @@ def test_codebase_search_capability():
     cat = Catalog.load()
     assert "codebase-search" in cat.capabilities
     cap = cat.capabilities["codebase-search"]
-    assert "leann-server" in cap.mcp
-    assert "leann-server" in cat.mcp_servers
+    assert "xerj" in cap.mcp and "leann-server" in cap.mcp
+    assert "xerj" in cat.mcp_servers and "leann-server" in cat.mcp_servers
     report, source = cli.resolve_mcp(cat, "leann-server")
     assert source == "catalog"
     assert report["score"] == 90
@@ -67,6 +67,17 @@ def test_codebase_search_capability():
     assert report["config"]["args"] == ["leann==0.3.8", "leann_mcp"]
     assert report["permissions"]["network"] == "none"
     assert report["permissions"]["filesystem"] == "read-write"
+    rep_x, src_x = cli.resolve_mcp(cat, "xerj")
+    assert src_x == "catalog"
+    assert rep_x["score"] == 90
+    assert rep_x["level"] == "high"
+    assert rep_x["config"]["command"] == "xerj"
+    assert rep_x["config"]["args"] == ["mcp"]
+    assert rep_x["permissions"]["network"] == "none"
+    assert rep_x["permissions"]["filesystem"] == "read-only"
+    assert "xerj-org" in cat.trusted_mcp_publishers
+    assert "xerj" in cat.trusted_mcp_publishers
+    assert cat.trusted_mcp_namespaces.get("org.xerj") == "xerj-org"
 
 
 # --- every language autoharness reads: the cases in tests/lang/<code>.json ---------
@@ -3921,3 +3932,20 @@ def test_a_brief_cannot_name_claude_in_chrome_without_the_extension(project, cap
     project.task().note_search("mcp", "browser", ["x/playwright"])
     code, res = cli_json(capsys, "--project", str(project.root), "brief", *BUILTIN_BRIEF)
     assert code != 0 and "is not among what the search" in res["error"]
+
+
+def test_set_session_state_is_atomic(monkeypatch):
+    calls = []
+    from autoharness import transactions
+    orig_atomic = transactions.atomic_write
+
+    def mock_atomic(path, data):
+        calls.append((path, data))
+        orig_atomic(path, data)
+
+    monkeypatch.setattr(transactions, "atomic_write", mock_atomic)
+    cli.set_session_state("sess-atomic-1", prompt="test prompt", counter=42)
+    assert len(calls) == 1
+    assert calls[0][0] == cli.session_file("sess-atomic-1")
+    state = cli.session_state("sess-atomic-1")
+    assert state == {"prompt": "test prompt", "counter": 42}
