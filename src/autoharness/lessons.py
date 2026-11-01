@@ -225,10 +225,17 @@ def fold(item_id: int, skill: str) -> dict:
     return found
 
 
+def _insight_stems(item: dict) -> set[str]:
+    res = text.stems(item.get("text", ""))
+    for v in item.get("variants", []):
+        res |= text.stems(v)
+    return res
+
+
 def relevant(task_text: str) -> list[dict]:
     """Insights not yet in a skill that share words with the task, the most confirmed first."""
     words = text.stems(task_text)
-    hits = [(len(words & text.stems(i["text"])), i) for i in insights() if not i.get("skill")]
+    hits = [(len(words & _insight_stems(i)), i) for i in insights() if not i.get("skill")]
     hits = [(n, i) for n, i in hits if n >= 2]
     hits.sort(key=lambda p: (p[1]["confirmed"], p[0]), reverse=True)
     return [{"id": i["id"], "text": i["text"], "confirmed": i["confirmed"]} for _, i in hits[:SHOWN]]

@@ -293,6 +293,56 @@ def test_recipe_match_handles_word_forms_and_long_notes(project):
     assert recipes.match("fix the failing e2e test") == []
 
 
+def test_recipe_match_by_name_tools_queries_and_uses_tiebreaker(project):
+    task = project.init_task("browser automation task")
+    task.add_mcp("playwright", {"command": "npx"}, source="catalog", trust={}, permissions={})
+    queries = [{"kind": "skill", "query": "ast"}]
+    recipes.save(task, "browser-tooling", "general task helper", queries=queries)
+    recipes.mark_used("browser-tooling")
+    recipes.mark_used("browser-tooling")
+    task.teardown()
+
+    task2 = project.init_task("another helper task")
+    recipes.save(task2, "secondary-helper", "general task helper")
+    task2.teardown()
+
+    # Match by tool name
+    tool_matches = recipes.match("automate with playwright")
+    assert tool_matches and tool_matches[0][1]["name"] == "browser-tooling"
+
+    # Match by saved query keyword
+    query_matches = recipes.match("ast code chunking")
+    assert query_matches and query_matches[0][1]["name"] == "browser-tooling"
+
+    # Match by recipe name itself
+    name_matches = recipes.match("browser task")
+    assert name_matches and name_matches[0][1]["name"] == "browser-tooling"
+
+    # Tie-breaker: both match "general task helper", but browser-tooling has uses=2 > 0
+    tie_matches = recipes.match("general task helper")
+    assert len(tie_matches) >= 2
+    assert tie_matches[0][1]["name"] == "browser-tooling"
+    assert tie_matches[0][1]["uses"] == 2
+
+
+def test_lessons_relevant_matches_variants(project):
+    from autoharness import lessons
+    insights_path = lessons._insights_path()
+    if insights_path.exists():
+        insights_path.unlink()
+
+    item, merged = lessons.add_insight("check the export currency rounding when report totals are wrong", "task1", "proj")
+    assert not merged and item["id"] == 1
+    # Add a variant wording that introduces the word 'balances'
+    item2, merged2 = lessons.add_insight("report totals wrong: check currency rounding in export balances", "task2", "proj")
+    assert merged2 and item2["id"] == 1
+    assert "balances" in str(item2.get("variants", []))
+
+    # Match through variant-only word 'balances' combined with 'wrong'
+    res_variant = lessons.relevant("wrong balances")
+    assert res_variant and res_variant[0]["id"] == 1
+
+
 def test_cli_add_requires_approval_for_secret_server(project, capsys):
     cli.main(["--project", str(project.root), "init", "open a github PR"])
     code = cli.main(["--project", str(project.root), "add", "mcp", "github"])

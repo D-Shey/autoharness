@@ -77,19 +77,33 @@ def load_all() -> list[dict]:
     return [json.loads(p.read_text("utf-8")) for p in sorted(recipes_dir().glob("*.json"))]
 
 
+def _recipe_tokens(r: dict) -> set[str]:
+    parts = [
+        r.get("name", ""),
+        r.get("task_example", ""),
+        " ".join(r.get("capabilities", [])),
+        r.get("notes", ""),
+        " ".join(r.get("mcp", {}).keys() if isinstance(r.get("mcp"), dict) else r.get("mcp", [])),
+        " ".join(r.get("skills", [])),
+        " ".join(q.get("query", "") for q in r.get("queries", []) if isinstance(q, dict)),
+    ]
+    return _tokens(" ".join(parts))
+
+
 def match(task_text: str, limit: int = 3) -> list[tuple[float, dict]]:
-    """Rank saved recipes by the share of task words found in the recipe's example, capabilities and notes.
+    """Rank saved recipes by the share of task words found in the recipe's example, capabilities,
+    tools, queries, name and notes.
 
     Containment rather than Jaccard, so long notes widen what a recipe matches instead of diluting its score."""
     want = _tokens(task_text)
     scored = []
     for r in load_all():
-        have = _tokens(r.get("task_example", "") + " " + " ".join(r.get("capabilities", [])) + " " + r.get("notes", ""))
+        have = _recipe_tokens(r)
         if want and have:
             score = len(want & have) / len(want)
             if score > 0:
                 scored.append((round(score, 3), r))
-    scored.sort(key=lambda s: s[0], reverse=True)
+    scored.sort(key=lambda s: (s[0], s[1].get("uses", 0)), reverse=True)
     return scored[:limit]
 
 
