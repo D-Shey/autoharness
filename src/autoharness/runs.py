@@ -151,7 +151,7 @@ def _numbered(line: str, expected: int) -> tuple[list[str], int]:
     cuts = []
     for m in ITEM_START.finditer(line):
         before, number, mark = m.groups()
-        if int(number) == expected and (mark or m.start() == 0 or before.strip() in (";", ":")):
+        if int(number) == expected and (mark or m.start() == 0 or before.strip() in (";", ":") or (expected > 1 and cuts)):
             cuts.append((m.start(), m.end()))
             expected += 1
     if not cuts:

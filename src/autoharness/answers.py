@@ -35,7 +35,7 @@ UNREQUESTED = re.compile(HEADING % "unrequested", re.MULTILINE | re.IGNORECASE)
 COMPARISON = re.compile(HEADING % "comparison", re.MULTILINE | re.IGNORECASE)
 RUNS = re.compile(HEADING % "runs", re.MULTILINE | re.IGNORECASE)
 RUN_LINE = re.compile(r"^\W*#?(\d+)\W+(checks|does not check)\b", re.MULTILINE | re.IGNORECASE)
-COVERAGE_LINE = re.compile(r"^\W*([BP]\d+)\W+(met|partial|missing|contradicts)\b", re.MULTILINE | re.IGNORECASE)
+COVERAGE_LINE = re.compile(r"^\W*([BPE]\d+)\W+(met|partial|missing|contradicts)\b", re.MULTILINE | re.IGNORECASE)
 # "1. x", "1) x", "### 1. x", "**1.** x", "**1. x**"
 ITEM = re.compile(r"^\s{0,3}(?:#+\s*)?(?:\*\*)?(\d+)[.)](?:\*\*)?\s+(.*)$")
 
@@ -98,10 +98,14 @@ def read(task: Task, path: Path, kind: str, subject: str) -> dict:
                    (("previous", PREVIOUS), ("coverage", COVERAGE), ("unrequested", UNREQUESTED),
                     ("comparison", COMPARISON), ("runs", RUNS))
                    if (m := rx.search(body)))
-    sections = {name: body[end:(found[i + 1][0] if i + 1 < len(found) else len(body))].strip()
+    accept_m = ACCEPT_LINE.search(body)
+    sec_limit = accept_m.start() if accept_m else len(body)
+    sections = {name: body[end:(found[i + 1][0] if i + 1 < len(found) else min(len(body), sec_limit))].strip()
                 for i, (_, end, name) in enumerate(found)}
     body = body[:found[0][0]] if found else body
     unrequested = sections.get("unrequested", "")
+    if unrequested and ACCEPT_LINE.search(unrequested):
+        unrequested = unrequested[:ACCEPT_LINE.search(unrequested).start()].strip()
     check, reason, closer = CHECK_LINE.findall(text), REASON_LINE.findall(text), CLOSER_LINE.findall(text)
     return {"id": nonce, "kind": kind, "text": text, "body": body.strip(), "items": items(body),
             "previous": sections.get("previous", ""),

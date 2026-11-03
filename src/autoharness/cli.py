@@ -2522,6 +2522,8 @@ def cmd_hook(args, project, catalog):
 
 def _reviewer_can_start(agent: str) -> bool:
     """Whether autoharness can start a fresh reviewer of this agent kind here (`--run`)."""
+    if agent in ("cursor", "agent"):
+        return bool(shutil.which("agent") or shutil.which("cursor"))
     return agent in reviewers.AGENTS and bool(shutil.which(agent))
 
 

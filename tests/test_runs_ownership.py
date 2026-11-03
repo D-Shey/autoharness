@@ -284,6 +284,10 @@ def test_reviewer_commands_are_read_only(tmp_path, monkeypatch):
     assert argv[argv.index("--sandbox") + 1] == "read-only" and argv[-1] == "-" and stdin == "judge it"
     argv, stdin = reviewers.command("agy", tmp_path, prompt, tmp_path / "a.txt")
     assert "--sandbox" in argv and argv[argv.index("--mode") + 1] == "plan" and str(prompt) in argv[2]
+    argv, stdin = reviewers.command("agent", tmp_path, prompt, tmp_path / "a.txt")
+    assert "--trust" in argv and argv[argv.index("--mode") + 1] == "plan" and str(prompt) in argv[2]
+    argv, stdin = reviewers.command("cursor", tmp_path, prompt, tmp_path / "a.txt")
+    assert "--trust" in argv and argv[argv.index("--mode") + 1] == "plan" and str(prompt) in argv[2]
     monkeypatch.setattr(reviewers.shutil, "which", lambda name: None)
     with pytest.raises(Exception, match="not on PATH"):
         reviewers.command("claude", tmp_path, prompt, tmp_path / "a.txt")
@@ -1330,3 +1334,42 @@ def test_a_short_name_part_said_by_the_query_is_hollow():
     assert vague.hollow_create("logs", "log", "logging")
     for name, query in (("sqlite", "sql"), ("webhook", "web"), ("gitignore", "git")):
         assert not vague.hollow_create("storage", name, query), name   # a short word does not cover a longer part
+
+
+def test_cursor_session_id_is_detected():
+    from autoharness import agents
+    assert agents.session_id({"CURSOR_CONVERSATION_ID": "c1"}, agent="cursor") == "c1"
+    assert agents.session_id({"CURSOR_CONVERSATION_ID": "c1"}, agent="agent") == "c1"
+    assert agents.session_id({"CURSOR_SESSION_ID": "s1"}, agent="cursor") == "s1"
+
+
+def test_coverage_line_reads_e_items(tmp_path, project):
+    from autoharness import answers
+    task = project.init_task("test")
+    nonce = answers.issue(task, "critic", "result #1")
+    f = tmp_path / "answer.txt"
+    f.write_text(f"ANSWER-ID: {nonce}\n\n## Brief coverage\nB1: met\nP1: met\nE1: met\n\nVERDICT: none\n", "utf-8")
+    parsed = answers.read(project.task(), f, "critic", "result #1")
+    assert parsed["coverage"] == {"B1": "met", "P1": "met", "E1": "met"}
+
+
+def test_accept_line_is_not_included_in_unrequested(tmp_path, project):
+    from autoharness import answers
+    task = project.init_task("test")
+    nonce = answers.issue(task, "critic", "result #1")
+    f = tmp_path / "answer.txt"
+    f.write_text(f"ANSWER-ID: {nonce}\n\n## Unrequested\n- extra button\n\nACCEPT: no - broken\nVERDICT: major\n", "utf-8")
+    parsed = answers.read(project.task(), f, "critic", "result #1")
+    assert parsed["unrequested"] == "- extra button"
+    assert parsed["accept"]["accept"] == "no"
+    assert "broken" in parsed["accept"]["why"]
+
+
+def test_numbered_splits_inline_numbered_items_without_punctuation():
+    from autoharness import runs
+    brief = {"goal": "1 first thing 2 second thing 3 third thing"}
+    items = runs.brief_items(brief)
+    assert len(items) == 3
+    assert items[0]["id"] == "B1" and items[0]["text"] == "first thing"
+    assert items[1]["id"] == "B2" and items[1]["text"] == "second thing"
+    assert items[2]["id"] == "B3" and items[2]["text"] == "third thing"

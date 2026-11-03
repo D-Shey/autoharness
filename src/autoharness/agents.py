@@ -438,7 +438,7 @@ def detect(environ: dict | None = None) -> str | None:
 
 
 # The id of the agent session a shell command runs in, the same id its hooks receive as session_id
-_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID", "cursor": "CURSOR_SESSION_ID"}
+_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID", "cursor": "CURSOR_CONVERSATION_ID", "agent": "CURSOR_CONVERSATION_ID"}
 
 
 def session_id(environ: dict | None = None, agent: str | None = None) -> str:
@@ -446,13 +446,22 @@ def session_id(environ: dict | None = None, agent: str | None = None) -> str:
     from another agent's shell inherits that one's id as well: the agent named for the command comes first."""
     environ = os.environ if environ is None else environ
     agent = agent or detect(environ)
+    if agent in ("cursor", "agent"):
+        for var in ("CURSOR_CONVERSATION_ID", "CURSOR_SESSION_ID"):
+            if environ.get(var):
+                return environ[var]
     if agent in _SESSION and environ.get(_SESSION[agent]):
         return environ[_SESSION[agent]]
+    for var in ("CURSOR_CONVERSATION_ID", "CURSOR_SESSION_ID"):
+        if environ.get(var):
+            return environ[var]
     return next((environ[v] for v in _SESSION.values() if environ.get(v)), "")
 
 
 def get(name: str | None) -> Agent:
     name = name or detect() or DEFAULT_AGENT
+    if name == "agent":
+        return AGENTS["cursor"]
     if name not in AGENTS:
         raise AgentError(f"unknown agent {name!r}; choose one of {', '.join(AGENTS)}")
     return AGENTS[name]

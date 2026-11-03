@@ -16,7 +16,7 @@ from pathlib import Path
 
 from autoharness.env import HarnessError
 
-AGENTS = ("claude", "codex", "agy")
+AGENTS = ("claude", "codex", "agy", "cursor", "agent")
 DEFAULT_TIMEOUT = 1200
 ENV_FLAG = "AUTOHARNESS_REVIEWER"
 # the only tools that exist for it: allow rules in the user's settings cannot add a shell or an editor back.
@@ -24,12 +24,12 @@ ENV_FLAG = "AUTOHARNESS_REVIEWER"
 CLAUDE_TOOLS = ["Read", "Grep", "Glob"]
 # variables of the author's session that would make the reviewer look like it, or refuse to start inside it
 INHERITED = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "ANTIGRAVITY_AGENT",
-             "ANTIGRAVITY_CONVERSATION_ID", "CODEX_THREAD_ID")
+             "ANTIGRAVITY_CONVERSATION_ID", "CODEX_THREAD_ID", "CURSOR_AGENT", "CURSOR_CONVERSATION_ID", "CURSOR_REQUEST_ID", "CURSOR_SESSION_ID")
 
 
 def command(agent: str, root: Path, prompt_file: Path, answer_file: Path) -> tuple[list[str], str | None]:
     """The argv for a read-only, non-interactive run of `agent`, and what to send on stdin."""
-    exe = shutil.which(agent)
+    exe = (shutil.which("agent") or shutil.which("cursor")) if agent in ("cursor", "agent") else shutil.which(agent)
     if not exe:
         raise HarnessError(f"`{agent}` is not on PATH: install it, or run the critic yourself with `autoharness critic`")
     prompt = prompt_file.read_text("utf-8")
@@ -43,6 +43,9 @@ def command(agent: str, root: Path, prompt_file: Path, answer_file: Path) -> tup
         # agy reads its prompt from the command line only: point it at the file instead of passing pages of text
         return ([exe, "-p", f"Read the file {prompt_file} and do exactly what it says. Do not edit any file.",
                  "--mode", "plan", "--sandbox", "--add-dir", str(root)], None)
+    if agent in ("cursor", "agent"):
+        return ([exe, "-p", f"Read the file {prompt_file} and do exactly what it says. Do not edit any file.",
+                 "--mode", "plan", "--trust", "--workspace", str(root)], None)
     raise HarnessError(f"reviewer must be one of {', '.join(AGENTS)}")
 
 

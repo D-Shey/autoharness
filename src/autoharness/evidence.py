@@ -492,7 +492,8 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
     if not result:
         raise HarnessError("no result yet: `autoharness evidence add <file> --kind result` first")
     reviews = task.info().get("reviews", [])
-    item = {"round": len(reviews) + 1, "by": by, "result": result["n"], "diff": diff, "worst": worst,
+    judged = round_results(task)[0] if by == "critic" else result
+    item = {"round": len(reviews) + 1, "by": by, "result": judged["n"], "diff": diff, "worst": worst,
             "fixable": worst in BLOCKING, "top": top_issue(diff), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     item |= extra or {}
     if by == "critic":
@@ -957,9 +958,10 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
         "Facts the author took from the reference (check a few of them against the reference yourself: a wrong "
         "fact is a difference of its own). Check the result against each fact:\n" + listing(facts) + "\n")
     if refs and not any(r["by"] == "critic" for r in info.get("reviews", [])):
-        facts_text += ("This is the first critic round, on the base of the work: judge the layout, proportions and "
-                       "main structure against the reference and the facts. Missing detail and polish are at most "
-                       "minor this round; a wrong base is major.\n")
+        facts_text += ("This is the first critic round: judge the layout, proportions and main structure against "
+                       "the reference and the facts. If the work is an early block-in, missing detail and polish are "
+                       "at most minor this round; if the result is already detailed or finished, judge detail and "
+                       "finish at the target fidelity as well. A wrong base is always major.\n")
     fidelity = brief.get("fidelity") or "the level the quality bar implies"
     # images are judged as a whole view plus close-ups; code, text and data by what the files hold. The work is
     # visual when the task needs images or has to match an image, not because a render of a document is attached
