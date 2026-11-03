@@ -12,6 +12,7 @@ each adapter translates it into the agent's native config on write.
     gigacode  .gigacode/settings.json    .gigacode/skills
     strands   .agent/mcp.json            .agent/skills
     agy       .agents/mcp_config.json    .agents/skills
+    cursor    .cursor/mcp.json           .cursor/skills
 
 Antigravity CLI (agy) shares `.agents/skills` with Codex, so the autoharness skill
 installed there speaks to both. Its user-level skills live in `~/.gemini/config/skills`:
@@ -141,6 +142,29 @@ def to_agy(cfg: dict) -> tuple[dict, list[str]]:
     if env:
         out["env"] = env
     return out, warnings
+
+
+CURSOR_ENV_REF = re.compile(r"\$\{(?!env:|userHome|workspaceFolder)(\w+)\}")
+
+
+def to_cursor(cfg: dict) -> tuple[dict, list[str]]:
+    """Cursor: `${env:VAR}` for secrets and environment variables, `url` for remote servers."""
+    def expand(val):
+        return CURSOR_ENV_REF.sub(r"${env:\1}", val) if isinstance(val, str) else val
+
+    out: dict = {}
+    if "url" in cfg:
+        out["url"] = expand(cfg["url"])
+        if cfg.get("headers"):
+            out["headers"] = {h: expand(v) for h, v in cfg["headers"].items()}
+        return out, []
+
+    out["command"] = cfg["command"]
+    if cfg.get("args"):
+        out["args"] = [expand(a) for a in cfg["args"]]
+    if cfg.get("env"):
+        out["env"] = {k: expand(v) for k, v in cfg["env"].items()}
+    return out, []
 
 
 # --- MCP config stores ------------------------------------------------------
@@ -334,6 +358,8 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
           "restart the agent; pass mcp_servers=\".agent/mcp.json\" to create_harness() so it loads the server"),
     Agent("agy", "Antigravity CLI", ".agents/mcp_config.json", ".agents/skills", ".gemini/config/skills", to_agy,
           "restart agy so it picks up the new server", ".gemini/config/mcp_config.json"),
+    Agent("cursor", "Cursor", ".cursor/mcp.json", ".cursor/skills", ".cursor/skills", to_cursor,
+          "restart Cursor (or refresh in Cursor Settings > MCP) so it picks up the new server", ".cursor/mcp.json"),
 ]}
 
 DEFAULT_AGENT = "claude"
@@ -397,7 +423,7 @@ def sharing_skills_dir(agent: Agent, user: bool = False) -> list[Agent]:
 # Env vars the agents set for the shell commands they run. agy sets ANTIGRAVITY_AGENT
 # per command and comes first: it inherits CLAUDECODE when started from Claude Code.
 _DETECT = [("ANTIGRAVITY_AGENT", "agy"), ("CLAUDECODE", "claude"), ("GEMINI_CLI", "gemini"), ("QWEN_CODE", "qwen"),
-           ("GIGACODE_CLI", "gigacode"), ("CODEX_SANDBOX", "codex"), ("CODEX_THREAD_ID", "codex")]
+           ("GIGACODE_CLI", "gigacode"), ("CODEX_SANDBOX", "codex"), ("CODEX_THREAD_ID", "codex"), ("CURSOR_AGENT", "cursor")]
 
 
 def detect(environ: dict | None = None) -> str | None:
@@ -412,7 +438,7 @@ def detect(environ: dict | None = None) -> str | None:
 
 
 # The id of the agent session a shell command runs in, the same id its hooks receive as session_id
-_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID"}
+_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID", "cursor": "CURSOR_SESSION_ID"}
 
 
 def session_id(environ: dict | None = None, agent: str | None = None) -> str:

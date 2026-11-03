@@ -11,7 +11,7 @@ Prepare before building. Check against the original. Let someone else judge the 
 ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Works with **Claude Code** · **Codex CLI** · **Gemini CLI** · **Antigravity CLI** · **Qwen Code** · **GigaCode** · **Strands**
+Works with **Claude Code** · **Codex CLI** · **Gemini CLI** · **Antigravity CLI** · **Cursor** · **Qwen Code** · **GigaCode** · **Strands**
 
 [How it works](#the-process) · [Quick start](#quick-start) · [Example](#example) · [Security](docs/security.md) · [Reference](docs/reference.md)
 
@@ -33,7 +33,7 @@ is acceptable.
 | Loops on the same fix | Changes approach, then asks an arbiter, then the user |
 | Forgets everything after the session | Keeps what it learned as skills and recipes for the next task |
 
-A coding agent (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands)
+A coding agent (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Cursor, Qwen Code, GigaCode, Strands)
 usually goes at a task head-on. It writes from memory without looking at what the result has to
 match, without finding out how such work is done well, and then marks its own work "done". The
 ceiling on quality is then whatever the model remembers. It shows on any task: an integration with
@@ -319,7 +319,7 @@ autoharness agents                                          # which agents are f
 cd /path/to/your/project
 autoharness --agent claude install-skill                    # the skill for the agent (--user --all: every agent)
 autoharness --agent claude gateway install                  # optional: MCP servers without restarts
-autoharness --agent agy gateway install --user              # the same for every project (agy, Gemini, Qwen, GigaCode)
+autoharness --agent agy gateway install --user              # the same for every project (agy, Cursor, Gemini, Qwen, GigaCode)
 autoharness install-hook                                    # optional: Claude Code does not start without a brief
 autoharness --agent agy install-hook                        # the same for Antigravity CLI
 ```
@@ -336,6 +336,7 @@ and give it a task.
 | GigaCode CLI | `gigacode` |
 | [Strands harness](https://github.com/strands-agents/harness-sdk) | `strands` |
 | Antigravity CLI | `agy` |
+| Cursor | `cursor` |
 
 ## Documentation
 

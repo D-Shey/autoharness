@@ -535,6 +535,8 @@ def test_detect_agent_from_environment():
     # agy started from Claude Code inherits its variables; agy's own marker wins
     assert agents.detect({"ANTIGRAVITY_AGENT": "1", "CLAUDECODE": "1",
                           "AI_AGENT": "claude-code_2_agent"}) == "agy"
+    assert agents.detect({"CURSOR_AGENT": "1"}) == "cursor"
+    assert agents.detect({"AI_AGENT": "cursor_0.42"}) == "cursor"
     assert agents.detect({}) is None
 
 
@@ -548,6 +550,7 @@ def test_install_skill_for_all_agents(tmp_path, capsys):
     assert "do what their agent needs (Codex CLI: restart Codex" in shared
     assert "Antigravity CLI: restart agy" in shared and "{{" not in shared
     assert ".gigacode/settings.json" in (tmp_path / ".gigacode" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+    assert ".cursor/mcp.json" in (tmp_path / ".cursor" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
     code, res = cli_json(capsys, "--project", str(tmp_path), "init", "t")
     assert code == 0 and not res.get("warnings")
 
@@ -557,6 +560,85 @@ def test_agy_user_skill_is_its_own(tmp_path, monkeypatch, capsys):
     assert cli.main(["--project", str(tmp_path), "--agent", "agy", "install-skill", "--user"]) == 0
     skill = (tmp_path / "home" / ".gemini" / "config" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
     assert "autoharness --agent agy init" in skill and "`.agents/mcp_config.json`: tell the user to restart agy" in skill
+
+
+def test_to_cursor_translation():
+    remote = {
+        "type": "http",
+        "url": "https://api.example.com/mcp/${URL_PARAM}",
+        "headers": {"Authorization": "Bearer ${TOKEN}", "X-User": "${USER_ID}", "Static": "foo"}
+    }
+    native, warnings = agents.to_cursor(remote)
+    assert warnings == []
+    assert native == {
+        "url": "https://api.example.com/mcp/${env:URL_PARAM}",
+        "headers": {
+            "Authorization": "Bearer ${env:TOKEN}",
+            "X-User": "${env:USER_ID}",
+            "Static": "foo"
+        }
+    }
+
+    stdio = {
+        "command": "node",
+        "args": ["${userHome}/server.js", "--key", "${API_KEY}", "${workspaceFolder}/config"],
+        "env": {"SECRET": "${SECRET}", "PLAIN": "val"}
+    }
+    native, warnings = agents.to_cursor(stdio)
+    assert warnings == []
+    assert native == {
+        "command": "node",
+        "args": ["${userHome}/server.js", "--key", "${env:API_KEY}", "${workspaceFolder}/config"],
+        "env": {"SECRET": "${env:SECRET}", "PLAIN": "val"}
+    }
+
+    already = {"command": "x", "env": {"K": "${env:ALREADY}"}}
+    native, warnings = agents.to_cursor(already)
+    assert native["env"]["K"] == "${env:ALREADY}"
+
+
+def test_cursor_writes_mcp_config_and_keeps_user_settings(tmp_path):
+    project = Project(tmp_path, "cursor")
+    cfg = tmp_path / ".cursor" / "mcp.json"
+    cfg.parent.mkdir()
+    cfg.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}), "utf-8")
+    task = project.init_task("t")
+    task.add_mcp("github", GITHUB, source="catalog", trust={}, permissions={})
+    task.add_mcp("context7", {"command": "npx", "args": ["-y", "c7"],
+                               "env": {"K": "${K}", "MODE": "ro"}},
+                 source="catalog", trust={}, permissions={})
+    data = json.loads(cfg.read_text())
+    assert data["mcpServers"]["github"] == {
+        "url": GITHUB["url"],
+        "headers": {"Authorization": "Bearer ${env:GITHUB_PERSONAL_ACCESS_TOKEN}"}
+    }
+    assert data["mcpServers"]["context7"] == {
+        "command": "npx",
+        "args": ["-y", "c7"],
+        "env": {"K": "${env:K}", "MODE": "ro"}
+    }
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+    assert (tmp_path / ".cursor" / "skills" / "demo" / "SKILL.md").exists()
+
+    task.teardown("remove")
+    assert json.loads(cfg.read_text()) == {"mcpServers": {"mine": {"command": "x"}}}
+    assert not (tmp_path / ".cursor" / "skills" / "demo").exists()
+
+
+def test_cursor_config_created_by_task_is_removed(tmp_path):
+    task = Project(tmp_path, "cursor").init_task("t")
+    task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
+    assert (tmp_path / ".cursor" / "mcp.json").exists()
+    task.teardown("remove")
+    assert not (tmp_path / ".cursor").exists()
+
+
+def test_cursor_user_skill_installation(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(agents.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert cli.main(["--project", str(tmp_path), "--agent", "cursor", "install-skill", "--user"]) == 0
+    skill = (tmp_path / "home" / ".cursor" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+    assert "autoharness --agent cursor init" in skill
+    assert "`.cursor/mcp.json`" in skill
 
 
 # --- teardown policy: keep at project level by default ----------------------

@@ -79,6 +79,7 @@ autoharness install-skill --all                # into the project, for every age
 | GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
 | Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (strands does not read it by itself: pass the path to `create_harness(skills=...)`) |
 | Antigravity CLI | `agy` | `.agents/skills/autoharness/` | `~/.gemini/config/skills/autoharness/` |
+| Cursor | `cursor` | `.cursor/skills/autoharness/` | `~/.cursor/skills/autoharness/` |
 
 Codex and Antigravity CLI read the same `.agents/skills`, so they share the project's `SKILL.md`: it
 names `--agent` and the MCP config for each of the two agents. Their global skills differ: agy does
@@ -109,7 +110,7 @@ autoharness --agent claude gateway status      # whether it is installed and whi
 The gateway is installed into the project and **separately for each agent**: `gateway install` has no
 `--all`, so repeat the command with each `--agent`. `add mcp` goes through the gateway only for an
 agent that has the gateway installed. `--user` installs it into the agent's own config for every
-project (agy, Gemini, Qwen, GigaCode).
+project (agy, Cursor, Gemini, Qwen, GigaCode).
 
 Codex may need one more restart when a new server needs an environment variable the gateway does not
 pass yet. `add` and `gateway approve` say so and write its name into `env_vars`; set the value in the
@@ -126,6 +127,7 @@ What to do in each agent after `gateway install`:
 | GigaCode CLI | `.gigacode/settings.json` | restart or run `/mcp refresh` |
 | Strands harness | `.agent/mcp.json` | pass `create_harness(mcp_servers=".agent/mcp.json")` and create the agent again |
 | Antigravity CLI | `.agents/mcp_config.json` | restart `agy` |
+| Cursor | `.cursor/mcp.json` | restart Cursor (or refresh in Cursor Settings > MCP) |
 
 Check: the tools `harness_tools` and `harness_call` should appear in the agent. In Claude Code they
 may arrive deferred; tool search finds them.
@@ -222,10 +224,11 @@ detection fails, set `AUTOHARNESS_AGENT=<agent>` in the environment you start th
 | `gigacode` (GigaCode CLI) | `.gigacode/settings.json` | `.gigacode/skills` |
 | `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
 | `agy` (Antigravity CLI) | `.agents/mcp_config.json` | `.agents/skills` |
+| `cursor` (Cursor) | `.cursor/mcp.json` | `.cursor/skills` |
 
 Lockfiles and recipes keep a config in one canonical form (the `.mcp.json` format, secrets as
 `${VAR}`), and the adapter translates it on write: for the Gemini family remote servers become
-`httpUrl`/`url`; for Codex secrets go to `env_vars`, `bearer_token_env_var`, `env_http_headers`.
+`httpUrl`/`url`; for Cursor secrets become `${env:VAR}` in url, headers, args and env; for Codex secrets go to `env_vars`, `bearer_token_env_var`, `env_http_headers`.
 Codex does not expand `${VAR}` in `args`; then `add` returns `warnings`. Antigravity CLI does not
 expand `${VAR}` either, but passes its environment to servers: `"K": "${K}"` is simply not written,
 remote servers become `serverUrl`, and for `${VAR}` in headers, `args` and renamed variables `add`
