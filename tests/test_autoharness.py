@@ -1947,14 +1947,24 @@ def ev(capsys, root, path, kind):
 
 
 def test_evidence_takes_any_file_and_copies_it(project, capsys, tmp_path):
-    root = visual_task(capsys, project)
+    root = str(project.root)
+    cli_json(capsys, "--project", root, "init", "build a client for github")
+    cli_json(capsys, "--project", root, "brief", *BRIEF)
     notes = tmp_path / "api-sample.json"
     notes.write_text("{}", "utf-8")
-    code, res = ev(capsys, root, notes, "reference")
+    code, res = cli_json(capsys, "--project", root, "evidence", "add", str(notes), "--kind", "reference")
     assert code == 0 and res["evidence"]["media"] is None
     assert Path(res["evidence"]["file"]).parent == project.task().dir / "evidence"
-    code, res = ev(capsys, root, png(tmp_path / "still.png"), "reference")
+    code, res = cli_json(capsys, "--project", root, "evidence", "add", str(png(tmp_path / "still.png")), "--kind", "reference")
     assert res["evidence"]["media"] == "image"
+
+
+def test_visual_task_refuses_non_image_reference(project, capsys, tmp_path):
+    root = visual_task(capsys, project)
+    notes = tmp_path / "reference-facts.md"
+    notes.write_text("# Scene description\nRyan Gosling looking at hologram", "utf-8")
+    code, res = cli_json(capsys, "--project", root, "evidence", "add", str(notes), "--kind", "reference")
+    assert code == 1 and "requires an image reference" in res["error"]
 
 
 def test_review_needs_a_result(project, capsys):
@@ -2181,7 +2191,8 @@ def test_visual_teardown_needs_image_references_results_and_a_final_critic(proje
 
     notes = tmp_path / "scene-notes.md"
     notes.write_text("pink Joi, blue hair", "utf-8")
-    ev(capsys, root, notes, "reference")  # a text note does not count for a visual task
+    code, res = cli_json(capsys, "--project", root, "evidence", "add", str(notes), "--kind", "reference")
+    assert code == 1 and "image reference" in res["error"]
     code, res = cli_json(capsys, "--project", root, "teardown")
     assert "image reference" in " ".join(res["problems"])
 

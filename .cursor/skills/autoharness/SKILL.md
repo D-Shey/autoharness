@@ -29,7 +29,7 @@ session is gone), `autoharness claim <your session id> --reason "<their words>"`
 ## 1. Start at the right level
 
 ```bash
-autoharness --agent cursor init "<the user's task, verbatim>" --mode light|full|reviewed|auto
+autoharness --agent {{AGENT}} init "<the user's task, verbatim>" --mode light|full|reviewed|auto
 ```
 
 - `light`: a chore that needs no capability (a typo, a git commit). No search, no brief: do the
@@ -121,8 +121,9 @@ Number the goal's parts (`1 ...; 2 ...`): they become brief items B1, B2, ... (a
 
 Give a verdict for every plausible candidate. Show the user the brief in a few lines.
 For browser, API (your own, or a third-party one: `api-client`), logs or database checks, `autoharness verify guide <kind>` has a template:
-pass `--verify-template <kind>` instead of `--verify`. Visual work needs image references, at
-least two results and a critic before teardown; `brief` lists what this task owes.
+pass `--verify-template <kind>` instead of `--verify`. Visual work needs real image references
+(.png, .jpg, etc., never text descriptions or notes), at least two results and a critic before teardown;
+`brief` lists what this task owes.
 
 **No fitting skill for real know-how? Create it** (`--gaps "create ..."`):
 `autoharness skill new <name> --description "<when to use>"`, fill When to use / Steps / How to
@@ -156,7 +157,7 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - A low-trust skill that brings little is worse than none: write down what you know instead.
 - `already_installed`: an earlier task kept it; use it.
 - `via: gateway`: works now, use `harness_tools` / `harness_call`. Otherwise the server is in
-  `.cursor/mcp.json`: tell the user to restart Cursor (or refresh in Cursor Settings > MCP) so it picks up the new server, and continue what does not depend on it. If `add`
+  `{{MCP_FILE}}`: tell the user to {{RELOAD}}, and continue what does not depend on it. If `add`
   suggests `autoharness gateway install`, offer it once (`--user` puts it in your own config, for
   every project): later servers then need no restart.
 

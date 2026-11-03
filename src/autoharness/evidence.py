@@ -205,7 +205,7 @@ def version_of(e: dict) -> str:
 
 
 def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = None,
-        closeup: bool = False) -> dict:
+        closeup: bool = False, catalog=None) -> dict:
     if kind not in KINDS:
         raise HarnessError(f"kind must be one of {', '.join(KINDS)}")
     if not path.is_file():
@@ -214,6 +214,18 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
     if closeup and kind != "result":
         raise HarnessError("--closeup marks a close-up or part of a result: use it with --kind result")
     media = media_of(path.name)
+    if kind == "reference":
+        from autoharness.catalog import Catalog
+        cat = catalog or Catalog.load()
+        need = requirements(cat, task)
+        media_type = need.get("media")
+        if media_type in MEDIA and media != media_type:
+            exts = ", ".join(sorted(MEDIA[media_type]))
+            raise HarnessError(
+                f"this task requires an {media_type} reference ({exts}): a description or text file is not a reference. "
+                f"Add the original {media_type} file you actually looked at (`autoharness evidence add <file> --kind reference`), "
+                f"or save notes and measurements with `--kind facts`."
+            )
     whole = next((e for e in reversed(wholes(items)) if e.get("media") == media and not e.get("proof")), None)
     if closeup:
         # a part named by hand may be of another sort than its whole (a test log beside the diff)

@@ -509,7 +509,7 @@ def cmd_evidence(args, project, catalog):
         return 0
     if not args.file or not args.kind:
         raise HarnessError("usage: autoharness evidence add <file> --kind reference|facts|result [--note ...]")
-    item = evidence.add(task, Path(args.file), args.kind, args.note or "", closeup=args.closeup)
+    item = evidence.add(task, Path(args.file), args.kind, args.note or "", closeup=args.closeup, catalog=catalog)
     first = args.kind == "result" and not any(e["kind"] == "result" and e["n"] != item["n"]
                                               for e in task.info().get("evidence", []))
     nxt = ("Study it, then take from it with a tool what the result must match (measure, crop, extract, quote; for code, exact AST definitions), "

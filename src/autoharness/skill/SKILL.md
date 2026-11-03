@@ -121,8 +121,9 @@ Number the goal's parts (`1 ...; 2 ...`): they become brief items B1, B2, ... (a
 
 Give a verdict for every plausible candidate. Show the user the brief in a few lines.
 For browser, API (your own, or a third-party one: `api-client`), logs or database checks, `autoharness verify guide <kind>` has a template:
-pass `--verify-template <kind>` instead of `--verify`. Visual work needs image references, at
-least two results and a critic before teardown; `brief` lists what this task owes.
+pass `--verify-template <kind>` instead of `--verify`. Visual work needs real image references
+(.png, .jpg, etc., never text descriptions or notes), at least two results and a critic before teardown;
+`brief` lists what this task owes.
 
 **No fitting skill for real know-how? Create it** (`--gaps "create ..."`):
 `autoharness skill new <name> --description "<when to use>"`, fill When to use / Steps / How to
