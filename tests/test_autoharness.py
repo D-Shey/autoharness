@@ -4042,3 +4042,112 @@ def test_set_session_state_is_atomic(monkeypatch):
     assert calls[0][0] == cli.session_file("sess-atomic-1")
     state = cli.session_state("sess-atomic-1")
     assert state == {"prompt": "test prompt", "counter": 42}
+
+
+def test_brief_items_supports_russian_and_prefixed_numbering():
+    from autoharness.runs import brief_items
+    b = {"goal": "Часть 1: Фоновый город. Часть 2: Голограмма AI девушки. Часть 3: Персонаж."}
+    items = brief_items(b)
+    assert len(items) == 3
+    assert items[0]["id"] == "B1" and "Фоновый город" in items[0]["text"]
+    assert items[1]["id"] == "B2" and "Голограмма" in items[1]["text"]
+    assert items[2]["id"] == "B3" and "Персонаж" in items[2]["text"]
+
+    b2 = {"goal": "Пункт 1: Настройка. Пункт 2: Сборка."}
+    items2 = brief_items(b2)
+    assert len(items2) == 2
+
+    b3 = {"goal": "Step 1: Download still; Step 2: Render vector; Step 3: Compare"}
+    items3 = brief_items(b3)
+    assert len(items3) == 3
+
+    b4 = {"goal": "1: Alpha; 2: Beta"}
+    items4 = brief_items(b4)
+    assert len(items4) == 2
+
+
+def test_fingerprint_and_is_fresh_in_non_git_project(tmp_path):
+    from autoharness.runs import fingerprint, is_fresh
+    f = tmp_path / "scene.svg"
+    f.write_text("<svg></svg>", "utf-8")
+    fp = fingerprint(tmp_path)
+    assert fp is not None
+    assert fp["base_sha"] == "no-git"
+    assert is_fresh({"fingerprint": fp}, tmp_path) is True
+
+    # After modifying the file, run becomes stale
+    f.write_text("<svg><circle/></svg>", "utf-8")
+    assert is_fresh({"fingerprint": fp}, tmp_path) is False
+
+
+def test_answers_cancel_restores_retired(project, capsys):
+    from autoharness import answers
+    cli_json(capsys, "--project", str(project.root), "init", "test task")
+    task = project.task()
+    nonce1 = answers.issue(task, "critic", "round1")
+    info1 = task.info()["answer_ids"]
+    assert nonce1 in info1
+    assert "retired" not in info1[nonce1]
+
+    # Issue second nonce: retires nonce1
+    nonce2 = answers.issue(task, "critic", "round1")
+    info2 = task.info()["answer_ids"]
+    assert nonce2 in info2
+    assert info2[nonce1].get("retired") == nonce2
+
+    # Cancel nonce2: deletes nonce2 and un-retires nonce1
+    answers.cancel(task, nonce2)
+    info3 = task.info()["answer_ids"]
+    assert nonce2 not in info3
+    assert nonce1 in info3
+    assert "retired" not in info3[nonce1]
+
+
+def test_reviewers_cursor_agent_resolution(monkeypatch):
+    from autoharness import reviewers
+    calls = []
+
+    def mock_which(name):
+        calls.append(name)
+        if name == "cursor-agent":
+            return "/bin/cursor-agent"
+        if name == "cursor":
+            return "/bin/cursor"
+        return None
+
+    monkeypatch.setattr("shutil.which", mock_which)
+    exe = reviewers.resolve_executable("cursor")
+    assert exe == "/bin/cursor-agent"
+    assert calls[0] == "cursor-agent"
+
+
+def test_stale_skills_scoped_to_active_agent(project, monkeypatch):
+    from autoharness import cli, agents
+    checked_user_agents = []
+    orig_user_path = agents.Agent.user_skills_path
+
+    def spy_user_path(self):
+        checked_user_agents.append(self.name)
+        return orig_user_path(self)
+
+    monkeypatch.setattr(agents.Agent, "user_skills_path", spy_user_path)
+    cli.stale_skills(project)
+    assert checked_user_agents == [project.agent.name]
+
+
+def test_recipes_match_filters_weak_single_word_matches():
+    from autoharness import recipes
+    task = ("Draw a scene from the movie Blade Runner 2049 using SVG graphics, where Ryan Goslings character "
+            "is looking at a hologram of an AI girl in purple light. Dont use external svg generators")
+    matches = recipes.match(task)
+    assert not any(r.get("name") == "bpmn-generator" for _, r in matches)
+
+
+def test_search_marketplace_filters_generic_words_and_unrelated():
+    from autoharness import registry
+    res = registry.search_marketplace("hand-drawn cinematic svg scene")
+    assert not any(p["name"] in ("cockroachdb", "databases-on-aws", "shippo") for p in res)
+
+    res2 = registry.search_marketplace("image search")
+    # Must not contain plugins that only matched 'search' like amazon-location-service
+    assert not any(p["name"] == "amazon-location-service" for p in res2)

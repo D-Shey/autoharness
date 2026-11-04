@@ -89,17 +89,38 @@ def marketplace_plugins(fetch: Fetcher = http_get_json) -> list[dict]:
     return fetch(MARKETPLACE).get("plugins", [])
 
 
+GENERIC_QUERY_WORDS = {"search", "mcp", "tool", "tools", "client", "service", "services", "api", "plugin", "plugins"}
+
+
 def search_marketplace(query: str, limit: int = 10, fetch: Fetcher = http_get_json) -> list[dict]:
     """Marketplace plugins whose name or description has the query's words, the name counting most."""
     words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2] or [query.lower()]
+    content_words = [w for w in words if w not in GENERIC_QUERY_WORDS] or words
     ranked = []
     for p in marketplace_plugins(fetch):
-        name, about = p.get("name", "").lower(), f"{p.get('description', '')} {p.get('category', '')}".lower()
-        hits = sum(3 for w in words if w in name) + sum(1 for w in words if re.search(rf"\b{re.escape(w)}", about))
-        if hits:
-            ranked.append((hits, p))
-    ranked.sort(key=lambda h: h[0], reverse=True)
-    return [p for _, p in ranked[:limit]]
+        name = p.get("name", "").lower()
+        name_tokens = set(re.split(r"[-_]+", name))
+        about = f"{p.get('description', '')} {p.get('category', '')}".lower()
+
+        content_matches = [w for w in content_words if (w in name_tokens or re.search(rf"\b{re.escape(w)}(?:s|es)?\b", about))]
+        if not content_matches:
+            continue
+
+        hits = 0
+        for w in words:
+            if w in name_tokens:
+                hits += 4
+            elif re.search(rf"\b{re.escape(w)}", name):
+                hits += 3
+            if re.search(rf"\b{re.escape(w)}(?:s|es)?\b", about):
+                hits += 1
+
+        if len(content_words) >= 3 and len(content_matches) < 2 and not any(w in name_tokens for w in content_words):
+            continue
+
+        ranked.append((hits, len(content_matches), p))
+    ranked.sort(key=lambda h: (h[1], h[0]), reverse=True)
+    return [p for _, _, p in ranked[:limit]]
 
 
 def marketplace_servers(plugin: dict, fetch: Fetcher = http_get_json) -> dict[str, dict]:

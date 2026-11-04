@@ -12,6 +12,7 @@ does not pass for a check of the code at teardown. What the agent only reports (
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import time
@@ -24,8 +25,12 @@ TAIL_LINES = 20
 DEFAULT_TIMEOUT = 600
 PRESERVE = "preserve"
 VERDICTS = ("met", "partial", "missing", "contradicts")
-# where a numbered item may start: `1 a; 2 b`, `intro: 1 a`, `1. a 2. b` (a bare `2 ` only after `;` or `:`)
-ITEM_START = re.compile(r"(^\s*|[;:]\s*|\s)(\d+)([.)]?)\s")
+# where a numbered item may start: `1 a; 2 b`, `intro: 1 a`, `1. a 2. b`, `Часть 1: a; Часть 2: b`
+ITEM_PREFIX = r"(?:((?:часть|части|пункт[а-я]*|шаг[а-я]*|раздел[а-я]*|этап[а-я]*|part|step|item|section))\s+)?"
+ITEM_START = re.compile(
+    r"(^\s*|[;:]\s*|\s)" + ITEM_PREFIX + r"(\d+)([:.)\-]?)\s+",
+    re.IGNORECASE,
+)
 
 
 # a command that exits 0 whatever the code does: a run of it shows nothing, so it does not count as a check
@@ -54,8 +59,23 @@ NOT_A_CHECK = ("`{command}` exits 0 whatever the code does, so it checks nothing
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
+def _dir_tree_state(root: Path) -> str:
+    h = hashlib.sha256()
+    ignored = {".autoharness", ".git", "node_modules", "__pycache__", ".venv", ".pytest_cache"}
+    for p in sorted(root.rglob("*")):
+        if p.is_file() and not any(part in ignored for part in p.relative_to(root).parts):
+            rel = str(p.relative_to(root).as_posix())
+            try:
+                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+                h.update(f"{rel}\0{digest}\n".encode("utf-8"))
+            except OSError:
+                continue
+    return h.hexdigest()
+
+
 def fingerprint(root: Path) -> dict | None:
-    """The code version a run sees: HEAD and the state of every file changed since it. None outside git."""
+    """The code version a run sees: HEAD and the state of every file changed since it. Outside git,
+    hashes the project directory files."""
     try:
         try:
             head = evidence._git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").decode().strip()
@@ -64,15 +84,23 @@ def fingerprint(root: Path) -> dict | None:
             head = EMPTY_TREE
         return {"base_sha": head, "tree_state": evidence.tree_state(root, head)}
     except (HarnessError, OSError):
-        return None
+        try:
+            return {"base_sha": "no-git", "tree_state": _dir_tree_state(root)}
+        except OSError:
+            return None
 
 
 def is_fresh(item: dict, root: Path) -> bool | None:
     """Whether the code is still the version the run saw (committing it since does not count as a change);
-    None when that cannot be told (no git, or the commit is gone)."""
+    None when that cannot be told."""
     seen = item.get("fingerprint")
     if not seen:
         return None
+    if seen.get("base_sha") == "no-git":
+        try:
+            return _dir_tree_state(root) == seen.get("tree_state")
+        except OSError:
+            return None
     try:
         return evidence.tree_state(root, seen["base_sha"]) == seen["tree_state"]
     except (HarnessError, OSError):
@@ -150,12 +178,12 @@ def _numbered(line: str, expected: int) -> tuple[list[str], int]:
     `retry up to 3. Then` stays whole. Text before the first number (an introduction) is an item of its own."""
     cuts = []
     for m in ITEM_START.finditer(line):
-        before, number, mark = m.groups()
-        if int(number) == expected and (mark or m.start() == 0 or before.strip() in (";", ":") or (expected > 1 and cuts)):
+        before, prefix, number, mark = m.groups()
+        if int(number) == expected and (prefix or mark or m.start() == 0 or before.strip() in (";", ":") or (expected > 1 and cuts)):
             cuts.append((m.start(), m.end()))
             expected += 1
     if not cuts:
-        return ([line.strip(" ;")] if line.strip(" ;") else []), expected
+        return ([line.strip(" ;:")] if line.strip(" ;:") else []), expected
     pieces = [line[:cuts[0][0]]] + [line[end:(cuts[i + 1][0] if i + 1 < len(cuts) else len(line))]
                                     for i, (_, end) in enumerate(cuts)]
     return [p.strip(" ;:") for p in pieces if p.strip(" ;:")], expected

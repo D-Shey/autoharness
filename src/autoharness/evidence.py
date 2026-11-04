@@ -26,7 +26,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from autoharness import rulings, text
+from autoharness import reviewers, rulings, text
 from autoharness.env import HarnessError, Task
 
 # facts: what the result must match, taken from a reference with a tool (measured, cropped, extracted, quoted),
@@ -969,7 +969,8 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
     facts_text = "" if not facts else (
         "Facts the author took from the reference (check a few of them against the reference yourself: a wrong "
         "fact is a difference of its own). Check the result against each fact:\n" + listing(facts) + "\n")
-    if refs and not any(r["by"] == "critic" for r in info.get("reviews", [])):
+    first_round = bool(refs and not any(r["by"] == "critic" for r in info.get("reviews", [])))
+    if first_round:
         facts_text += ("This is the first critic round: judge the layout, proportions and main structure against "
                        "the reference and the facts. If the work is an early block-in, missing detail and polish are "
                        "at most minor this round; if the result is already detailed or finished, judge detail and "
@@ -997,14 +998,18 @@ versions equally good as a whole. Then one sentence why.
     beyond = ("for example photographic detail in a stylised drawing" if visual else
               "for example polish or cases the quality bar does not ask for")
     # a lower fidelity owes less, not worse work: without this a critic files a broken part under "beyond the bar"
-    broken = ("broken structure or proportions, parts that do not read as what they are, misaligned or clipped "
-              "elements, a crude or unfinished look" if visual else
+    broken = (("broken structure or proportions, parts that do not read as what they are, misaligned or inverted elements"
+               if first_round else
+               "broken structure or proportions, parts that do not read as what they are, misaligned or clipped elements, "
+               "a crude or unfinished look") if visual else
               "behaviour that is wrong on inputs the work will meet, errors left unhandled, a check or test that "
               "passes without checking anything, output that is wrong or unreadable where it is used")
+    block_in_note = ("For an early block-in, lack of polish or missing fine detail is not major this round; "
+                     "only a broken foundation is major. " if first_round else "")
     craft = f"""
 The target fidelity lowers how much is owed, not how well it is made. At any fidelity, what a skilled
 maker working at that level would not let through is major: {broken}. A simpler level or a smaller scope
-is never a reason to rate those minor. Judge the result as a piece of work, part by part, not only
+is never a reason to rate those minor. {block_in_note}Judge the result as a piece of work, part by part, not only
 against the reference and the brief.
 """
     whole = " (the whole result, then any close-ups of it)" if visual else ""
@@ -1187,7 +1192,7 @@ def problems(catalog, task: Task) -> list[str]:
         if not critics:
             out.append("no independent review: run `autoharness critic`, give its prompt to a fresh subagent that "
                        "did not make the work, and record the answer with `autoharness review --by critic ...`; "
-                       "without subagents, `autoharness critic --run claude|codex|agy` starts one and records it")
+                       f"without subagents, `autoharness critic --run {reviewers.available_run_hint()}` starts one and records it")
         elif last and critics[-1]["result"] != last["n"]:
             out.append(f"the latest result (#{last['n']}) was not reviewed by the critic: run `autoharness critic` "
                        "(or `critic --run <agent>`) again")

@@ -60,6 +60,18 @@ def instruction(nonce: str) -> str:
     return f"\n\nStart your answer with this line, exactly as written:\nANSWER-ID: {nonce}"
 
 
+def cancel(task: Task, nonce: str) -> None:
+    """If a prompt run fails before producing an answer, cancel the issued nonce and restore any
+    entry that was retired solely because of it."""
+    ids = task.info().get("answer_ids", {})
+    if nonce in ids:
+        del ids[nonce]
+        for other in ids.values():
+            if other.get("retired") == nonce:
+                del other["retired"]
+        task._update_info(answer_ids=ids)
+
+
 def read(task: Task, path: Path, kind: str, subject: str) -> dict:
     """Check the answer file's id and take it apart:
     {"id", "kind", "text", "body", "items", "previous", "coverage", "unrequested", "verdict", "check", "reason",

@@ -163,9 +163,11 @@ def _search(catalog: Catalog, kind: str, query: str) -> dict:
     fetch = lambda url: registry.quick_get_json(url, 8)  # noqa: E731
     try:
         if kind == "skill":
-            found = [score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict() | {"installs": r["installs"]}
-                     for r in registry.search_skills(query, limit=DISCOVERY_RESULTS, fetch=fetch)]
-            found.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
+            raw_skills = registry.search_skills(query, limit=DISCOVERY_RESULTS, fetch=fetch)
+            found = [score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict()
+                     | {"installs": r["installs"], "_rank": idx}
+                     for idx, r in enumerate(raw_skills)]
+            found.sort(key=lambda r: (r["score"] >= 80, -r["_rank"]), reverse=True)
             results = [{"name": r["name"], "score": r["score"], "level": r["level"], "installs": r["installs"]} for r in found]
             return {"kind": kind, "query": query, "results": results}
         found, errors = search_mcp_sources(catalog, query, DISCOVERY_RESULTS)
@@ -466,11 +468,11 @@ def cmd_search(args, project, catalog):
         results = builtin_results(catalog, agents.builtin_mcp(project.agent.name), args.query) + curated + found
     else:
         errors = []
-        results = []
-        for r in registry.search_skills(args.query, limit=args.limit):
-            rep = score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict()
-            results.append(rep | {"installs": r["installs"]})
-        results.sort(key=lambda r: (r["score"], r["installs"]), reverse=True)
+        raw_skills = registry.search_skills(args.query, limit=args.limit)
+        results = [score_skill(r["spec"], r["installs"], catalog.trusted_skill_owners).to_dict()
+                   | {"installs": r["installs"], "_rank": idx}
+                   for idx, r in enumerate(raw_skills)]
+        results.sort(key=lambda r: (r["score"] >= 80, -r["_rank"]), reverse=True)
     if project.active_id():
         project.task().note_search(args.kind, args.query, [r["name"] for r in results[:DISCOVERY_RESULTS]])
     out({"query": args.query, "kind": args.kind, "results": results} | ({"partial": errors} if errors else {}))
@@ -876,6 +878,10 @@ def cmd_critic(args, project, catalog):
         for t in threads:
             t.join()
         if errors:
+            with write_lock(project):
+                answers.cancel(task, res["answer_id"])
+                if "quality" in res:
+                    answers.cancel(task, res["quality"]["answer_id"])
             out({"status": "error", "error": str(errors[0]),
                  "next": "The reviewer could not be started from here, so run it yourself: `autoharness critic` "
                          "(without --run) gives the prompt; hand it unchanged to a fresh subagent and record its "
@@ -1360,6 +1366,8 @@ def cmd_vet(args, project, catalog):
         try:
             reviewers.run(args.run, project.root, Path(prompt_file), answer_file, args.timeout, nonce)
         except HarnessError as e:
+            with write_lock(project):
+                answers.cancel(task, nonce)
             raise HarnessError(f"{e}. Give the prompt in {prompt_file} to a reviewer yourself and record its "
                                f"answer with `autoharness vet {args.kind} {args.name} --answer-file <file>`") from e
         task.log(f"vet of {args.name} run by {args.run} (answer {nonce})")
@@ -1369,7 +1377,7 @@ def cmd_vet(args, project, catalog):
          "next": "Give `prompt` to a fresh subagent that did not pick this candidate (Claude Code: the Agent tool), "
                  "unchanged. Save its answer unedited to a file and record it: `autoharness vet "
                  f"{args.kind} {args.name} --answer-file <file>`. No subagents at hand? `autoharness vet "
-                 f"{args.kind} {args.name} --run claude|codex|agy` starts the reviewer and records its answer."})
+                 f"{args.kind} {args.name} --run {reviewers.available_run_hint()}` starts the reviewer and records its answer."})
     return 0
 
 
@@ -1816,22 +1824,33 @@ def render_skill(agent, user: bool = False) -> str:
 
 
 def stale_skills(project) -> list[str]:
-    """Installed copies of the autoharness skill, for any agent, that differ from the one this version ships."""
+    """Installed copies of the autoharness skill that differ from the one this version ships:
+    project skills for any agent in the repository, and user skills for the active agent."""
     stale, seen = [], set()
     for agent in agents.AGENTS.values():
-        for flag, base, user in (("", agent.skills_path(project.root), False),
-                                 (" --user", agent.user_skills_path(), True)):
-            path = base / "autoharness" / "SKILL.md"
-            if path in seen:
-                continue
+        path = agent.skills_path(project.root) / "autoharness" / "SKILL.md"
+        if path not in seen:
             seen.add(path)
-            want = render_skill(agent, user).replace("\r\n", "\n")
+            want = render_skill(agent, False).replace("\r\n", "\n")
             try:
                 if path.is_file() and path.read_text("utf-8").replace("\r\n", "\n") != want:
                     stale.append(f"{path} is out of date with this autoharness: run "
-                                 f"`autoharness --agent {agent.name} install-skill{flag}`")
+                                 f"`autoharness --agent {agent.name} install-skill`")
             except OSError:
-                continue
+                pass
+
+    active = getattr(project, "agent", None)
+    if active:
+        user_path = active.user_skills_path() / "autoharness" / "SKILL.md"
+        if user_path not in seen:
+            seen.add(user_path)
+            want = render_skill(active, True).replace("\r\n", "\n")
+            try:
+                if user_path.is_file() and user_path.read_text("utf-8").replace("\r\n", "\n") != want:
+                    stale.append(f"{user_path} is out of date with this autoharness: run "
+                                 f"`autoharness --agent {active.name} install-skill --user`")
+            except OSError:
+                pass
     return stale
 
 

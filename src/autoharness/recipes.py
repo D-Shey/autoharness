@@ -90,6 +90,9 @@ def _recipe_tokens(r: dict) -> set[str]:
     return _tokens(" ".join(parts))
 
 
+MIN_SCORE = 0.10
+
+
 def match(task_text: str, limit: int = 3) -> list[tuple[float, dict]]:
     """Rank saved recipes by the share of task words found in the recipe's example, capabilities,
     tools, queries, name and notes.
@@ -101,7 +104,7 @@ def match(task_text: str, limit: int = 3) -> list[tuple[float, dict]]:
         have = _recipe_tokens(r)
         if want and have:
             score = len(want & have) / len(want)
-            if score > 0:
+            if score >= MIN_SCORE:
                 scored.append((round(score, 3), r))
     scored.sort(key=lambda s: (s[0], s[1].get("uses", 0)), reverse=True)
     return scored[:limit]
