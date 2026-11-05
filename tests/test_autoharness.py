@@ -1677,16 +1677,26 @@ def test_agy_gate_reads_the_prompt_from_the_transcript_and_blocks_work_until_a_b
     # later model calls of the same turn add nothing
     assert agy_event(capsys, monkeypatch, tmp_path, project, invocationNum=1, transcriptPath=str(transcript)) is None
     shell = "run_command"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_file", Path="x") == "deny"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "edit_file", Path="x") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file", TargetFile="x") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "replace_file_content") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, shell, CommandLine="npm install") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "call_mcp_tool", ServerName="fetch", ToolName="get") == "deny"
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "view_file", AbsolutePath="x") is None
     assert agy_tool(capsys, monkeypatch, tmp_path, project, shell, CommandLine="autoharness --agent agy init x") is None
+    call_json = {"name": "write_file", "argumentsJson": json.dumps({"Path": "x"})}
+    assert agy_event(capsys, monkeypatch, tmp_path, project, stepIdx=3, toolCall=call_json)["decision"] == "deny"
     cli_json(capsys, "--project", str(project.root), "init", "draw the scene")
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file") == "deny"
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_file", Path="x") == "deny"
+    # Stop sends the agent back to record brief, verify and teardown
+    stop_res = agy_event(capsys, monkeypatch, tmp_path, project, executionNum=1, terminationReason="NO_TOOL_CALL")
+    assert stop_res["decision"] == "continue" and "autoharness teardown" in stop_res["reason"]
     brief(capsys, project)
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file") is None
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_file", Path="x") is None
+    assert agy_tool(capsys, monkeypatch, tmp_path, project, "edit_file", Path="x") is None
 
 
 def test_agy_hook_stays_silent_for_short_replies_and_a_missing_transcript(project, capsys, monkeypatch, tmp_path):
@@ -1697,6 +1707,16 @@ def test_agy_hook_stays_silent_for_short_replies_and_a_missing_transcript(projec
     assert agy_event(capsys, monkeypatch, tmp_path, project, invocationNum=0,
                      transcriptPath=str(tmp_path / "missing.jsonl")) is None
     assert agy_tool(capsys, monkeypatch, tmp_path, project, "write_to_file") is None
+
+
+def test_agy_prompt_prefers_transcript_full_over_truncated(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    compact = log_dir / "transcript.jsonl"
+    full = log_dir / "transcript_full.jsonl"
+    compact.write_text(json.dumps({"type": "USER_INPUT", "content": "truncated...", "truncated_fields": ["content"]}) + "\n", "utf-8")
+    full.write_text(json.dumps({"type": "USER_INPUT", "content": "<USER_REQUEST>\nfull prompt here\n</USER_REQUEST>"}) + "\n", "utf-8")
+    assert cli._agy_prompt(str(compact)) == "full prompt here"
 
 
 def test_install_hook_for_agy_writes_its_hooks_json(project, capsys):
@@ -1713,7 +1733,8 @@ def test_install_hook_for_agy_writes_its_hooks_json(project, capsys):
     ours = data["autoharness"]
     assert ours["PreInvocation"][0]["command"] == "autoharness hook"
     assert ours["PreToolUse"][0]["matcher"] == cli.AGY_PRE_TOOL_MATCHER
-    assert {"write_to_file", "run_command", "call_mcp_tool"} <= set(cli.AGY_PRE_TOOL_MATCHER.split("|"))
+    assert ours["Stop"][0]["command"] == "autoharness hook"
+    assert {"write_file", "edit_file", "write_to_file", "run_command", "call_mcp_tool"} <= set(cli.AGY_PRE_TOOL_MATCHER.split("|"))
     assert not (project.root / ".claude").exists()
     code, res = cli_json(capsys, "--project", root, "--agent", "agy", "install-hook", "--remove")
     assert res["status"] == "removed" and json.loads(hooks_file.read_text("utf-8")) == mine

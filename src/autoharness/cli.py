@@ -1874,7 +1874,8 @@ HOOK_MIN_WORDS = 4
 GATED_TOOLS = re.compile(r"^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|mcp__.*)$")
 PRE_TOOL_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Skill|mcp__.*"
 # Antigravity CLI tools that do work, as the Claude Code tool each stands for (shell and MCP are mapped in _agy_event)
-AGY_TOOLS = {"write_to_file": "Write", "replace_file_content": "Edit", "multi_replace_file_content": "Edit",
+AGY_TOOLS = {"write_file": "Write", "edit_file": "Edit", "write_to_file": "Write",
+             "replace_file_content": "Edit", "multi_replace_file_content": "Edit",
              "edit_notebook": "NotebookEdit", "run_command": "", "send_command_input": "", "call_mcp_tool": ""}
 AGY_PRE_TOOL_MATCHER = "|".join(AGY_TOOLS)
 AGY_USER_REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
@@ -2331,15 +2332,29 @@ def _read_stdin_utf8() -> str:
 
 def _agy_prompt(transcript: str | None) -> str:
     """The user's latest request in an Antigravity CLI transcript (JSON lines, the request wrapped in tags)."""
+    if not transcript:
+        return ""
+    p = Path(transcript)
+    if p.name == "transcript.jsonl":
+        full = p.with_name("transcript_full.jsonl")
+        if full.exists():
+            p = full
     request = ""
     try:
-        with open(transcript or "", encoding="utf-8") as f:
+        with open(p, encoding="utf-8") as f:
             for line in f:
-                step = json.loads(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    step = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
                 if step.get("type") == "USER_INPUT":
-                    m = AGY_USER_REQUEST.search(step.get("content", ""))
-                    request = m.group(1) if m else step.get("content", "")
-    except (OSError, ValueError):
+                    content = step.get("content", "")
+                    m = AGY_USER_REQUEST.search(content)
+                    request = m.group(1) if m else content
+    except OSError:
         pass
     return request
 
@@ -2350,8 +2365,21 @@ def _agy_event(data: dict) -> dict | None:
     with the prompt read from the transcript. Its shell runs PowerShell on Windows."""
     common = {"session_id": data.get("conversationId", ""), "cwd": (data.get("workspacePaths") or [""])[0]}
     if "toolCall" in data:
-        call = data["toolCall"] or {}
-        name, call_args = call.get("name", ""), call.get("args") or {}
+        call = data.get("toolCall") or {}
+        name = call.get("name", "")
+        call_args = call.get("args") or call.get("arguments") or {}
+        if not call_args and isinstance(call.get("argumentsJson"), str):
+            try:
+                call_args = json.loads(call["argumentsJson"])
+            except (ValueError, TypeError):
+                call_args = {}
+        if isinstance(call_args, str):
+            try:
+                call_args = json.loads(call_args)
+            except (ValueError, TypeError):
+                call_args = {}
+        if not isinstance(call_args, dict):
+            call_args = {}
         if name in ("run_command", "send_command_input"):
             tool = "PowerShell" if os.name == "nt" else "Bash"
             tool_input = {"command": call_args.get("CommandLine", "")} if name == "run_command" else {}
@@ -2360,14 +2388,19 @@ def _agy_event(data: dict) -> dict | None:
         else:
             tool, tool_input = AGY_TOOLS.get(name) or name, call_args
         return {**common, "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+    if "terminationReason" in data or "executionNum" in data:
+        if data.get("terminationReason") and data.get("terminationReason") != "NO_TOOL_CALL":
+            return None
+        return {**common, "hook_event_name": "Stop"}
     if data.get("invocationNum") != 0:
         return None
-    return {**common, "hook_event_name": "UserPromptSubmit", "prompt": _agy_prompt(data.get("transcriptPath"))}
+    prompt_text = _agy_prompt(data.get("transcriptPath")) or str(data.get("lastUserInput") or "")
+    return {**common, "hook_event_name": "UserPromptSubmit", "prompt": prompt_text}
 
 
 def cmd_hook(args, project, catalog):
     """Claude Code hook for UserPromptSubmit, PreToolUse and Stop: make every real task go through autoharness.
-    Antigravity CLI calls it for PreInvocation and PreToolUse, translated by `_agy_event`.
+    Antigravity CLI calls it for PreInvocation, PreToolUse and Stop, translated by `_agy_event`.
 
     The first substantial prompt of a session puts it in `pending`; tools that do work are denied until the
     agent invokes the skill, starts a task, or the user waives it. Writes to the task records are denied
@@ -2377,7 +2410,8 @@ def cmd_hook(args, project, catalog):
     """
     try:
         data = json.loads(_read_stdin_utf8() or "{}")
-        agy = "toolCall" in data or "invocationNum" in data
+        agy = bool("conversationId" in data or "toolCall" in data or "invocationNum" in data
+                   or "terminationReason" in data or "executionNum" in data)
         if agy:
             data = _agy_event(data)
             if data is None:
@@ -2417,7 +2451,7 @@ def cmd_hook(args, project, catalog):
                                   stop_seen=saved_state.get("stop_seen"), prompt=saved_state.get("prompt"))
                 state = wanted
         if event == "Stop":
-            return _stop_gate(data, sid, state, active, task_info)
+            return _stop_gate(data, sid, state, active, task_info, project=project, agy=agy)
         if event == "UserPromptSubmit":
             if foreign and state != "waived" and saved_state.get("told") != active:
                 ctx = handoff(Task(project, active), sid)
@@ -2622,13 +2656,19 @@ def _repeated(sid: str, tool: str, tool_input: dict) -> int:
     return count
 
 
-def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task_info: dict) -> int:
-    """Claude Code's Stop event: the agent is ending its turn while its own task is still open. Once per state
-    of the task it is sent back to finish (verify, critic, teardown) or to say it is waiting on the user; a
-    second stop with nothing changed goes through, so a turn that must end (a question, an approval) still can."""
+def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task_info: dict,
+               project: Project | None = None, agy: bool = False) -> int:
+    """Claude Code's and Antigravity's Stop event: the agent is ending its turn while its own task is still open.
+    Once per state of the task it is sent back to finish (verify, critic, teardown) or to say it is waiting on the user;
+    a second stop with nothing changed goes through, so a turn that must end (a question, an approval) still can."""
     if data.get("stop_hook_active") or not (active and sid) or state == "waived":
         return 0
-    if task_info.get("status") != "active" or task_info.get("owner") != sid:
+    if task_info.get("status") != "active":
+        return 0
+    owner = task_info.get("owner")
+    if owner and owner != sid:
+        return 0
+    if not owner and project and idle_hours(Task(project, active)) >= STALE_HOURS:
         return 0
     mark = hashlib.sha256(json.dumps(task_info, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     saved = session_state(sid)
@@ -2641,11 +2681,12 @@ def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task
     if not task_info.get("runs") and not task_info.get("checks"):
         left.append("check the result (`autoharness verify run \"<command>\"`)")
     left.append("`autoharness teardown`")
-    out({"decision": "block",
-         "reason": f"autoharness task {active} is still open: {task_info.get('task', '')[:200]!r}. Before you end "
-                   f"the turn: {'; '.join(left)} (teardown says what else it owes, such as a critic). If you are "
-                   "stopping on purpose (a question for the user, an approval, an accepted result), say so in your "
-                   "reply and end the turn again: this reminder comes once per state of the task."})
+    reason = (f"autoharness task {active} is still open: {task_info.get('task', '')[:200]!r}. Before you end "
+              f"the turn: {'; '.join(left)} (teardown says what else it owes, such as a critic). If you are "
+              "stopping on purpose (a question for the user, an approval, an accepted result), say so in your "
+              "reply and end the turn again: this reminder comes once per state of the task.")
+    decision = "continue" if agy else "block"
+    out({"decision": decision, "reason": reason})
     return 0
 
 
@@ -2696,7 +2737,11 @@ def install_agy_hook(hooks_file: Path, remove: bool = False) -> str:
     """Add or remove the `autoharness` entry of an Antigravity CLI hooks.json, keeping everything else."""
     data = json.loads(hooks_file.read_text("utf-8-sig")) if hooks_file.exists() else {}
     handler = {"type": "command", "command": HOOK_COMMAND, "timeout": 10}
-    wanted = {"PreInvocation": [handler], "PreToolUse": [{"matcher": AGY_PRE_TOOL_MATCHER, "hooks": [handler]}]}
+    wanted = {
+        "PreInvocation": [handler],
+        "PreToolUse": [{"matcher": AGY_PRE_TOOL_MATCHER, "hooks": [handler]}],
+        "Stop": [handler],
+    }
     if remove:
         if data.pop("autoharness", None) is None:
             return "not_installed"
