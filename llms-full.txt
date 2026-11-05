@@ -20,7 +20,7 @@ Prepare before building. Check against the original. Let someone else judge the 
 ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Works with **Claude Code** · **Codex CLI** · **Gemini CLI** · **Antigravity CLI** · **Qwen Code** · **GigaCode** · **Strands**
+Works with **Claude Code** · **Codex CLI** · **Gemini CLI** · **Antigravity CLI** · **Cursor** · **Qwen Code** · **GigaCode** · **Strands** · **Kimi Code**
 
 [How it works](#the-process) · [Quick start](#quick-start) · [Example](#example) · [Security](docs/security.md) · [Reference](docs/reference.md)
 
@@ -42,7 +42,7 @@ is acceptable.
 | Loops on the same fix | Changes approach, then asks an arbiter, then the user |
 | Forgets everything after the session | Keeps what it learned as skills and recipes for the next task |
 
-A coding agent (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, GigaCode, Strands)
+A coding agent (Claude Code, Codex CLI, Gemini CLI, Antigravity CLI, Cursor, Qwen Code, GigaCode, Strands, Kimi Code)
 usually goes at a task head-on. It writes from memory without looking at what the result has to
 match, without finding out how such work is done well, and then marks its own work "done". The
 ceiling on quality is then whatever the model remembers. It shows on any task: an integration with
@@ -109,7 +109,9 @@ This is where quality is decided, and it is the step agents usually skip.
   mockup, the reference image. A description of it does not count. A search page, a gallery or
   someone's version of it (fan art, a mockup, a blog example) is not the original either.
 - **Facts.** Before the first result the agent measures with a tool what the result will be judged
-  on: fields and values, sizes, positions, proportions, timings. Then it records them
+  on: fields and values, sizes, positions, proportions, timings. For code, extract exact symbol
+  definitions, signatures and coordinates using AST-aware tools (`xerj def`, codebase search)
+  rather than blowing the context budget on full-file dumps. Then it records them
   (`evidence add <file> --kind facts`).
 - **Open choices.** Where the task leaves a choice open (a format, a value or a formula, what a field
   holds) and the user cannot be asked, the agent picks what the person who asked would take for
@@ -326,7 +328,7 @@ autoharness agents                                          # which agents are f
 cd /path/to/your/project
 autoharness --agent claude install-skill                    # the skill for the agent (--user --all: every agent)
 autoharness --agent claude gateway install                  # optional: MCP servers without restarts
-autoharness --agent agy gateway install --user              # the same for every project (agy, Gemini, Qwen, GigaCode)
+autoharness --agent agy gateway install --user              # the same for every project (agy, Cursor, Gemini, Qwen, GigaCode)
 autoharness install-hook                                    # optional: Claude Code does not start without a brief
 autoharness --agent agy install-hook                        # the same for Antigravity CLI
 ```
@@ -343,6 +345,8 @@ and give it a task.
 | GigaCode CLI | `gigacode` |
 | [Strands harness](https://github.com/strands-agents/harness-sdk) | `strands` |
 | Antigravity CLI | `agy` |
+| Cursor | `cursor` |
+| Kimi Code | `kimi` |
 
 ## Documentation
 
@@ -463,11 +467,14 @@ autoharness install-skill --all                # into the project, for every age
 | GigaCode CLI | `gigacode` | `.gigacode/skills/autoharness/` | `~/.gigacode/skills/autoharness/` |
 | Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (strands does not read it by itself: pass the path to `create_harness(skills=...)`) |
 | Antigravity CLI | `agy` | `.agents/skills/autoharness/` | `~/.gemini/config/skills/autoharness/` |
+| Cursor | `cursor` | `.cursor/skills/autoharness/` | `~/.cursor/skills/autoharness/` |
+| Kimi Code | `kimi` | `.agents/skills/autoharness/` | `~/.agents/skills/autoharness/` |
 
-Codex and Antigravity CLI read the same `.agents/skills`, so they share the project's `SKILL.md`: it
-names `--agent` and the MCP config for each of the two agents. Their global skills differ: agy does
-not read `~/.agents/skills`. In `/skills`, agy 1.4.0 suggests `~/.gemini/antigravity-cli/skills` for
-global skills but loads them only from `~/.gemini/config/skills`, so `--user` writes there.
+Codex, Antigravity CLI and Kimi Code read the same `.agents/skills`, so they share the project's
+`SKILL.md`: it names `--agent` and the MCP config for each of the three agents. Their global skills
+differ: agy does not read `~/.agents/skills`. In `/skills`, agy 1.4.0 suggests
+`~/.gemini/antigravity-cli/skills` for global skills but loads them only from `~/.gemini/config/skills`,
+so `--user` writes there.
 
 Project or global:
 
@@ -493,7 +500,7 @@ autoharness --agent claude gateway status      # whether it is installed and whi
 The gateway is installed into the project and **separately for each agent**: `gateway install` has no
 `--all`, so repeat the command with each `--agent`. `add mcp` goes through the gateway only for an
 agent that has the gateway installed. `--user` installs it into the agent's own config for every
-project (agy, Gemini, Qwen, GigaCode).
+project (agy, Cursor, Gemini, Qwen, GigaCode, Kimi Code).
 
 Codex may need one more restart when a new server needs an environment variable the gateway does not
 pass yet. `add` and `gateway approve` say so and write its name into `env_vars`; set the value in the
@@ -510,6 +517,8 @@ What to do in each agent after `gateway install`:
 | GigaCode CLI | `.gigacode/settings.json` | restart or run `/mcp refresh` |
 | Strands harness | `.agent/mcp.json` | pass `create_harness(mcp_servers=".agent/mcp.json")` and create the agent again |
 | Antigravity CLI | `.agents/mcp_config.json` | restart `agy` |
+| Cursor | `.cursor/mcp.json` | restart Cursor (or refresh in Cursor Settings > MCP) |
+| Kimi Code | `.kimi-code/mcp.json` | restart Kimi Code (or run `/mcp`) |
 
 Check: the tools `harness_tools` and `harness_call` should appear in the agent. In Claude Code they
 may arrive deferred; tool search finds them.
@@ -606,14 +615,18 @@ detection fails, set `AUTOHARNESS_AGENT=<agent>` in the environment you start th
 | `gigacode` (GigaCode CLI) | `.gigacode/settings.json` | `.gigacode/skills` |
 | `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
 | `agy` (Antigravity CLI) | `.agents/mcp_config.json` | `.agents/skills` |
+| `cursor` (Cursor) | `.cursor/mcp.json` | `.cursor/skills` |
+| `kimi` (Kimi Code) | `.kimi-code/mcp.json` | `.agents/skills` |
 
 Lockfiles and recipes keep a config in one canonical form (the `.mcp.json` format, secrets as
 `${VAR}`), and the adapter translates it on write: for the Gemini family remote servers become
-`httpUrl`/`url`; for Codex secrets go to `env_vars`, `bearer_token_env_var`, `env_http_headers`.
+`httpUrl`/`url`; for Cursor secrets become `${env:VAR}` in url, headers, args and env; for Codex secrets go to `env_vars`, `bearer_token_env_var`, `env_http_headers`.
 Codex does not expand `${VAR}` in `args`; then `add` returns `warnings`. Antigravity CLI does not
 expand `${VAR}` either, but passes its environment to servers: `"K": "${K}"` is simply not written,
 remote servers become `serverUrl`, and for `${VAR}` in headers, `args` and renamed variables `add`
-returns `warnings`. Codex reads the project `.codex/config.toml` only for trusted projects. Edits to
+returns `warnings`. Kimi Code does not expand `${VAR}` either and servers inherit its environment,
+so `"K": "${K}"` is not written either; an `Authorization: Bearer ${VAR}` header becomes
+`bearerTokenEnvVar`. Codex reads the project `.codex/config.toml` only for trusted projects. Edits to
 TOML are wrapped in `# >>> autoharness:<name>` markers, so comments and the rest of the user's config
 are left alone.
 
@@ -678,7 +691,7 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `journal` | the draft of this task's entry in the project's journal, and where it goes |
 | `ruling add` | a review point the user rejected, so later critics in the project do not raise it again |
 | `config get\|set [teardown keep\|remove \| allowed_hosts "<hosts>" \| min_mode any\|full\|reviewed \| journal "<path>"\|off] [--global]` | settings |
-| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart; `--user` puts it into the agent's own config (agy, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
+| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart; `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
 | `agents` | the supported agents and their paths |
 

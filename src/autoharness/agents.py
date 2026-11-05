@@ -13,10 +13,16 @@ each adapter translates it into the agent's native config on write.
     strands   .agent/mcp.json            .agent/skills
     agy       .agents/mcp_config.json    .agents/skills
     cursor    .cursor/mcp.json           .cursor/skills
+    kimi      .kimi-code/mcp.json        .agents/skills
 
 Antigravity CLI (agy) shares `.agents/skills` with Codex, so the autoharness skill
 installed there speaks to both. Its user-level skills live in `~/.gemini/config/skills`:
 agy 1.4.0 suggests `~/.gemini/antigravity-cli/skills` in /skills but does not load from it.
+
+Kimi Code also reads `.agents/skills` (project) and `~/.agents/skills` (user), alongside
+its own `.kimi-code/skills` and `$KIMI_CODE_HOME/skills`, so it shares that one copy too.
+Its user-level MCP file lives at `$KIMI_CODE_HOME/mcp.json` (`~/.kimi-code/mcp.json`
+when the variable is unset).
 
 Strands harness has no fixed MCP config file: it takes `create_harness(mcp_servers=<path>)`,
 so autoharness writes an mcpServers JSON at `.agent/mcp.json` for the user to pass in.
@@ -165,6 +171,48 @@ def to_cursor(cfg: dict) -> tuple[dict, list[str]]:
     if cfg.get("env"):
         out["env"] = {k: expand(v) for k, v in cfg["env"].items()}
     return out, []
+
+
+def to_kimi(cfg: dict) -> tuple[dict, list[str]]:
+    """Kimi Code reads Claude's `.mcp.json` entry shape, but names the bearer-token field
+    `bearerTokenEnvVar`, and it does not expand `${VAR}` (measured 2026-11-05 with a stdio
+    probe server: the child received the literal `${VAR}`). stdio servers inherit Kimi's
+    environment, so a same-name `"K": "${K}"` reference is dropped rather than written."""
+    warnings: list[str] = []
+    if "url" in cfg:
+        out: dict = {"url": cfg["url"]}
+        headers = dict(cfg.get("headers", {}))
+        if (auth := headers.pop("Authorization", None)) and (m := BEARER_REF.match(auth)):
+            out["bearerTokenEnvVar"] = m.group(1)
+        elif auth:
+            headers["Authorization"] = auth
+        if headers:
+            out["headers"] = headers
+        if cfg.get("type") == "sse":
+            out["transport"] = "sse"
+        return out, warnings
+
+    out = {k: v for k, v in cfg.items() if k != "type"}
+    if cfg.get("args"):
+        refs = sorted({v for a in cfg["args"] for v in ENV_REF.findall(a)})
+        if refs:
+            warnings.append(f"Kimi Code does not expand env vars in args ({', '.join(refs)}); "
+                            "replace them in .kimi-code/mcp.json or pass the value another way")
+    env = {}
+    for key, value in cfg.get("env", {}).items():
+        m = WHOLE_ENV_REF.match(str(value))
+        if m and m.group(1) == key:
+            continue   # the server process inherits Kimi's environment, so the reference adds nothing
+        if ENV_REF.search(str(value)):
+            warnings.append(f"env {key}={value!r} needs expansion Kimi Code does not do; "
+                            f"set {key} in the environment kimi starts from")
+        else:
+            env[key] = value
+    if env:
+        out["env"] = env
+    elif "env" in out:
+        out.pop("env")
+    return out, warnings
 
 
 # --- MCP config stores ------------------------------------------------------
@@ -319,6 +367,7 @@ class Agent:
     translate: Callable[[dict], tuple[dict, list[str]]]
     reload_hint: str
     user_mcp_file: str = ""       # relative to the home directory: servers every project gets ("" unknown)
+    user_mcp_home_env: str = ""   # env var relocating the config root that contains user_mcp_file (e.g. KIMI_CODE_HOME)
 
     def mcp_path(self, root: Path) -> Path:
         return root / self.mcp_file
@@ -333,11 +382,18 @@ class Agent:
     def user_skills_path(self) -> Path:
         return Path.home() / self.user_skills_dir
 
+    def user_mcp_path(self) -> Path:
+        # KIMI_CODE_HOME and friends point at the config root itself (what ~/.kimi-code is by default),
+        # so only the file name is appended there; the unset case uses the home-relative path.
+        if self.user_mcp_home_env and os.environ.get(self.user_mcp_home_env):
+            return Path(os.environ[self.user_mcp_home_env]) / Path(self.user_mcp_file).name
+        return Path.home() / self.user_mcp_file
+
     def user_mcp_store(self):
         """The agent's own MCP file, which every project loads; None when autoharness does not know it."""
         if not self.user_mcp_file:
             return None
-        path = Path.home() / self.user_mcp_file
+        path = self.user_mcp_path()
         return TomlMcpStore(path) if path.suffix == ".toml" else JsonMcpStore(path)
 
 
@@ -360,6 +416,8 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
           "restart agy so it picks up the new server", ".gemini/config/mcp_config.json"),
     Agent("cursor", "Cursor", ".cursor/mcp.json", ".cursor/skills", ".cursor/skills", to_cursor,
           "restart Cursor (or refresh in Cursor Settings > MCP) so it picks up the new server", ".cursor/mcp.json"),
+    Agent("kimi", "Kimi Code", ".kimi-code/mcp.json", ".agents/skills", ".agents/skills", to_kimi,
+          "restart Kimi Code (or run /mcp) so it picks up the new server", ".kimi-code/mcp.json", "KIMI_CODE_HOME"),
 ]}
 
 DEFAULT_AGENT = "claude"

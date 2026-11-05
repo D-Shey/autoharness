@@ -1,4 +1,4 @@
-"""Run an independent reviewer headless and read-only: `critic --run claude|codex|agy`.
+"""Run an independent reviewer headless and read-only: `critic --run claude|codex|agy|kimi`.
 
 The author no longer passes the prompt on or saves the answer: autoharness starts a fresh agent process
 with the prompt unchanged, in a mode that cannot edit the project, and keeps its answer as it came.
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from autoharness.env import HarnessError
 
-AGENTS = ("cursor", "cursor-agent", "agy", "claude", "codex", "agent")
+AGENTS = ("cursor", "cursor-agent", "agy", "claude", "codex", "kimi", "agent")
 DEFAULT_TIMEOUT = 1200
 ENV_FLAG = "AUTOHARNESS_REVIEWER"
 # the only tools that exist for it: allow rules in the user's settings cannot add a shell or an editor back.
@@ -35,13 +35,13 @@ def resolve_executable(agent: str) -> str | None:
 
 def available_agents() -> list[str]:
     """Agents installed on PATH that can be used with --run."""
-    candidates = ("cursor", "agy", "claude", "codex")
+    candidates = ("cursor", "agy", "claude", "codex", "kimi")
     return [a for a in candidates if resolve_executable(a)]
 
 
 def available_run_hint() -> str:
     avail = available_agents()
-    return "|".join(avail) if avail else "cursor|agy|claude|codex"
+    return "|".join(avail) if avail else "cursor|agy|claude|codex|kimi"
 
 
 def command(agent: str, root: Path, prompt_file: Path, answer_file: Path) -> tuple[list[str], str | None]:
@@ -63,6 +63,10 @@ def command(agent: str, root: Path, prompt_file: Path, answer_file: Path) -> tup
     if agent in ("cursor", "cursor-agent", "agent"):
         return ([exe, "-p", f"Read the file {prompt_file} and do exactly what it says. Do not edit any file.",
                  "--mode", "plan", "--trust", "--workspace", str(root)], None)
+    if agent == "kimi":
+        # -p cannot combine with --plan, so the read-only run is instruction-based; -p uses the auto
+        # permission policy and static deny rules still apply
+        return ([exe, "-p", f"Read the file {prompt_file} and do exactly what it says. Do not edit any file."], None)
     raise HarnessError(f"reviewer must be one of {', '.join(AGENTS)}")
 
 

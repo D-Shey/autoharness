@@ -80,11 +80,13 @@ autoharness install-skill --all                # into the project, for every age
 | Strands harness | `strands` | `.agent/skills/autoharness/` | `~/.agent/skills/autoharness/` (strands does not read it by itself: pass the path to `create_harness(skills=...)`) |
 | Antigravity CLI | `agy` | `.agents/skills/autoharness/` | `~/.gemini/config/skills/autoharness/` |
 | Cursor | `cursor` | `.cursor/skills/autoharness/` | `~/.cursor/skills/autoharness/` |
+| Kimi Code | `kimi` | `.agents/skills/autoharness/` | `~/.agents/skills/autoharness/` |
 
-Codex and Antigravity CLI read the same `.agents/skills`, so they share the project's `SKILL.md`: it
-names `--agent` and the MCP config for each of the two agents. Their global skills differ: agy does
-not read `~/.agents/skills`. In `/skills`, agy 1.4.0 suggests `~/.gemini/antigravity-cli/skills` for
-global skills but loads them only from `~/.gemini/config/skills`, so `--user` writes there.
+Codex, Antigravity CLI and Kimi Code read the same `.agents/skills`, so they share the project's
+`SKILL.md`: it names `--agent` and the MCP config for each of the three agents. Their global skills
+differ: agy does not read `~/.agents/skills`. In `/skills`, agy 1.4.0 suggests
+`~/.gemini/antigravity-cli/skills` for global skills but loads them only from `~/.gemini/config/skills`,
+so `--user` writes there.
 
 Project or global:
 
@@ -110,7 +112,7 @@ autoharness --agent claude gateway status      # whether it is installed and whi
 The gateway is installed into the project and **separately for each agent**: `gateway install` has no
 `--all`, so repeat the command with each `--agent`. `add mcp` goes through the gateway only for an
 agent that has the gateway installed. `--user` installs it into the agent's own config for every
-project (agy, Cursor, Gemini, Qwen, GigaCode).
+project (agy, Cursor, Gemini, Qwen, GigaCode, Kimi Code).
 
 Codex may need one more restart when a new server needs an environment variable the gateway does not
 pass yet. `add` and `gateway approve` say so and write its name into `env_vars`; set the value in the
@@ -128,6 +130,7 @@ What to do in each agent after `gateway install`:
 | Strands harness | `.agent/mcp.json` | pass `create_harness(mcp_servers=".agent/mcp.json")` and create the agent again |
 | Antigravity CLI | `.agents/mcp_config.json` | restart `agy` |
 | Cursor | `.cursor/mcp.json` | restart Cursor (or refresh in Cursor Settings > MCP) |
+| Kimi Code | `.kimi-code/mcp.json` | restart Kimi Code (or run `/mcp`) |
 
 Check: the tools `harness_tools` and `harness_call` should appear in the agent. In Claude Code they
 may arrive deferred; tool search finds them.
@@ -225,6 +228,7 @@ detection fails, set `AUTOHARNESS_AGENT=<agent>` in the environment you start th
 | `strands` ([Strands harness](https://github.com/strands-agents/harness-sdk)) | `.agent/mcp.json` | `.agent/skills` |
 | `agy` (Antigravity CLI) | `.agents/mcp_config.json` | `.agents/skills` |
 | `cursor` (Cursor) | `.cursor/mcp.json` | `.cursor/skills` |
+| `kimi` (Kimi Code) | `.kimi-code/mcp.json` | `.agents/skills` |
 
 Lockfiles and recipes keep a config in one canonical form (the `.mcp.json` format, secrets as
 `${VAR}`), and the adapter translates it on write: for the Gemini family remote servers become
@@ -232,7 +236,9 @@ Lockfiles and recipes keep a config in one canonical form (the `.mcp.json` forma
 Codex does not expand `${VAR}` in `args`; then `add` returns `warnings`. Antigravity CLI does not
 expand `${VAR}` either, but passes its environment to servers: `"K": "${K}"` is simply not written,
 remote servers become `serverUrl`, and for `${VAR}` in headers, `args` and renamed variables `add`
-returns `warnings`. Codex reads the project `.codex/config.toml` only for trusted projects. Edits to
+returns `warnings`. Kimi Code does not expand `${VAR}` either and servers inherit its environment,
+so `"K": "${K}"` is not written either; an `Authorization: Bearer ${VAR}` header becomes
+`bearerTokenEnvVar`. Codex reads the project `.codex/config.toml` only for trusted projects. Edits to
 TOML are wrapped in `# >>> autoharness:<name>` markers, so comments and the rest of the user's config
 are left alone.
 

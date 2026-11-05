@@ -10,14 +10,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 LLMS_TXT = """# AutoHarness
 
-> AutoHarness is an empirical harness for AI coding agents (Gemini, Claude Code, Antigravity, Cursor, Codex). It automates dynamic tool discovery, security vetting, sandbox containment, and empirical verification with independent critic reviews.
+> AutoHarness is an empirical harness for AI coding agents (Gemini, Claude Code, Antigravity, Cursor, Codex, Kimi Code). It automates dynamic tool discovery, security vetting, sandbox containment, and empirical verification with independent critic reviews.
 
 AutoHarness enables AI agents to start almost bare and build the exact harness each task requires: references, documentation, tools (MCP servers and skills), and empirical verification checks. All installed tools are scanned for prompt injection and data exfiltration, pinned in lockfiles, and cleanly torn down or persisted as recipes and lessons across projects.
 
 ## Core Documentation
 
 - [Project Overview](README.md): Comprehensive guide to AutoHarness philosophy, core workflow, architecture, and security model.
-- [Installation and Agent Setup](docs/installation.md): Instructions for configuring AutoHarness with Gemini, Claude Code, Antigravity, Cursor, Codex, and shell hooks.
+- [Installation and Agent Setup](docs/installation.md): Instructions for configuring AutoHarness with Gemini, Claude Code, Antigravity, Cursor, Codex, Kimi Code, and shell hooks.
 - [CLI Reference](docs/reference.md): Detailed documentation for all commands (`init`, `brief`, `need`, `search`, `vet`, `add`, `verify`, `review`, `critic`, `teardown`).
 - [Security and Trust Model](docs/security.md): Threat model, static scanner rules, sandbox containment, network egress restrictions, and veto policies.
 - [Contributing Guide](CONTRIBUTING.md): Code standards, zero external runtime dependency rules, development workflows, and testing.

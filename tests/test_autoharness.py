@@ -509,6 +509,55 @@ def test_agy_writes_mcp_config_without_env_expansion(tmp_path):
     assert not (tmp_path / ".agents" / "skills" / "demo").exists()
 
 
+def test_kimi_writes_mcp_json_and_keeps_user_servers(tmp_path):
+    project = Project(tmp_path, "kimi")
+    cfg = tmp_path / ".kimi-code" / "mcp.json"
+    cfg.parent.mkdir()
+    cfg.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}), "utf-8")
+    task = project.init_task("t")
+    warnings = task.add_mcp("github", GITHUB, source="catalog", trust={}, permissions={})
+    assert warnings == []
+    warnings = task.add_mcp("context7", {"command": "npx", "args": ["-y", "c7"],
+                                         "env": {"K": "${K}", "MODE": "ro", "T": "${OTHER}"}},
+                            source="catalog", trust={}, permissions={})
+    assert len(warnings) == 1 and "set T" in warnings[0]
+    data = json.loads(cfg.read_text())
+    assert data["mcpServers"]["github"] == {"url": GITHUB["url"], "bearerTokenEnvVar": "GITHUB_PERSONAL_ACCESS_TOKEN"}
+    # kimi servers inherit the CLI's environment, so a same-name reference is left out
+    assert data["mcpServers"]["context7"] == {"command": "npx", "args": ["-y", "c7"], "env": {"MODE": "ro"}}
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+    assert (tmp_path / ".agents" / "skills" / "demo" / "SKILL.md").exists()
+
+    task.teardown("remove")
+    assert json.loads(cfg.read_text()) == {"mcpServers": {"mine": {"command": "x"}}}
+    assert not (tmp_path / ".agents" / "skills" / "demo").exists()
+
+
+def test_kimi_sse_transport_is_kept(tmp_path):
+    native, warnings = agents.to_kimi({"type": "sse", "url": "https://mcp.example.com/sse"})
+    assert warnings == []
+    assert native == {"url": "https://mcp.example.com/sse", "transport": "sse"}
+
+
+def test_kimi_config_created_by_task_is_removed(tmp_path):
+    task = Project(tmp_path, "kimi").init_task("t")
+    task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
+    assert (tmp_path / ".kimi-code" / "mcp.json").exists()
+    task.teardown("remove")
+    assert not (tmp_path / ".kimi-code").exists()
+
+
+def test_kimi_user_mcp_honors_kimi_code_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    relocated = tmp_path / "relocated"
+    monkeypatch.setattr(agents.Path, "home", staticmethod(lambda: home))
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
+    assert agents.get("kimi").user_mcp_path() == home / ".kimi-code" / "mcp.json"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(relocated))
+    assert agents.get("kimi").user_mcp_path() == relocated / "mcp.json"
+    assert agents.get("claude").user_mcp_store() is None   # claude has no user-level MCP file to relocate
+
+
 def test_agy_config_created_by_task_is_removed(tmp_path):
     task = Project(tmp_path, "agy").init_task("t")
     task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
@@ -537,18 +586,23 @@ def test_detect_agent_from_environment():
                           "AI_AGENT": "claude-code_2_agent"}) == "agy"
     assert agents.detect({"CURSOR_AGENT": "1"}) == "cursor"
     assert agents.detect({"AI_AGENT": "cursor_0.42"}) == "cursor"
+    # Kimi Code sets no env marker for subprocesses; the explicit override and AI_AGENT still work
+    assert agents.detect({"AUTOHARNESS_AGENT": "kimi"}) == "kimi"
+    assert agents.detect({"AI_AGENT": "kimi-code_0.28"}) == "kimi"
     assert agents.detect({}) is None
 
 
 def test_install_skill_for_all_agents(tmp_path, capsys):
     assert cli.main(["--project", str(tmp_path), "install-skill", "--all"]) == 0
     capsys.readouterr()
-    # Codex and agy both read .agents/skills: the one copy there speaks to each of them
+    # Codex, agy and kimi all read .agents/skills: the one copy there speaks to each of them
     shared = (tmp_path / ".agents" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
-    assert "autoharness --agent <codex in Codex CLI, agy in Antigravity CLI> init" in shared
-    assert "`.codex/config.toml` (Codex CLI) or `.agents/mcp_config.json` (Antigravity CLI)" in shared
+    assert "autoharness --agent <codex in Codex CLI, agy in Antigravity CLI, kimi in Kimi Code> init" in shared
+    assert ("`.codex/config.toml` (Codex CLI) or `.agents/mcp_config.json` (Antigravity CLI) "
+            "or `.kimi-code/mcp.json` (Kimi Code)") in shared
     assert "do what their agent needs (Codex CLI: restart Codex" in shared
-    assert "Antigravity CLI: restart agy" in shared and "{{" not in shared
+    assert "Antigravity CLI: restart agy" in shared and "Kimi Code: restart Kimi Code" in shared
+    assert "{{" not in shared
     assert ".gigacode/settings.json" in (tmp_path / ".gigacode" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
     assert ".cursor/mcp.json" in (tmp_path / ".cursor" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
     code, res = cli_json(capsys, "--project", str(tmp_path), "init", "t")
