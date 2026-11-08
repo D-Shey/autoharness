@@ -6,7 +6,7 @@ All notable changes to AutoHarness are listed here. The format follows
 
 ## [1.0.0] - 2026-11-08
 
-Major milestone release achieving full autonomous agentic engineering readiness (Agentic Readiness Index: 89.4%, Grade A+).
+Major milestone release achieving full autonomous agentic engineering readiness (Agentic Readiness Index: 91.1%, Grade A+).
 
 ### Added
 - **GitHub Update Checker and Self-Updater** (`autoharness update`):
