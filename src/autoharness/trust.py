@@ -225,7 +225,10 @@ OVERRIDE = re.compile(
     r"\b(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:the\s+|your\s+|of\s+)?"
     r"(?:previous|prior|above|earlier|preceding|system|original)\s+(?:instructions|prompts?|rules|guidelines|directives)\b"
     r"|\byou\s+(?:now\s+)?have\s+no\s+(?:restrictions|rules|guidelines|limits)\b"
-    r"|\b(?:ignore|bypass|disregard)\s+(?:your\s+|the\s+)?(?:safety|content)\s+(?:guidelines|policies|rules|filters)\b",
+    r"|\b(?:ignore|bypass|disregard)\s+(?:all\s+|any\s+)?(?:the\s+|your\s+)?(?:safety\s+|content\s+)?(?:guidelines|policies|rules|filters)\b"
+    r"|\byou\s+can\s+(?:now\s+)?do\s+anything(?:\s+now)?\b"
+    r"|\b(?:developer|jailbreak|god|dan)\s+mode\b"
+    r"|\b(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:the\s+|your\s+)?(?:instructions|prompts?|rules|guidelines|directives|everything)\s+(?:above|so far)\b",
     re.I)
 NEGATED = re.compile(r"\b(?:never|not|don't|do not|must not|shall not)\s+$", re.I)
 QUOTES = "\"`“”«»'"
@@ -265,7 +268,7 @@ REFUSAL = re.compile(r"\b(?:never|do not|don't)\s+refuse\b(?!\s+to\s+\w+\s+(?:qu
                      # the rules of "refusal suppression" in Wei et al., Jailbroken (https://arxiv.org/html/2307.02483):
                      # "Do not apologize", "Never say the words cannot, unable ...". A UI tone rule ("Errors don't
                      # apologize") reads the same: it warns, it does not block.
-                     r"|\b(?:never|do not|don't)\s+(?:apologi[sz]e|warn\s+the\s+user)\b|\bwithout\s+warning\s+the\s+user\b"
+                     r"|\b(?:never|do not|don't)\s+(?:apologi[sz]e|warn\s+the\s+user|moralize|lecture|preach)\b|\bwithout\s+warning\s+the\s+user\b"
                      # the refusal words themselves, not a style rule ("never say the word 'delve'")
                      r"|\bnever\s+say\s+the\s+words?\b(?=[^\n]{0,40}\b(?:cannot|can't|unable|sorry|unfortunately|apologi))"
                      # "не отказывайся от тестов" is "do not give up the tests", not refusal
@@ -977,6 +980,15 @@ def _python_findings(text: str) -> list[tuple[str, str, int]]:
             if not isinstance(node, ast.Call):
                 continue
             name, line = _dotted(node.func), _pos(node)
+            if len(name) > 1 and name[0] in ("builtins", "__builtins__"):
+                name = name[1:]
+            if len(name) == 1 and name[0] in values:
+                target = values[name[0]]
+                alias = _dotted(target)
+                if len(alias) > 1 and alias[0] in ("builtins", "__builtins__"):
+                    alias = alias[1:]
+                if alias in CODE_RUNNERS or alias in SHELL_RUNNERS:
+                    name = alias
             if any(_tainted(arg, secret, secret_since, line) for arg in _sent(name, node, clients)):
                 found.add(("high", EXFIL, node.lineno))
             if _stdin_runs(name, node, fetched, code_since):
@@ -1021,6 +1033,20 @@ def _file_findings(path: Path, text: str) -> list[tuple[str, str, int]]:
             blank += 1
     if path.suffix.lower() == ".py":
         found += _python_findings(text)
+    elif path.suffix.lower() in (".js", ".ts", ".mjs", ".cjs"):
+        for m in re.finditer(r"\b(?:const|let|var)\s+(?P<var>[A-Za-z_$][\w$]*)\s*=\s*process\.env\b(?!\s*[.\[])", text):
+            var = m.group("var")
+            dump = re.search(
+                rf"\b(?:JSON\.stringify|stringify|send|post|write|dumps?|log)\s*\([^)\n]*\b{re.escape(var)}\b(?!\s*[.\[])"
+                rf"|\b(?:body|data)\s*:\s*(?:JSON\.stringify\s*\(\s*)?{re.escape(var)}\b(?!\s*[.\[])",
+                text)
+            if dump:
+                line = text.count("\n", 0, dump.start()) + 1
+                found.append(("medium", "dumps environment variables", line))
+        post_match = re.search(r"\b(?:fetch\s*\([^;]*\bmethod\s*:\s*['\"]POST['\"]|(?:axios|http|https)\.post\b)", text, re.I | re.S)
+        if post_match:
+            line = text.count("\n", 0, post_match.start()) + 1
+            found.append(("medium", "posts data to a remote endpoint", line))
     return found
 
 
@@ -1084,18 +1110,24 @@ def scan_skill(root: Path) -> list[ScanFinding]:
             previous = line if line.strip() else previous
         own += [ScanFinding(severity, message, rel, i, _as_read(lines[i - 1]).strip()[:160] if 0 < i <= len(lines) else "")
                 for severity, message, i in _file_findings(path, text)]
-        if chained := _exfil_chain(path, own):
+        if chained := _exfil_chain(path, own, text):
             own.append(chained)
         findings += own
     return findings
 
 
-def _exfil_chain(path: Path, own: list[ScanFinding]) -> ScanFinding | None:
+def _exfil_chain(path: Path, own: list[ScanFinding], text: str = "") -> ScanFinding | None:
     """Reading the whole environment and posting data are each ordinary; both in one script is the exfiltration
     chain. Python follows the data itself instead (_python_findings)."""
     # `printenv NAME` prints one variable, like os.environ["NAME"]: not the whole environment
-    messages = {f.message for f in own if f.message != "dumps environment variables"
-                or ENV_DUMP.search(ONE_VARIABLE.sub("", f.excerpt)) or ENV_TO_FILE.search(f.excerpt)}
+    has_env = any(f.message == "dumps environment variables" and (
+        ENV_DUMP.search(ONE_VARIABLE.sub("", f.excerpt)) or ENV_TO_FILE.search(f.excerpt)
+        or (text and re.search(r"\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*process\.env\b(?!\s*[.\[])", text))
+        or re.search(r"\bprocess\.env\b", f.excerpt)
+    ) for f in own)
+    messages = {f.message for f in own if f.message != "dumps environment variables"}
+    if has_env:
+        messages.add("dumps environment variables")
     if path.suffix.lower() in NOT_SCRIPTS | {".py"} or EXFIL in messages or "posts data to a remote endpoint" \
             not in messages or not messages & {"dumps environment variables", "reads credential stores"}:
         return None
