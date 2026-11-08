@@ -1031,6 +1031,14 @@ def test_a_self_review_of_code_that_names_no_check_is_warned(project, capsys):
     # round-6 critic: a verb at the start of a file name is part of the name
     ("Read log.jsonl to find the last error.\n", False),
     ("Parse record.csv and show totals.\n", False),
+    # round-6 critic minors: temp file negation, atomic paragraph scope, atomic phrasings, semicolon split, maintain
+    ("Write the state to state.json without a temp file.\n", True),
+    ("Write state.json directly, no temp file needed.\n", True),
+    ("Write the summary atomically to summary.md. Update queue.json after each task.\n", True),
+    ("Write state.json, it must be atomic.\n", False),
+    ("Write state.json in one atomic step.\n", False),
+    ("The skill keeps its memory in memory.json; update it after every answer.\n", True),
+    ("Maintain a progress.json file with the steps done.\n", True),
 ], ids=["write-back", "save-config", "ru-write", "atomic", "ru-atomic", "ru-temp", "no-file", "script", "html",
         "state", "state-file", "results-json", "yaml", "jsonl", "toml", "db", "next-session", "ru-yaml",
         "atomic-commits", "rename-variable", "record-results", "keep-alive", "backticks", "backticks-first",
@@ -1040,7 +1048,9 @@ def test_a_self_review_of_code_that_names_no_check_is_warned(project, capsys):
         "third-person", "manifest", "frontmatter", "must", "please", "remember", "json-dump", "ru-dont-forget",
         "commit-atomically", "replace-backup", "atomic-elsewhere", "test-object", "tests-for", "noun-use",
         "heading", "url", "if-not", "if-missing", "never-skip", "ru-if-no", "atomic-other", "serialize",
-        "never-modify", "dont-create", "script-object", "blanket-atomic", "log-file-name", "record-file-name"])
+        "never-modify", "dont-create", "script-object", "blanket-atomic", "log-file-name", "record-file-name",
+        "no-temp-without", "no-temp-needed", "atomic-summary-scope", "must-be-atomic", "in-one-atomic-step",
+        "semicolon-split", "maintain-verb"])
 def test_craft_asks_a_skill_that_writes_files_to_say_how(skill, warned):
     found = [w for w in library.craft("Use when the user asks for a report", skill) if "(R1)" in w]
     assert bool(found) is warned

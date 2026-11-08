@@ -145,8 +145,9 @@ CHANGE = re.compile(r"(?<![\w.-])(?P<verb>"
                     r"write|writing|overwrite|overwriting|rewrite|rewriting|save|saving|store|storing|persist|"
                     r"persisting|dump|update|updating|append|appending|edit|editing|modify|change|"
                     r"add|insert|log|track|put|mark|record|set|increment|bump|keep|serialize|serialise|"
+                    r"maintain|maintaining|"
                     r"запис\w*|запиш\w*|перезапи\w*|пиши|сохран\w*|обнов\w*|добав\w*|измени\w*|отмет\w*|"
-                    r"внес\w*|внос\w*|полож\w*)(?![\w-]|\.\w)", re.IGNORECASE)
+                    r"внес\w*|внос\w*|полож\w*|поддержив\w*|вести)(?![\w-]|\.\w)", re.IGNORECASE)
 # a negation reaches right only to the end of its clause: "the scope of a trigger term extends to the right of the
 # trigger term and ends at a termination term" (ConText, https://pmc.ncbi.nlm.nih.gov/articles/PMC2757457/), so
 # "if the user does not answer, save the state" still asks for the write; "don't forget to write" is no negation
@@ -165,22 +166,39 @@ CODE_OBJECT = re.compile(r"\s+(?:(?:a|an|the|new|small|unit|more|python|bash|she
 MANIFESTS = {"package.json", "package-lock.json", "tsconfig.json", "jsconfig.json", "vercel.json", "plugin.json",
              "manifest.json", "pyproject.toml", "cargo.toml", "cargo.lock", "composer.json", "poetry.lock",
              "uv.lock", "yarn.lock", "pnpm-lock.yaml", ".mcp.json", "mcp.json", "app.json", "deno.json"}
-SENTENCE = re.compile(r"(?<=[.!?;])\s+|\n")
+SENTENCE = re.compile(r"(?<=[.!?])\s+|\n")
 # a way of writing, said of a write; it covers the writes of its own paragraph, and the whole skill only when
 # what it says is written that way is state or files ("state files are written atomically"): "write the report
 # atomically" says nothing about queue.json elsewhere
-ATOMIC_WRITE = re.compile(r"\b(?:writ|sav|stor|persist)\w*\b[^.\n]{0,60}\batomically\b|"
-                          r"\batomic(?:ally)?\s+(?:write|replace|rename|save|swap)|атомарн", re.IGNORECASE)
+ATOMIC_WRITE = re.compile(r"\b(?:writ|sav|stor|persist|updat)\w*\b[^.\n]{0,60}\batomically\b|"
+                          r"\batomic(?:ally)?\s+(?:write|update|replace|rename|save|swap|step|operation)\b|"
+                          r"\bin\s+(?:one\s+|a\s+single\s+)?atomic\s+(?:step|operation|action|write)\b|"
+                          r"\b(?:it|the\s+write|the\s+update|this)\s+(?:must|should|needs?\s+to|has\s+to|is|are)\s+(?:always\s+)?(?:be\s+)?atomic\b|"
+                          r"\b(?:must|should|needs?\s+to|has\s+to|is|are|be)\s+(?:always\s+)?(?:be\s+)?atomic\b|"
+                          r"атомарн", re.IGNORECASE)
 ATOMIC_BLANKET = re.compile(r"\b(?:state|data|json|cache|all|every|each|any)\b[^.\n]{0,30}\bfiles?\b[^.\n]{0,40}"
                             r"\batomic|\batomic\w*\b[^.\n]{0,40}\b(?:state|data|every|all)\b[^.\n]{0,20}\bfiles?\b|"
                             r"\b(?:state|data)\s+(?:is|are)\s+(?:always\s+)?(?:written|saved|stored)\s+atomically|"
                             r"(?:все|любые)\s+файлы[^.\n]{0,40}атомарн", re.IGNORECASE)
 TEMP_FILE = re.compile(r"temp(?:orary)?\s+file|tempfile|временн\w*\s+файл", re.IGNORECASE)
+TEMP_FILE_NEGATED = re.compile(
+    r"\b(?:without|no|not|avoid(?:ing)?|never|skip(?:ping)?)\s+(?:using\s+|needing\s+)?(?:a\s+|an\s+|any\s+)?"
+    r"(?:temp(?:orary)?\s+files?|tempfiles?)\b|"
+    r"\b(?:temp(?:orary)?\s+files?|tempfiles?)\s+(?:is\s+|are\s+)?(?:not\s+needed|not\s+required|not\s+necessary|unneeded|unnecessary|avoided)\b|"
+    r"\bбез\s+(?:использования\s+)?(?:всяких\s+)?временн\w*\s+файл\w*|"
+    r"\bвременн\w*\s+файл\w*\s+не\s+(?:нуж\w*|требу\w*)",
+    re.IGNORECASE
+)
 MOVED_OVER = re.compile(r"os\.replace|\b(?:rename|move|mv|replace)\w*\b|переимен\w*|замени\w*", re.IGNORECASE)
 # read, then write back: the in-place update R1 is about, whatever the file is called
 READ_THEN_WRITE = re.compile(r"\bread\w*\b[^\n]{0,60}\b(?:then|and)\s+(?:write|save|update|overwrite)\w*\s+(?:it|the\s+"
                              r"file)\s+back\b|\bread\w*\b[^\n]{0,60}\bthen\s+(?:write|save|update|overwrite)\b|"
                              r"\bчита\w*\b[^\n]{0,60}\b(?:потом|затем)\s+(?:пиш|запис|сохран)", re.IGNORECASE)
+
+
+def _has_temp_file(text: str) -> bool:
+    cleaned = TEMP_FILE_NEGATED.sub("", text)
+    return bool(TEMP_FILE.search(cleaned))
 
 
 def _negated(before: str) -> bool:
@@ -200,13 +218,30 @@ def _asks_change(sentence: str, data) -> bool:
     return False
 
 
+def _other_atomic_covers(other: str, data) -> bool:
+    if not ATOMIC_WRITE.search(other):
+        return False
+    if ATOMIC_BLANKET.search(other):
+        return True
+    if data and data.group(0).lower() in other.lower():
+        return True
+    # If other names a specific target file (e.g. summary.md, report.txt) and it's not this data file,
+    # it is said of that other file, not of this write
+    other_file = re.search(r"\b[\w./~-]{0,200}?[\w-]\.[a-zA-Z0-9]{1,8}\b", other)
+    if other_file and (not data or other_file.group(0).lower() != data.group(0).lower()):
+        return False
+    return bool(SAVED_STATE.search(other) or re.search(r"\b(?:writes?|files?)\b", other, re.I))
+
+
 def _covered(sentence: str, near: list[str], data) -> bool:
     """A way of writing named beside this write: in the sentence itself, or in its paragraph as an atomic write,
     a temp file renamed over, or a rename over this very file."""
-    if ATOMIC_WRITE.search(sentence) or TEMP_FILE.search(sentence) or "os.replace" in sentence:
+    if ATOMIC_WRITE.search(sentence) or _has_temp_file(sentence) or "os.replace" in sentence:
         return True
     for other in near:
-        if ATOMIC_WRITE.search(other) or (TEMP_FILE.search(other) and MOVED_OVER.search(other)):
+        if other == sentence:
+            continue
+        if _other_atomic_covers(other, data) or (_has_temp_file(other) and MOVED_OVER.search(other)):
             return True
         if data and data.group(0) in other and MOVED_OVER.search(other):
             return True
