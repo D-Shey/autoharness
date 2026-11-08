@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 import threading
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from importlib import resources
 from pathlib import Path
@@ -2158,6 +2159,8 @@ AGY_TOOLS = {"write_file": "Write", "edit_file": "Edit", "write_to_file": "Write
              "edit_notebook": "NotebookEdit", "run_command": "", "send_command_input": "", "call_mcp_tool": ""}
 AGY_PRE_TOOL_MATCHER = "|".join(AGY_TOOLS)
 AGY_USER_REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
+KIMI_PRE_TOOL_MATCHER = "Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Skill|shell|edit_file|write_file|mcp__.*"
+KIMI_TOOLS = {"write_file": "Write", "edit_file": "Edit", "shell": "Bash"}
 
 
 def session_file(session_id: str) -> Path:
@@ -2749,7 +2752,18 @@ def cmd_hook(args, project, catalog):
                 return 0
             if data["cwd"]:   # agy runs hooks in the folder of hooks.json, not the project
                 project = Project(Path(data["cwd"]).resolve(), project.agent_name)
-        event = data.get("hook_event_name", "UserPromptSubmit")
+        event = data.get("hook_event_name") or data.get("event") or "UserPromptSubmit"
+        kimi = bool(project.agent_name == "kimi" or os.environ.get("AUTOHARNESS_AGENT") == "kimi"
+                    or ("event" in data and "hook_event_name" not in data and not agy))
+
+        def _deny(reason: str) -> int:
+            if kimi:
+                sys.stderr.write(reason + "\n")
+                return 2
+            out({"decision": "deny", "reason": reason} if agy else
+                {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                        "permissionDecisionReason": reason}})
+            return 0
         sid = str(data.get("session_id") or "")
         saved_state = session_state(sid) if sid else {}
         state = saved_state.get("state")
@@ -2782,11 +2796,14 @@ def cmd_hook(args, project, catalog):
                                   stop_seen=saved_state.get("stop_seen"), prompt=saved_state.get("prompt"))
                 state = wanted
         if event == "Stop":
-            return _stop_gate(data, sid, state, active, task_info, project=project, agy=agy)
+            return _stop_gate(data, sid, state, active, task_info, project=project, agy=agy, kimi=kimi)
         if event == "UserPromptSubmit":
             if foreign and state != "waived" and saved_state.get("told") != active:
                 ctx = handoff(Task(project, active), sid)
                 set_session_state(sid, state="pending", task_id=active, via="other session", told=active)
+                if kimi:
+                    sys.stdout.write(ctx + "\n")
+                    return 0
                 out({"injectSteps": [{"ephemeralMessage": ctx}]} if agy else
                     {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
                 return 0
@@ -2809,32 +2826,29 @@ def cmd_hook(args, project, catalog):
                 return 0
             if sid:
                 set_session_state(sid, state="pending", prompt=data.get("prompt", "")[:PROMPT_KEPT])
+            if kimi:
+                sys.stdout.write(ctx + "\n")
+                return 0
             out({"injectSteps": [{"ephemeralMessage": ctx}]} if agy else
                 {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}})
             return 0
         if event == "PreToolUse":
             tool, tool_input = data.get("tool_name", ""), data.get("tool_input") or {}
+            if kimi and tool in KIMI_TOOLS:
+                tool = KIMI_TOOLS[tool]
             if sid and state != "waived" and (times := _repeated(sid, tool, tool_input)) > REPEAT_LIMIT:
                 reason = (f"This is the same {tool} call, unchanged, for the {times}th time in a row: repeating it "
                           "will not give a different result. Change what you call (the command, its input, the "
                           "approach); if a tool, input or know-how is missing, `autoharness need <capability> "
                           "--reason \"<what blocks you>\"`; or stop and ask the user.")
-                out({"decision": "deny", "reason": reason} if agy else
-                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                            "permissionDecisionReason": reason}})
-                return 0
+                return _deny(reason)
             # the key is never for tools, even in a call that looks like reading autoharness's own files
             if (reason := _writes_records(tool, tool_input, project.root)) == KEY_DENIED:
-                out({"decision": "deny", "reason": reason} if agy else
-                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                            "permissionDecisionReason": reason}})
-                return 0
+                return _deny(reason)
             if _is_autoharness_call(tool, tool_input):
                 if foreign and state != "waived" and _autoharness_subcommand(tool, tool_input) in ("init", "teardown"):
                     reason = handoff(Task(project, active), sid)
-                    out({"decision": "deny", "reason": reason} if agy else
-                        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                "permissionDecisionReason": reason}})
+                    return _deny(reason)
                 if (active and not foreign and state != "waived"
                         and _autoharness_subcommand(tool, tool_input) == "teardown"
                         and (flags := _user_flags(tool, tool_input))
@@ -2843,9 +2857,7 @@ def cmd_hook(args, project, catalog):
                               "said nothing since this task started: you cannot accept your own result for them. "
                               "Finish what teardown asks for (its `problems`), or stop and ask the user whether "
                               "they accept the result as it is; pass their words only after they answer.")
-                    out({"decision": "deny", "reason": reason} if agy else
-                        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                "permissionDecisionReason": reason}})
+                    return _deny(reason)
                 # a full task ended before its brief is dropped, and starting it again lighter escapes the brief
                 elif (active and not foreign and state != "waived"
                         and _autoharness_subcommand(tool, tool_input) == "teardown"
@@ -2856,15 +2868,10 @@ def cmd_hook(args, project, catalog):
                               "If the brief is refused, do what its error says (quote the user's constraints or "
                               "`none`; search for each area and take or create a skill). If you think the task "
                               "needs no harness, stop and ask the user; `autoharness waive` takes their words.")
-                    out({"decision": "deny", "reason": reason} if agy else
-                        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                "permissionDecisionReason": reason}})
+                    return _deny(reason)
                 return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
             if reason := _writes_records(tool, tool_input, project.root):
-                out({"decision": "deny", "reason": reason} if agy else
-                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                            "permissionDecisionReason": reason}})
-                return 0
+                return _deny(reason)
             if active and not foreign and (server := MCP_TOOL.match(tool)) and server[1] != GATEWAY_NAME:
                 from autoharness.gateway import note_call
                 note_call(project.root, server[1])   # the gateway counts its own servers' calls
@@ -2873,16 +2880,10 @@ def cmd_hook(args, project, catalog):
                     and (missing := _skills_not_installed(project, Task(project, active), templates=False))):
                 reason = ("Install what the brief covers its areas with before doing the work, so the work is done "
                           "with it, not around it: " + "; ".join(missing) + ". Reading files stays open.")
-                out({"decision": "deny", "reason": reason} if agy else
-                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                            "permissionDecisionReason": reason}})
-                return 0
+                return _deny(reason)
             if (state == "done" and active and not foreign and EDIT_TOOLS.match(tool)
                     and (reason := _unchecked_edits(sid, active, task_info))):
-                out({"decision": "deny", "reason": reason} if agy else
-                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                            "permissionDecisionReason": reason}})
-                return 0
+                return _deny(reason)
             if state == "pending" and GATED_TOOLS.match(tool):
                 if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
                     paths = [Path(v) for v in _path_values(tool_input)]
@@ -2900,9 +2901,7 @@ def cmd_hook(args, project, catalog):
                     "PowerShell. "
                     "Reading files is still allowed. If the user explicitly said not to use it, run "
                     f"`autoharness waive {sid} --reason \"<their words>\"` and tell the user.")
-                out({"decision": "deny", "reason": reason} if agy else
-                    {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                            "permissionDecisionReason": reason}})
+                return _deny(reason)
         return 0
     except Exception:  # noqa: BLE001 - a hook must not break the session
         return 0
@@ -2992,8 +2991,8 @@ def _repeated(sid: str, tool: str, tool_input: dict) -> int:
 
 
 def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task_info: dict,
-               project: Project | None = None, agy: bool = False) -> int:
-    """Claude Code's and Antigravity's Stop event: the agent is ending its turn while its own task is still open.
+               project: Project | None = None, agy: bool = False, kimi: bool = False) -> int:
+    """Claude Code's, Antigravity's and Kimi Code's Stop event: the agent is ending its turn while its own task is still open.
     Once per state of the task it is sent back to finish (verify, critic, teardown) or to say it is waiting on the user;
     a second stop with nothing changed goes through, so a turn that must end (a question, an approval) still can."""
     if data.get("stop_hook_active") or not (active and sid) or state == "waived":
@@ -3020,6 +3019,9 @@ def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task
               f"the turn: {'; '.join(left)} (teardown says what else it owes, such as a critic). If you are "
               "stopping on purpose (a question for the user, an approval, an accepted result), say so in your "
               "reply and end the turn again: this reminder comes once per state of the task.")
+    if kimi:
+        sys.stderr.write(reason + "\n")
+        return 2
     decision = "continue" if agy else "block"
     out({"decision": decision, "reason": reason})
     return 0
@@ -3089,7 +3091,76 @@ def install_agy_hook(hooks_file: Path, remove: bool = False) -> str:
     return "removed" if remove else "installed"
 
 
+KIMI_HOOK_BLOCK = (
+    "# >>> autoharness:hooks\n"
+    "[[hooks]]\n"
+    'event = "UserPromptSubmit"\n'
+    f'command = "{HOOK_COMMAND}"\n'
+    "\n"
+    "[[hooks]]\n"
+    'event = "PreToolUse"\n'
+    f'matcher = "{KIMI_PRE_TOOL_MATCHER}"\n'
+    f'command = "{HOOK_COMMAND}"\n'
+    "\n"
+    "[[hooks]]\n"
+    'event = "Stop"\n'
+    f'command = "{HOOK_COMMAND}"\n'
+    "# <<< autoharness:hooks\n"
+)
+KIMI_HOOK_BLOCK_RE = re.compile(r"^# >>> autoharness:hooks\n.*?^# <<< autoharness:hooks\n?", re.M | re.S)
+
+
+def install_kimi_hook(config_file: Path, remove: bool = False) -> str:
+    """Add or remove the autoharness [[hooks]] in a Kimi Code config.toml, keeping everything else."""
+    text = config_file.read_text("utf-8") if config_file.exists() else ""
+    if text:
+        try:
+            tomllib.loads(text)
+        except tomllib.TOMLDecodeError as e:
+            raise HarnessError(f"{config_file} is not valid TOML ({e}); not changing it") from e
+
+    has_block = bool(KIMI_HOOK_BLOCK_RE.search(text))
+    if remove:
+        if not has_block:
+            if text and HOOK_COMMAND in text:
+                text = re.sub(rf"\[\[hooks\]\][^\[]*?command\s*=\s*\"{re.escape(HOOK_COMMAND)}\"[^\[]*?\n?", "", text, flags=re.S)
+                agents._write_text(config_file, text)
+                return "removed"
+            return "not_installed"
+        new_text = KIMI_HOOK_BLOCK_RE.sub("", text)
+        agents._write_text(config_file, new_text)
+        return "removed"
+
+    if has_block:
+        m = KIMI_HOOK_BLOCK_RE.search(text)
+        if m and m.group(0).strip() == KIMI_HOOK_BLOCK.strip():
+            return "already_installed"
+        new_text = KIMI_HOOK_BLOCK_RE.sub(KIMI_HOOK_BLOCK, text)
+    else:
+        sep = "\n" if text and not text.endswith("\n") else ""
+        gap = "\n" if text.strip() else ""
+        new_text = text + sep + gap + KIMI_HOOK_BLOCK
+
+    try:
+        tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as e:
+        raise HarnessError(f"generated TOML is invalid ({e})") from e
+
+    agents._write_text(config_file, new_text)
+    return "installed"
+
+
 def cmd_install_hook(args, project, catalog):
+    if project.agent.name == "kimi" or (args.settings and Path(args.settings).suffix == ".toml"):
+        if args.settings:
+            settings = Path(args.settings)
+        else:
+            kimi_home = Path(os.environ["KIMI_CODE_HOME"]) if os.environ.get("KIMI_CODE_HOME") else Path.home() / ".kimi-code"
+            settings = kimi_home / "config.toml"
+        status = install_kimi_hook(settings, remove=args.remove)
+        out({"status": status, "settings": str(settings), "command": HOOK_COMMAND,
+             "next": "Takes effect in new Kimi Code sessions: restart Kimi Code."})
+        return 0
     if project.agent.name == "agy":
         if args.settings:
             settings = Path(args.settings)
@@ -3567,9 +3638,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("waive", help="let one agent session skip autoharness (only when the user said so)")
     s.add_argument("session_id")
     s.add_argument("--reason", required=True, help="the user's words")
-    s = sub.add_parser("install-hook", help="add the prompt hook to Claude Code settings, or with --agent agy to agy hooks.json (project, or --user)")
-    s.add_argument("--user", action="store_true", help="~/.claude/settings.json (agy: ~/.gemini/config/hooks.json) instead of the project")
-    s.add_argument("--settings", help="explicit settings file (agy: hooks.json)")
+    s = sub.add_parser("install-hook", help="add the prompt hook to Claude Code settings, agy hooks.json or kimi config.toml (project, or --user)")
+    s.add_argument("--user", action="store_true", help="user-level settings (Claude ~/.claude/settings.json, agy ~/.gemini/config/hooks.json, kimi config.toml) instead of project")
+    s.add_argument("--settings", help="explicit settings file (Claude: settings.json, agy: hooks.json, kimi: config.toml)")
     s.add_argument("--remove", action="store_true", help="take the hook out again")
     s = sub.add_parser("agents", help="supported agents and where they keep MCP servers and skills")
     s = sub.add_parser("memory", help="in-process SQLite FTS5 persistent memory with BM25 ranking and LEANN vector search")

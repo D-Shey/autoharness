@@ -1799,6 +1799,102 @@ def test_install_hook_for_agy_writes_its_hooks_json(project, capsys):
     assert res["status"] == "removed" and json.loads(hooks_file.read_text("utf-8")) == mine
 
 
+def test_install_hook_for_kimi_writes_config_toml(project, capsys, tmp_path):
+    config_file = tmp_path / "config.toml"
+    user_settings = (
+        'default_model = "kimi-code/k3.1-pro"\n\n'
+        "[experimental]\n"
+        "tool-select = true\n"
+    )
+    config_file.write_text(user_settings, "utf-8")
+    root = str(project.root)
+
+    # 1. Install
+    code, res = cli_json(capsys, "--project", root, "--agent", "kimi", "install-hook", "--settings", str(config_file))
+    assert code == 0 and res["status"] == "installed" and res["settings"] == str(config_file)
+
+    # 2. Idempotent install
+    assert cli_json(capsys, "--project", root, "--agent", "kimi", "install-hook", "--settings", str(config_file))[1]["status"] == "already_installed"
+
+    # 3. Verify content
+    content = config_file.read_text("utf-8")
+    assert 'default_model = "kimi-code/k3.1-pro"' in content
+    assert "tool-select = true" in content
+    assert 'event = "UserPromptSubmit"' in content
+    assert 'event = "PreToolUse"' in content
+    assert 'event = "Stop"' in content
+    assert f'matcher = "{cli.KIMI_PRE_TOOL_MATCHER}"' in content
+    assert f'command = "{cli.HOOK_COMMAND}"' in content
+
+    # 4. Remove
+    code, res = cli_json(capsys, "--project", root, "--agent", "kimi", "install-hook", "--settings", str(config_file), "--remove")
+    assert code == 0 and res["status"] == "removed"
+    removed_content = config_file.read_text("utf-8")
+    assert 'default_model = "kimi-code/k3.1-pro"' in removed_content
+    assert "tool-select = true" in removed_content
+    assert "autoharness" not in removed_content
+
+    # 5. Idempotent remove
+    assert cli_json(capsys, "--project", root, "--agent", "kimi", "install-hook", "--settings", str(config_file), "--remove")[1]["status"] == "not_installed"
+
+
+def test_install_hook_for_kimi_default_config_path(project, capsys, tmp_path, monkeypatch):
+    root = str(project.root)
+
+    # 1. Default with KIMI_CODE_HOME set
+    custom_home = tmp_path / "custom_kimi_home"
+    monkeypatch.setenv("KIMI_CODE_HOME", str(custom_home))
+    code, res = cli_json(capsys, "--project", root, "--agent", "kimi", "install-hook")
+    assert code == 0 and res["status"] == "installed"
+    expected_path = custom_home / "config.toml"
+    assert res["settings"] == str(expected_path)
+    assert expected_path.exists()
+    assert 'event = "UserPromptSubmit"' in expected_path.read_text("utf-8")
+
+    # 2. Default with KIMI_CODE_HOME unset (fallback to ~/.kimi-code/config.toml)
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
+    fake_home = tmp_path / "fake_user_home"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    code, res = cli_json(capsys, "--project", root, "--agent", "kimi", "install-hook")
+    assert code == 0 and res["status"] == "installed"
+    expected_default = fake_home / ".kimi-code" / "config.toml"
+    assert res["settings"] == str(expected_default)
+    assert expected_default.exists()
+    assert 'event = "UserPromptSubmit"' in expected_default.read_text("utf-8")
+
+
+def test_kimi_hook_runtime_events(project, capsys, monkeypatch):
+    import io
+    sid = "kimi-session-001"
+
+    # 1. UserPromptSubmit with Kimi payload
+    payload = json.dumps({"session_id": sid, "event": "UserPromptSubmit", "prompt": "build a full data processing engine"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    code = cli.main(["--project", str(project.root), "--agent", "kimi", "hook"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "autoharness" in out
+
+    # 2. PreToolUse gating with Kimi payload (expecting exit code 2 and stderr reason)
+    tool_payload = json.dumps({"session_id": sid, "event": "PreToolUse", "tool_name": "shell", "tool_input": {"command": "rm -rf /"}})
+    monkeypatch.setattr("sys.stdin", io.StringIO(tool_payload))
+    ret = cli.main(["--project", str(project.root), "--agent", "kimi", "hook"])
+    err = capsys.readouterr().err
+    assert ret == 2
+    assert "autoharness first" in err
+
+    # 3. Stop gate with Kimi payload (expecting exit code 2 and stderr reason when task is open)
+    cli.main(["--project", str(project.root), "init", "fix backend error"])
+    stop_payload = json.dumps({"session_id": sid, "event": "Stop"})
+    monkeypatch.setattr("sys.stdin", io.StringIO(stop_payload))
+    ret_stop = cli.main(["--project", str(project.root), "--agent", "kimi", "hook"])
+    err_stop = capsys.readouterr().err
+    assert ret_stop == 2
+    assert "is still open" in err_stop
+
+
+
+
 def test_other_skills_are_not_blocked(project, capsys, monkeypatch):
     prompt(capsys, monkeypatch, project, "draw a logo for the new product page")
     assert tool(capsys, monkeypatch, project, "Skill", skill="superpowers:brainstorming") is None
