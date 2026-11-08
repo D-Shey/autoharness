@@ -249,6 +249,36 @@ def cmd_plan(args, project, catalog):
     return 0
 
 
+def _format_light_raised_why(classified, task_text: str, prompt_text: str, catalog) -> str:
+    """Format why light mode was raised to full, attributing trigger words to task text or user message."""
+    in_task = {c.name: set(words) for c, words in catalog.classify(task_text)}
+    t_lower = task_text.lower()
+    p_lower = prompt_text.lower() if prompt_text else ""
+    parts = []
+    for c, words in classified:
+        task_words = []
+        user_words = []
+        task_known = in_task.get(c.name, set())
+        for w in words:
+            w_clean = w.strip().lower()
+            if w in task_known or (w_clean and w_clean in t_lower):
+                task_words.append(w)
+            elif p_lower and w_clean in p_lower:
+                user_words.append(w)
+            else:
+                task_words.append(w)
+        groups = []
+        if task_words:
+            w_str = ", ".join(f'"{w}"' for w in task_words)
+            groups.append(f"{w_str} in the task text")
+        if user_words:
+            w_str = ", ".join(f'"{w}"' for w in user_words)
+            groups.append(f"{w_str} in the user's message")
+        if groups:
+            parts.append(f"{c.name} ({'; '.join(groups)})")
+    return ", ".join(parts)
+
+
 LEVELS = ("light", "full", "reviewed")
 
 
@@ -313,13 +343,7 @@ def cmd_init(args, project, catalog):
         result["mode_raised"] = f"to {floor} by the min_mode setting ({floor_source})"
         task.log(f"mode raised to {floor} by the min_mode setting ({floor_source})")
     if lightened:
-        # which words raised it, and from where: a word from the user's message may belong to another request
-        in_task = {c.name: set(words) for c, words in catalog.classify(args.task)}
-        why = ", ".join(f"{c.name} (" + "; ".join(
-            f"{', '.join(chr(34) + w + chr(34) for w in group)} in {source}" for group, source in (
-                ([w for w in words if w in in_task.get(c.name, ())], "the task text"),
-                ([w for w in words if w not in in_task.get(c.name, ())], "the user's message")) if group) + ")"
-            for c, words in classified)
+        why = _format_light_raised_why(classified, args.task, prompt, catalog)
         result["mode_raised"] = (f"to full: the task needs {why}, and light mode is for chores that need none (a "
                                  "typo, a commit). Prepare as full mode asks")
         task.log(f"light raised to full: the task needs {why}")
@@ -2519,7 +2543,17 @@ def _earlier_level(project, text: str) -> str | None:
             continue
         if info.get("task", "").strip() != text.strip():
             continue
-        level = "reviewed" if info.get("profile") == "reviewed" else info.get("mode", "full")
+        # If an earlier task started as light and was only raised to full by the lightening rule,
+        # its base level was light. The lightening rule will re-evaluate on its own at init.
+        requested = info.get("requested")
+        log = info_path.parent / "harness.md"
+        was_lightened = (requested == "light" and (info.get("mode") == "full" or (
+            log.is_file() and "light raised to full" in log.read_text("utf-8", errors="replace")))) or (
+            requested is None and log.is_file() and "light raised to full" in log.read_text("utf-8", errors="replace"))
+        if was_lightened and info.get("profile") != "reviewed":
+            level = "light"
+        else:
+            level = "reviewed" if info.get("profile") == "reviewed" else info.get("mode", "full")
         if level in LEVELS and (found is None or LEVELS.index(level) > LEVELS.index(found)):
             found = level
     return found

@@ -1418,3 +1418,26 @@ def test_hook_pending_allows_writing_args_files(project, capsys, monkeypatch):
         res = hook(capsys, monkeypatch, project, write_args)
         assert res is None or not denied(res)
 
+
+def test_mode_raised_does_not_attribute_to_user_message_when_no_prompt(project, capsys, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "owner-2")
+    code, res = ah(capsys, project, "init", "check the form in a browser", "--mode", "light")
+    assert code == 0 and res["mode"] == "full"
+    raised = res["mode_raised"]
+    assert "in the task text" in raised
+    assert "in the user's message" not in raised
+
+
+def test_earlier_level_lightened_does_not_force_full_on_restart(project, capsys, monkeypatch):
+    code, res = ah(capsys, project, "init", "fix styling in browser", "--mode", "light")
+    assert code == 0 and res["mode"] == "full"
+    project.task().teardown("remove")
+
+    assert cli._earlier_level(project, "fix styling in browser") == "light"
+
+    code, res = ah(capsys, project, "init", "explicit full task", "--mode", "full")
+    assert code == 0 and res["mode"] == "full"
+    project.task().teardown("remove")
+    assert cli._earlier_level(project, "explicit full task") == "full"
+
+
