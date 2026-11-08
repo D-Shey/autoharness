@@ -109,6 +109,12 @@ def reconcile_and_store(
             """,
             (doc_id, kind, source, title, content, meta_json, now),
         )
+
+        try:
+            from autoharness import vector
+            vector.index_document_vector(con, doc_id, f"{title or ''} {content}")
+        except (sqlite3.Error, ImportError, ValueError):
+            pass
     return doc_id
 
 
@@ -264,4 +270,11 @@ def index_project_memory(project_root: Path) -> dict[str, int]:
                         pass
 
     con.close()
+
+    try:
+        from autoharness import vector
+        counts["vectors"] = vector.sync_memory_vectors(project_root)
+    except (sqlite3.Error, ImportError, ValueError):
+        pass
+
     return counts

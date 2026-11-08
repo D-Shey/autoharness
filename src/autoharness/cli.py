@@ -1660,12 +1660,19 @@ def cmd_memory(args, project, catalog) -> int:
         out({"status": "ok", "indexed": counts, "next": "Memory indexed in .autoharness/memory.db."})
         return 0
     elif args.action == "search":
+        from autoharness import vector
         con = memory.get_memory_db(project.root)
         try:
-            results = memory.search_memory(con, args.query, kind=args.kind, limit=args.limit)
+            mode = getattr(args, "mode", "hybrid")
+            if mode == "vector":
+                results = vector.search_vectors(con, args.query, kind=args.kind, limit=args.limit)
+            elif mode == "fts":
+                results = memory.search_memory(con, args.query, kind=args.kind, limit=args.limit)
+            else:  # hybrid
+                results = vector.hybrid_search(con, args.query, kind=args.kind, limit=args.limit)
         finally:
             con.close()
-        out({"status": "ok", "query": args.query, "kind": args.kind, "matches_count": len(results), "results": results})
+        out({"status": "ok", "query": args.query, "mode": getattr(args, "mode", "hybrid"), "kind": args.kind, "matches_count": len(results), "results": results})
         return 0
     else:  # status
         con = memory.get_memory_db(project.root)
@@ -3363,10 +3370,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--settings", help="explicit settings file (agy: hooks.json)")
     s.add_argument("--remove", action="store_true", help="take the hook out again")
     s = sub.add_parser("agents", help="supported agents and where they keep MCP servers and skills")
-    s = sub.add_parser("memory", help="in-process SQLite FTS5 persistent memory with BM25 ranking")
+    s = sub.add_parser("memory", help="in-process SQLite FTS5 persistent memory with BM25 ranking and LEANN vector search")
     s.add_argument("action", choices=["search", "index", "status"])
     s.add_argument("query", nargs="?", default="", help="search term")
-    s.add_argument("--kind", choices=["all", "ruling", "lesson", "review", "followup"], default="all")
+    s.add_argument("--kind", choices=["all", "ruling", "lesson", "review", "followup", "swarm_task"], default="all")
+    s.add_argument("--mode", choices=["hybrid", "fts", "vector"], default="hybrid", help="search mode (default: hybrid RRF)")
     s.add_argument("--limit", type=int, default=5)
     s = sub.add_parser("codemap", help="AST Symbol Map and structural code index")
     s.add_argument("path", nargs="?", default=".", help="file or directory path")

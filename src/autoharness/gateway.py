@@ -66,10 +66,11 @@ META_TOOLS = [
          "max_matches": {"type": "number", "description": "Maximum number of snippet matches (default: 5)."}},
                      "required": ["query"]}},
     {"name": "harness_memory_search",
-     "description": "Full-text ranked BM25 search across project memory (.autoharness/memory.db): past rulings, lessons, decisions, and review verdicts with reconcile-on-write deduplication.",
+     "description": "Hybrid BM25 & LEANN vector search across project memory (.autoharness/memory.db): past rulings, lessons, decisions, review verdicts, and swarm tasks with Reciprocal Rank Fusion (RRF).",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "Search term to match against titles and content."},
-         "kind": {"type": "string", "enum": ["all", "ruling", "lesson", "review", "followup"], "description": "Filter by memory kind (default: 'all')."},
+         "kind": {"type": "string", "enum": ["all", "ruling", "lesson", "review", "followup", "swarm_task"], "description": "Filter by memory kind (default: 'all')."},
+         "mode": {"type": "string", "enum": ["hybrid", "fts", "vector"], "description": "Search mode: 'hybrid' (BM25 + vector RRF), 'fts' (BM25 only), or 'vector' (cosine only). Default: 'hybrid'."},
          "limit": {"type": "integer", "description": "Maximum number of ranked results to return (default: 5)."}},
                      "required": ["query"]}},
     {"name": "harness_codemap",
@@ -471,22 +472,29 @@ class Gateway:
                 snippets.append(f"[{m['category']}] {m['source']} (line {m['line']}):\n{m['snippet']}")
             return _text("\n\n".join(snippets))
         if name == "harness_memory_search":
-            from autoharness import memory
+            from autoharness import memory, vector
             query = args.get("query") or ""
             kind = args.get("kind")
+            mode = args.get("mode") or "hybrid"
             limit = int(args.get("limit") or 5)
             if not self.project:
                 return _text("No project root configured for memory search.")
             con = memory.get_memory_db(self.project)
             try:
-                results = memory.search_memory(con, query, kind=kind, limit=limit)
+                if mode == "vector":
+                    results = vector.search_vectors(con, query, kind=kind, limit=limit)
+                elif mode == "fts":
+                    results = memory.search_memory(con, query, kind=kind, limit=limit)
+                else:  # hybrid
+                    results = vector.hybrid_search(con, query, kind=kind, limit=limit)
             finally:
                 con.close()
             if not results:
-                return _text(f"No memory entries found for query {query!r}.")
+                return _text(f"No memory entries found for query {query!r} in mode {mode!r}.")
             formatted = []
             for r in results:
-                formatted.append(f"[{r['kind'].upper()}] {r['title']} (source: {r['source']}, BM25 score: {r['score']}):\n{r['content']}")
+                score_str = f"RRF: {r.get('rrf_score')}" if "rrf_score" in r else (f"Vector: {r.get('vector_score')}" if "vector_score" in r else f"BM25: {r.get('score')}")
+                formatted.append(f"[{r['kind'].upper()}] {r['title']} (source: {r['source']}, {score_str}):\n{r['content']}")
             return _text("\n\n---\n\n".join(formatted))
         if name == "harness_codemap":
             from autoharness import codemap
