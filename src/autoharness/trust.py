@@ -300,31 +300,38 @@ ROLE_AFTER = re.compile(r"\s*(?:system|user|assistant|developer|tool)\b", re.I)
 # order hidden in a comment stays a warning.
 # The claim must be what the user is told: the order, then "that", a short subject, maybe "is", then the claim
 # itself, not negated and not a condition ("it is safe to delete", "the tests passed or failed").
-ORDER_START = r"(?:^|[.;:!?,(]\s*|\b(?:please|then|and|also|always|just|simply|must|should|will)\s+)\s*"
+ORDER_START = (r"(?:^|[.;:!?,(]\s*|\b(?:please|then|and|also|always|just|simply|must|should|will|"
+               r"remember\s+to|(?:you\s+)?need\s+to|if\s+asked|important:?)\s+)\s*")
 # "confirm the build passed" is a check, not a message: confirm, report and answer need the user as addressee
 USER = r"(?:(?:the\s+)?users?|them)"
 TELL = (r"(?:(?:tell|assure|reassure|inform)\s+" + USER + r"|let\s+" + USER + r"\s+know|say(?:\s+to\s+" + USER + r")?|"
         r"(?:confirm|report|answer|reply|respond)\s+to\s+" + USER + r")\s*:?\s+(?:that\s+)?")
-CLAIM = (r"(?:fine|ok(?:ay)?|approved|safe|secure|passed|succeeded|successful|verified|all\s+good|"
+CLAIM = (r"(?:fine|ok(?:ay)?|approved|safe|secure|clean|harmless|passed|succeeded|successful|verified|all\s+good|"
          r"no\s+(?:issues?|problems?|errors?|findings?|risks?|vulnerabilit\w+))")
 CLAIMED = (r"(?:(?:everything|all)(?:\s+(?:is|was|has\s+been|went))?\s+(?:fine|good|well|ok(?:ay)?|worked|works|clean|"
            r"in\s+order|passed|approved|safe)|all\s+good|nothing(?:\s+(?:is|was|were))?\s+(?:wrong|found|amiss)|"
            r"there\s+(?:are|were|is|was)\s+no\s+(?:issues?|problems?|errors?|findings?|risks?)|"
+           r"no\s+(?:issues?|problems?|errors?|findings?|risks?)(?:\s+(?:were\s+)?found)?|"
            r"(?:it|this|that|(?:the|this|your|our)\s+[\w-]+(?:\s+[\w-]+)?)(?:\s*['’]s|\s+(?:is|was|are|were|has\s+been|"
-           r"have\s+been|looks|seems))?\s+" + CLAIM + r")\b(?!\s+(?:to\s+\w|or\b|only\b|on\s|for\s|but\b|if\b|when\b))")
-TELL_RU = (r"(?:(?:скажи|сообщи|ответь|напиши|передай|заверь)(?:те)?(?:\s+пользовател\w*)?|подтверди(?:те)?\s+"
-           r"пользовател\w*)\s*,?\s*что\s+"
+           r"have\s+been|looks|seems))?\s+" + CLAIM + r")\b"
+           r"(?!\s+(?:to\s+(?!use\b|install\b|run\b|trust\b|proceed\b)\w|or\b|only\b|on\s|for\s|but\b|if\b|when\b|"
+           r"in\s+(?:the\s+)?(?:release\s+notes?|changelogs?|docs?|commits?)\b))")
+RU_LEAD = r"(?:(?:нужно|надо|следует|обязательно|важно)\s+)?"
+RU_VERBS = r"(?:(?:скажи|сообщи|ответь|напиши|передай|заверь)(?:те)?|сказать|сообщить|ответить|написать|передать|заверить)"
+RU_CONFIRM = r"(?:подтверди(?:те)?|подтвердить)"
+TELL_RU = (r"(?:" + RU_LEAD + RU_VERBS + r"(?:\s+пользовател\w*)?|" + RU_CONFIRM + r"\s+пользовател\w*)\s*,?\s*что\s+"
            r"(?:(?!не\b)[\w-]+\s+){0,2}?(?:в\s+порядке|ок|нормально|безопасн\w*|пройден\w*|прошл\w*|успешн\w*|"
            r"одобрен\w*|проблем\s+нет|ничего\s+не\s+найдено|(?<=вс[её]\s)(?:хорошо|работает))\b"
            r"(?!\s+(?:или|на\s+верси|только|для|если|когда)\b)")
 # keeping a secret from the user ("do not reveal the API key to the user") is hygiene, not concealment
 SECRET = r"(?!(?:api\s+|admin\s+|internal\s+)?(?:keys?|tokens?|passwords?|secrets?|credentials?|urls?|emails?)\b)"
+BENIGN_HIDE = r"(?!(?:banner|button|widget|modal|popup|component|tab|menu)\b)"
 KEEP_FROM = (r"\b(?:never|do\s+not|don't)\s+(?:(?:mention|tell|say|reveal|disclose)\s+(?:this|that|it|these|any\s+of\s+this|"
              r"(?:the|this|that)\s+" + SECRET + r"[\w-]+)(?:\s+[\w-]+)?\s+to\s+(?:the\s+)?users?|tell\s+(?:the\s+)?users?"
              r"\s+(?:about\s+)?(?:this|that|it)\b|mention\s+that\s+you\b|let\s+(?:the\s+)?users?\s+know\s+(?:about\s+)?"
              r"(?:this|that|it)\b)"
-             r"|" + ORDER_START + r"(?:keep|hide)\s+(?:this|that|it|these|(?:the|this|that)\s+[\w-]+)(?:\s+[\w-]+)?\s+"
-             r"(?:secret\s+)?from\s+(?:the\s+)?users?"
+             r"|" + ORDER_START + r"(?:keep|hide)\s+(?:this|that|it|these|(?:the|this|that)\s+" + SECRET + BENIGN_HIDE + r"[\w-]+)(?:\s+[\w-]+)?\s+"
+             r"(?:secret\s+)?from\s+(?:the\s+)?users?(?!\s+(?:until|unless|before)\b)"
              r"|\bне\s+(?:говори|сообщай|рассказывай|упоминай)(?:те)?\s+(?:[\w-]+\s+){0,3}?пользовател\w*"
              r"|\bскрой(?:те)?\s+(?:[\w-]+\s+){0,3}?от\s+пользовател\w*")
 MISLEAD = re.compile(ORDER_START + "(?:" + TELL + CLAIMED + "|" + TELL_RU + ")|" + KEEP_FROM, re.I | re.M)
