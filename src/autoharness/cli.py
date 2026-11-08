@@ -1696,6 +1696,89 @@ def cmd_codemap(args, project, catalog) -> int:
     return 0
 
 
+def cmd_swarm(args, project, catalog) -> int:
+    from autoharness import swarm
+    action = args.action
+    if action == "init":
+        title = args.title or "Multi-Agent Workflow"
+        tasks_data = None
+        if args.file:
+            plan_path = Path(args.file)
+            if not plan_path.is_file():
+                plan_path = project.root / args.file
+            if not plan_path.is_file():
+                out({"status": "error", "error": f"Tasks file not found: {args.file}"})
+                return 1
+            try:
+                loaded = json.loads(plan_path.read_text("utf-8"))
+                if isinstance(loaded, dict) and "tasks" in loaded:
+                    tasks_data = loaded["tasks"]
+                elif isinstance(loaded, list):
+                    tasks_data = loaded
+            except Exception as e:
+                out({"status": "error", "error": f"Failed to parse tasks file: {e}"})
+                return 1
+        plan = swarm.create_sample_swarm_plan(title, tasks=tasks_data)
+        saved_file = swarm.save_swarm_plan(plan, project.root)
+        out({
+            "status": "ok",
+            "plan_id": plan.id,
+            "title": plan.title,
+            "tasks_count": len(plan.tasks),
+            "file": str(saved_file),
+            "next": f"Run this swarm plan with `autoharness swarm run {plan.id}` or inspect with `autoharness swarm status {plan.id}`.",
+        })
+        return 0
+
+    if action == "list":
+        plans = swarm.list_swarm_plans(project.root)
+        out({"status": "ok", "total_plans": len(plans), "plans": plans})
+        return 0
+
+    if action == "status":
+        plan_id = args.plan_id
+        if not plan_id:
+            plans = swarm.list_swarm_plans(project.root)
+            if not plans:
+                out({"status": "error", "error": "No swarm plans found. Create one with `autoharness swarm init`."})
+                return 1
+            plan_id = plans[0]["id"]
+        try:
+            plan = swarm.load_swarm_plan(plan_id, project.root)
+            out({"status": "ok", "plan": plan.to_dict()})
+            return 0
+        except Exception as e:
+            out({"status": "error", "error": str(e)})
+            return 1
+
+    if action == "run":
+        plan_id = args.plan_id
+        if not plan_id:
+            plans = swarm.list_swarm_plans(project.root)
+            if not plans:
+                out({"status": "error", "error": "No swarm plan to run. Create one with `autoharness swarm init`."})
+                return 1
+            plan_id = plans[0]["id"]
+        try:
+            plan = swarm.load_swarm_plan(plan_id, project.root)
+            parallel = args.parallel or plan.max_parallel or 4
+            executed = swarm.execute_swarm_plan(plan, project.root, max_parallel=parallel)
+            out({
+                "status": "ok",
+                "plan_id": executed.id,
+                "plan_status": executed.status,
+                "tasks": {tid: {"status": t.status, "duration": t.result.get("duration", 0)} for tid, t in executed.tasks.items()},
+                "next": f"Check details with `autoharness swarm status {executed.id}`.",
+            })
+            return 0 if executed.status == "completed" else 1
+        except Exception as e:
+            out({"status": "error", "error": str(e)})
+            return 1
+
+    out({"status": "error", "error": f"Unknown swarm action: {action}"})
+    return 1
+
+
 def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
     """The lock entry for `name` from the active task, else from kept.json, and the task it belongs to."""
     active = project.task() if project.active_id() else None
@@ -3289,6 +3372,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path", nargs="?", default=".", help="file or directory path")
     s.add_argument("--query", "-q", help="search for class, method, or function symbols")
     s.add_argument("--json", action="store_true", help="output full structured JSON")
+    s = sub.add_parser("swarm", help="Multi-agent DAG swarm workflow coordinator and runner")
+    s.add_argument("action", choices=["init", "run", "status", "list"], help="swarm action")
+    s.add_argument("plan_id", nargs="?", help="plan ID or JSON plan path")
+    s.add_argument("--title", help="title for the swarm plan (init)")
+    s.add_argument("--file", help="tasks JSON file to initialize from (init)")
+    s.add_argument("--parallel", type=int, default=4, help="maximum concurrent worker tasks (run)")
     return p
 
 
@@ -3299,7 +3388,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief,
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
-            "memory": cmd_memory, "codemap": cmd_codemap}
+            "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm}
 
 
 def main(argv: list[str] | None = None) -> int:

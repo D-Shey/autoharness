@@ -44,6 +44,7 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart, offering Code Mode (`harness_execute`, `harness_search`), Active Context Pruning (`harness_history_search`), persistent SQLite FTS5 memory (`harness_memory_search`), and Python AST Code Map (`harness_codemap`); `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
 | `memory search\|index\|status [query] [--kind ...] [--limit N]` | in-process SQLite FTS5 persistent memory with BM25 ranking and reconcile-on-write deduplication (`.autoharness/memory.db`) |
 | `codemap [path] [-q QUERY] [--json]` | AST Code Map and structural symbol index: extracts classes, methods, signatures and docstrings via Python stdlib `ast`, reducing context tokens by 80-90% |
+| `swarm init\|run\|status\|list [plan_id] [--title ...] [--file ...] [--parallel N]` | multi-agent DAG swarm workflow coordinator and runner: topological scheduling, concurrent worker execution pool with barrier synchronization, role separation, hard verification gates, and crash-proof persistence |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
 | `agents` | the supported agents and their paths |
 

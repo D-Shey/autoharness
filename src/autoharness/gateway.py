@@ -78,6 +78,15 @@ META_TOOLS = [
          "path": {"type": "string", "description": "Relative file or directory path (default: project root)."},
          "query": {"type": "string", "description": "Optional symbol or function name search query."},
          "raw_json": {"type": "boolean", "description": "Whether to return raw JSON instead of indented outline."}}}},
+    {"name": "harness_swarm_status",
+     "description": "Inspect status and progress of multi-agent swarm plans in .autoharness/swarm. Omit plan_id to inspect the most recent plan.",
+     "inputSchema": {"type": "object", "properties": {
+         "plan_id": {"type": "string", "description": "Optional swarm plan ID or file path."}}}},
+    {"name": "harness_swarm_run",
+     "description": "Execute a multi-agent DAG swarm workflow with concurrent worker pool, role isolation, and hard verification gates.",
+     "inputSchema": {"type": "object", "properties": {
+         "plan_id": {"type": "string", "description": "Swarm plan ID or path to execute (default: most recent plan)."},
+         "parallel": {"type": "integer", "description": "Maximum concurrent tasks (default: 4)."}}}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -494,6 +503,43 @@ class Gateway:
             if raw_json:
                 return _text(json.dumps(cmap, ensure_ascii=False, indent=2))
             return _text(codemap.format_codemap_tree(cmap))
+        if name == "harness_swarm_status":
+            from autoharness import swarm
+            plan_id = args.get("plan_id")
+            if not self.project:
+                return _text("No project root configured for swarm operations.")
+            if not plan_id:
+                plans = swarm.list_swarm_plans(self.project)
+                if not plans:
+                    return _text("No swarm plans found in .autoharness/swarm/.")
+                plan_id = plans[0]["id"]
+            try:
+                plan = swarm.load_swarm_plan(plan_id, self.project)
+                return _text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+            except Exception as e:
+                return _text(f"Error loading swarm plan: {e}", error=True)
+        if name == "harness_swarm_run":
+            from autoharness import swarm
+            plan_id = args.get("plan_id")
+            parallel = int(args.get("parallel") or 4)
+            if not self.project:
+                return _text("No project root configured for swarm operations.")
+            if not plan_id:
+                plans = swarm.list_swarm_plans(self.project)
+                if not plans:
+                    return _text("No swarm plans found to execute.")
+                plan_id = plans[0]["id"]
+            try:
+                plan = swarm.load_swarm_plan(plan_id, self.project)
+                executed = swarm.execute_swarm_plan(plan, self.project, max_parallel=parallel)
+                summary = {
+                    "plan_id": executed.id,
+                    "status": executed.status,
+                    "tasks": {tid: t.status for tid, t in executed.tasks.items()},
+                }
+                return _text(json.dumps(summary, ensure_ascii=False, indent=2))
+            except Exception as e:
+                return _text(f"Swarm execution failed: {e}", error=True)
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

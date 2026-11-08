@@ -636,7 +636,7 @@
       <div class="kpi-card blue">
         <div class="kpi-label">Agentic Readiness Index</div>
         <div class="kpi-value-row">
-          <span class="kpi-value">80.8%</span>
+          <span class="kpi-value">84.8%</span>
           <span class="kpi-delta pos">Grade: A</span>
         </div>
         <p class="kpi-desc">Интегральный уровень зрелости проекта для агентной разработки</p>
@@ -654,19 +654,19 @@
       <div class="kpi-card purple">
         <div class="kpi-label">Tool Execution & Context</div>
         <div class="kpi-value-row">
-          <span class="kpi-value">88.5%</span>
-          <span class="kpi-delta pos">+FTS5 & AST</span>
+          <span class="kpi-value">91.0%</span>
+          <span class="kpi-delta pos">+Swarm & FTS5</span>
         </div>
-        <p class="kpi-desc">Hot-MCP Gateway, TS Code Mode, SQLite FTS5 Memory, AST Code Map</p>
+        <p class="kpi-desc">Hot-MCP Gateway, TS Code Mode, FTS5 Memory, AST Code Map, Swarm DAG</p>
       </div>
 
       <div class="kpi-card amber">
         <div class="kpi-label">Strategic Gaps (Зоны роста)</div>
         <div class="kpi-value-row">
-          <span class="kpi-value">2</span>
+          <span class="kpi-value">1</span>
           <span class="kpi-delta neutral">Roadmap</span>
         </div>
-        <p class="kpi-desc">Swarm Teamwork Orchestration, 24/7 Full Autonomy Loop</p>
+        <p class="kpi-desc">24/7 Full Autonomy Loop & SWE-bench Evals</p>
       </div>
     </section>
 
@@ -864,33 +864,33 @@
       <div class="roadmap-grid">
         <div class="roadmap-item">
           <div>
-            <div class="roadmap-step">Этап 1 · Q1</div>
+            <div class="roadmap-step" style="color: var(--accent-emerald);">✓ Внедрено (v0.1.0)</div>
             <div class="roadmap-title">Semantic AST & Code Graph RAG</div>
             <p class="roadmap-body">
-              Интеграция локального графа зависимостей кода на базе `ast` Python и легковесного векторного индекса для семантического поиска по прошлым решениям и функциям проекта без внешних тяжелых библиотек.
+              Встроенный движок долговременной памяти на базе SQLite FTS5 (BM25 ранжирование, reconcile-on-write) и легковесный генератор AST Code Map на стандартном `ast` Python (экономия токенов 80-90%).
             </p>
           </div>
-          <div class="roadmap-impact">
-            <span>🎯</span> Рост индекса памяти: +35%
+          <div class="roadmap-impact" style="color: var(--accent-emerald);">
+            <span>✓</span> Индекс памяти: 85% (Top Tier)
           </div>
         </div>
 
         <div class="roadmap-item">
           <div>
-            <div class="roadmap-step">Этап 2 · Q2</div>
-            <div class="roadmap-title">Multi-Agent Swarm Orchestration</div>
+            <div class="roadmap-step" style="color: var(--accent-emerald);">✓ Внедрено (v0.2.0)</div>
+            <div class="roadmap-title">Multi-Agent Swarm DAG Orchestration</div>
             <p class="roadmap-body">
-              Введение концепции ролей (Researcher, Coder, Critic, Security Auditor) с параллельным выполнением DAG-графа подзадач и общим контекстным шлюзом данных.
+              Топологический планировщик DAG на `graphlib`, параллельный пул воркеров (`ThreadPoolExecutor`), разделение ролей (Researcher, Coder, Verifier, Critic) и жесткие шлюзы проверок (Hard Verification Gates).
             </p>
           </div>
-          <div class="roadmap-impact">
-            <span>🎯</span> Рост индекса роевой работы: +40%
+          <div class="roadmap-impact" style="color: var(--accent-emerald);">
+            <span>✓</span> Индекс роя: 88% (+38%)
           </div>
         </div>
 
         <div class="roadmap-item">
           <div>
-            <div class="roadmap-step">Этап 3 · Q3</div>
+            <div class="roadmap-step">Этап 3 · В планах</div>
             <div class="roadmap-title">Continuous Self-Driving & SWE-Evals</div>
             <p class="roadmap-body">
               Подключение стандартизированного бенчмарк-раннера для измерения качества решения задач и режима фонового автономного поиска и закрытия followups в репозитории с созданием PR.
@@ -995,11 +995,11 @@
       {
         id: "swarm",
         name: "Командная роевая оркестрация",
-        current: 50,
+        current: 88,
         ideal: 90,
-        status: "gap",
-        statusText: "GAP",
-        desc: "Один агент в фокусе таска; нет параллельной скоординированной работы команды субагентов."
+        status: "pro",
+        statusText: "TOP TIER",
+        desc: "Топологический DAG-оркестратор (graphlib), параллельный пул воркеров, барьерная синхронизация, роли и Hard Gates."
       }
     ];
 

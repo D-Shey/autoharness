@@ -305,6 +305,7 @@ of meta-tools:
   reviewer answers (`reviews`), and events on disk on demand without loading raw logs into model context.
 - **`harness_memory_search(query, kind)`**: ranked BM25 search across persistent project memory (`.autoharness/memory.db` on SQLite FTS5) with `reconcile-on-write` deduplication across rulings, lessons, and reviews.
 - **`harness_codemap(path, query)`**: compact Python AST Symbol Map and structural symbol index, extracting classes, methods, parameters, return types, and docstrings without reading full files (80-90% token reduction).
+- **`harness_swarm_status` and `harness_swarm_run`**: multi-agent Directed Acyclic Graph (DAG) task scheduling, parallel worker pool execution with barrier synchronization, role separation (Researcher, Coder, Verifier, Critic), and hard verification gates.
 - **`harness_tools` and `harness_call(server, tool, arguments)`**: direct schema inspection and classical
   single-tool execution.
 
