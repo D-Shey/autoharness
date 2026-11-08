@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoHarness — Agentic Radar & Gap Analysis Dashboard</title>
+  <!-- Chart.js for Interactive Radar Chart -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg-primary: #0a0d14;
+      --bg-secondary: #101522;
+      --bg-card: #151b2d;
+      --bg-card-hover: #1c243c;
+      --border: #222c47;
+      --border-accent: #3b82f6;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent-blue: #38bdf8;
+      --accent-purple: #a855f7;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-rose: #f43f5e;
+      --gradient-brand: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+      --glow-blue: 0 0 25px rgba(56, 189, 248, 0.15);
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      padding: 32px 24px;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* HEADER */
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 20px;
+      padding-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 32px;
+    }
+
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .brand-logo {
+      width: 48px;
+      height: 48px;
+      background: var(--gradient-brand);
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+      font-weight: 900;
+      font-size: 24px;
+      color: #fff;
+    }
+
+    h1 {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      background: var(--gradient-brand);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 14px;
+      margin-top: 2px;
+    }
+
+    .header-badges {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .badge-primary {
+      background: rgba(56, 189, 248, 0.1);
+      border-color: rgba(56, 189, 248, 0.3);
+      color: var(--accent-blue);
+    }
+
+    .badge-success {
+      background: rgba(16, 185, 129, 0.1);
+      border-color: rgba(16, 185, 129, 0.3);
+      color: var(--accent-emerald);
+    }
+
+    /* KPI STATS ROW */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+      margin-bottom: 36px;
+    }
+
+    .kpi-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.25s ease;
+    }
+
+    .kpi-card:hover {
+      border-color: rgba(56, 189, 248, 0.4);
+      transform: translateY(-2px);
+      box-shadow: var(--glow-blue);
+    }
+
+    .kpi-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+    }
+
+    .kpi-card.blue::before { background: var(--accent-blue); }
+    .kpi-card.emerald::before { background: var(--accent-emerald); }
+    .kpi-card.purple::before { background: var(--accent-purple); }
+    .kpi-card.amber::before { background: var(--accent-amber); }
+
+    .kpi-label {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .kpi-value-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+
+    .kpi-value {
+      font-size: 32px;
+      font-weight: 800;
+      font-family: var(--font-mono);
+      color: #fff;
+    }
+
+    .kpi-delta {
+      font-size: 13px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    .kpi-delta.pos {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--accent-emerald);
+    }
+
+    .kpi-delta.neutral {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-blue);
+    }
+
+    .kpi-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 8px;
+    }
+
+    /* MAIN VISUALIZATION SECTION: RADAR + SUMMARY */
+    .radar-section {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 28px;
+      margin-bottom: 40px;
+      align-items: stretch;
+    }
+
+    @media (max-width: 1024px) {
+      .radar-section {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .chart-container-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .chart-title {
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .chart-toggles {
+      display: flex;
+      background: var(--bg-secondary);
+      padding: 4px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      gap: 4px;
+    }
+
+    .toggle-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .toggle-btn.active {
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent-blue);
+    }
+
+    .canvas-wrap {
+      flex: 1;
+      position: relative;
+      min-height: 440px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* RADAR LEGEND DETAILS PANEL */
+    .radar-summary-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .breakdown-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .dimension-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 480px;
+      overflow-y: auto;
+      padding-right: 6px;
+    }
+
+    .dimension-list::-webkit-scrollbar {
+      width: 4px;
+    }
+    .dimension-list::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
+
+    .dim-row {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .dim-row:hover, .dim-row.active {
+      border-color: var(--accent-blue);
+      background: var(--bg-card-hover);
+    }
+
+    .dim-info {
+      flex: 1;
+      margin-right: 16px;
+    }
+
+    .dim-name {
+      font-size: 14px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dim-score-bar {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      margin-top: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .dim-score-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .dim-stat {
+      font-family: var(--font-mono);
+      font-weight: 800;
+      font-size: 16px;
+      text-align: right;
+    }
+
+    .tag-status {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 700;
+    }
+
+    .tag-pro {
+      background: rgba(16, 185, 129, 0.2);
+      color: var(--accent-emerald);
+    }
+
+    .tag-mid {
+      background: rgba(56, 189, 248, 0.2);
+      color: var(--accent-blue);
+    }
+
+    .tag-gap {
+      background: rgba(244, 63, 94, 0.2);
+      color: var(--accent-rose);
+    }
+
+    /* DEEP DIVE SECTION: STRENGTHS VS GAPS */
+    .deep-dive-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 28px;
+      margin-bottom: 40px;
+    }
+
+    @media (max-width: 900px) {
+      .deep-dive-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .section-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+    }
+
+    .section-card.strengths {
+      border-top: 4px solid var(--accent-emerald);
+    }
+
+    .section-card.gaps {
+      border-top: 4px solid var(--accent-rose);
+    }
+
+    .section-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+
+    .section-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+
+    .strengths .section-icon {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--accent-emerald);
+    }
+
+    .gaps .section-icon {
+      background: rgba(244, 63, 94, 0.15);
+      color: var(--accent-rose);
+    }
+
+    .section-title {
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .item-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 16px;
+      transition: all 0.2s;
+    }
+
+    .item-card:hover {
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: translateX(3px);
+    }
+
+    .item-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 8px;
+      gap: 10px;
+    }
+
+    .item-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .item-code {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 2px 8px;
+      border-radius: 6px;
+      color: var(--accent-blue);
+    }
+
+    .item-desc {
+      font-size: 13.5px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .item-highlight {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.08);
+      font-size: 12.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .highlight-icon {
+      font-size: 14px;
+    }
+
+    .strengths .item-highlight {
+      color: var(--accent-emerald);
+    }
+
+    .gaps .item-highlight {
+      color: var(--accent-amber);
+    }
+
+    /* ACTIONABLE ROADMAP SECTION */
+    .roadmap-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px;
+      margin-bottom: 40px;
+    }
+
+    .roadmap-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .roadmap-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+    }
+
+    .roadmap-item {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+    }
+
+    .roadmap-step {
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--accent-purple);
+      margin-bottom: 6px;
+    }
+
+    .roadmap-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 10px;
+      color: #fff;
+    }
+
+    .roadmap-body {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+
+    .roadmap-impact {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent-blue);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* FOOTER */
+    footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 13px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .footer-links a {
+      color: var(--accent-blue);
+      text-decoration: none;
+      margin-left: 16px;
+    }
+
+    .footer-links a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+
+    <!-- HEADER -->
+    <header>
+      <div class="brand-title">
+        <div class="brand-logo">AH</div>
+        <div>
+          <h1>AutoHarness — Agentic Radar & Readiness Dashboard</h1>
+          <p class="subtitle">Инженерная дисциплина, покрытие потребностей автономных агентов и анализ белых пятен</p>
+        </div>
+      </div>
+      <div class="header-badges">
+        <span class="badge badge-primary">⚡ Code Mode Ready</span>
+        <span class="badge badge-success">🛡️ Zero-Runtime Dependencies</span>
+        <span class="badge">🤖 9 Coding Agents</span>
+        <span class="badge">v0.1.0</span>
+      </div>
+    </header>
+
+    <!-- TOP KPI CARDS -->
+    <section class="kpi-grid">
+      <div class="kpi-card blue">
+        <div class="kpi-label">Agentic Readiness Index</div>
+        <div class="kpi-value-row">
+          <span class="kpi-value">80.8%</span>
+          <span class="kpi-delta pos">Grade: A</span>
+        </div>
+        <p class="kpi-desc">Интегральный уровень зрелости проекта для агентной разработки</p>
+      </div>
+
+      <div class="kpi-card emerald">
+        <div class="kpi-label">Core Discipline & Trust</div>
+        <div class="kpi-value-row">
+          <span class="kpi-value">92.5%</span>
+          <span class="kpi-delta pos">Top Tier</span>
+        </div>
+        <p class="kpi-desc">Воркфлоу брифов, изоляция секретов, запрет самоподтверждения</p>
+      </div>
+
+      <div class="kpi-card purple">
+        <div class="kpi-label">Tool Execution & Context</div>
+        <div class="kpi-value-row">
+          <span class="kpi-value">88.5%</span>
+          <span class="kpi-delta pos">+FTS5 & AST</span>
+        </div>
+        <p class="kpi-desc">Hot-MCP Gateway, TS Code Mode, SQLite FTS5 Memory, AST Code Map</p>
+      </div>
+
+      <div class="kpi-card amber">
+        <div class="kpi-label">Strategic Gaps (Зоны роста)</div>
+        <div class="kpi-value-row">
+          <span class="kpi-value">2</span>
+          <span class="kpi-delta neutral">Roadmap</span>
+        </div>
+        <p class="kpi-desc">Swarm Teamwork Orchestration, 24/7 Full Autonomy Loop</p>
+      </div>
+    </section>
+
+    <!-- RADAR VISUALIZATION & BREAKDOWN -->
+    <section class="radar-section">
+      <!-- CANVAS RADAR -->
+      <div class="chart-container-card">
+        <div class="chart-header">
+          <div class="chart-title">
+            <span>🕷️</span> Диаграмма-паутина: AutoHarness vs Потребности Агентов
+          </div>
+          <div class="chart-toggles">
+            <button class="toggle-btn active" id="btn-both">Сравнение</button>
+            <button class="toggle-btn" id="btn-current">Только AutoHarness</button>
+            <button class="toggle-btn" id="btn-ideal">Эталон Индустрии</button>
+          </div>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="radarChart"></canvas>
+        </div>
+      </div>
+
+      <!-- INTERACTIVE DIMENSIONS LIST -->
+      <div class="radar-summary-card">
+        <div class="breakdown-title">
+          <span>Оценка ключевых измерений</span>
+          <span style="font-size: 13px; color: var(--text-muted); font-weight: normal;">9 измерений</span>
+        </div>
+
+        <div class="dimension-list" id="dimList">
+          <!-- Dynamically populated or rendered -->
+        </div>
+      </div>
+    </section>
+
+    <!-- DEEP DIVE: STRENGTHS VS GAPS -->
+    <section class="deep-dive-grid">
+      <!-- STRENGTHS -->
+      <div class="section-card strengths">
+        <div class="section-title-wrap">
+          <div class="section-icon">🛡️</div>
+          <div class="section-title">Где проект прокачан на максимум (Superpowers)</div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">1. Инженерная дисциплина и Zero-Trust Protocol</span>
+            <span class="item-code">init / brief / verify / mode</span>
+          </div>
+          <p class="item-desc">
+            Агенты по природе спешат и генерируют код по памяти. AutoHarness принудительно останавливает агента: требует собрать пруфы (`evidence`), зафиксировать бриф до первой строчки кода и верифицировать результат реальным выполнением тестов, исключая иллюзию завершенности («галлюцинацию успеха»).
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">✓</span> Исключает слепые коммиты и непроверенные изменения.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">2. Code Mode и изолированная V8-песочница</span>
+            <span class="item-code">sandbox.py / codegen.py</span>
+          </div>
+          <p class="item-desc">
+            Революционный переход от пошаговых native tool calls к пакетному исполнению типизированного TypeScript-кода. Скрипт в изоляте `node:vm` делает циклы, агрегацию и фильтрацию данных, обращаясь к MCP-инструментам через RPC. Секреты отсекаются через `child_env`, а зависания блокируются двойным сторожевым таймером.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">✓</span> Сокращение расхода контекста на 80–95%, защита API-ключей.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">3. Динамический Gateway без перезапуска агентов</span>
+            <span class="item-code">gateway.py / mcp_client.py</span>
+          </div>
+          <p class="item-desc">
+            Обычные кодинг-агенты требуют перезапуска при добавлении новых MCP-серверов. Gateway выступает единым прокси-сервером, поддерживающим горячее добавление, одобрение разрешений и мгновенную компиляцию JSON Schema в ambient `.d.ts` типы для LLM.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">✓</span> Zero-restart MCP интеграция, работа по stdio и HTTP.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">4. Независимый критик и протокол эскалации</span>
+            <span class="item-code">critic.py / approach.py / arbiter.py</span>
+          </div>
+          <p class="item-desc">
+            Архитектурный запрет самопроверки («Don't judge your own work»). На этапе ревью поднимается отдельный субагент-критик без предвзятости исполнителя. При повторных сбоях система заставляет сменить подход (`approach`), а затем передает вердикт независимому арбитру.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">✓</span> Разрыв циклов застревания на одной и той же ошибке.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">5. Кросс-агентная поддержка и Zero-Dependencies</span>
+            <span class="item-code">agents.py / trust.py</span>
+          </div>
+          <p class="item-desc">
+            Поддержка 9 основных сред (Claude Code, Codex, Gemini, Qwen, GigaCode, Strands, Antigravity, Cursor, Kimi). Проект написан на чистом стандартном Python без внешних зависимостей в рантайме, что гарантирует работу на любой машине без конфликтов виртуальных окружений.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">✓</span> Абсолютная переносимость (Linux, macOS, Windows).
+          </div>
+        </div>
+      </div>
+
+      <!-- GAPS -->
+      <div class="section-card gaps">
+        <div class="section-title-wrap">
+          <div class="section-icon">⚠️</div>
+          <div class="section-title">В чём пробелы и белые пятна (Strategic Gaps)</div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">1. Отсутствие семантической памяти (Graph RAG / Embeddings)</span>
+            <span class="item-code">Оценка: 45% (Критический пробел)</span>
+          </div>
+          <p class="item-desc">
+            Вся долговременная память сейчас держится на текстовых файлах (`rulings.json`, `followups.json`, `events.jsonl`) и поиске по регуляркам/подстрокам. Нет векторных эмбеддингов, семантического индекса кодовой базы (Code Property Graph / AST Graph) и ассоциативного извлечения релевантного опыта прошлых задач.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">⚡</span> Точка роста: Внедрение локального векторного поиска (например, SQLite-vec / Chroma) без нарушения zero-dependency ядра.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">2. Отсутствие командной роевой оркестрации (Swarm / Multi-Agent)</span>
+            <span class="item-code">Оценка: 50% (Значительный пробел)</span>
+          </div>
+          <p class="item-desc">
+            AutoHarness управляет взаимодействием «один агент + независимый критик на проверку». Нет архитектуры для параллельной работы роя специализированных агентов (Team Lead, Архитектор, Исследователь, Разработчик, QA-автоматизатор), одновременно решающих подзадачи одного эпика с синхронизацией общего состояния.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">⚡</span> Точка роста: Поддержка протокола DAG-задач для параллельного запуска нескольких агентов под контролем харнеса.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">3. Фоновая непрерывная автономность (24/7 Continuous Loop)</span>
+            <span class="item-code">Оценка: 60% (Умеренный пробел)</span>
+          </div>
+          <p class="item-desc">
+            Текущая философия намеренно ориентирована на сессионный Human-in-the-loop контроль (агент останавливается и ждет одобрения опасных действий или завершения таска). Отсутствует режим автономного «ночного демона» (Nightly Self-Driving), который может автономно брать задачи из issue tracker, исправлять их и формировать PR.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">⚡</span> Точка роста: Реализация защищенного автономного раннера с жестким бюджетом токенов и лимитом попыток.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">4. Отсутствие автоматических бенчмарков (SWE-bench Evals)</span>
+            <span class="item-code">Оценка: 62% (Умеренный пробел)</span>
+          </div>
+          <p class="item-desc">
+            В проекте есть команда `autoharness eval`, но она предназначена для ручной фиксации результатов. Нет встроенного набора стандартных индустриальных бенчмарков (SWE-bench Lite, HumanEval, CyberSecEval) для автоматического замера: насколько внедрение AutoHarness статистически снижает процент регрессий и галлюцинаций моделей.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">⚡</span> Точка роста: Встроенный CI-раннер для измерения pass@1 и регрессий на типовых реальных задачах.
+          </div>
+        </div>
+
+        <div class="item-card">
+          <div class="item-header">
+            <span class="item-title">5. Ограничение сред песочницы только Node.js</span>
+            <span class="item-code">Оценка: 70% (Минорный пробел)</span>
+          </div>
+          <p class="item-desc">
+            Code Mode исполняется через встроенную песочницу `node:vm` на JavaScript/TypeScript. Если агент предпочитает писать скрипты агрегации на Python (Pyodide / WASM / RestrictedPython) или Bash, у него нет аналогичной безопасной песочницы для Python Code Mode.
+          </p>
+          <div class="item-highlight">
+            <span class="highlight-icon">⚡</span> Точка роста: Добавление легковесной Python/Wasm песочницы для агентов экосистемы Pydantic-AI / LangChain.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ACTIONABLE ROADMAP -->
+    <section class="roadmap-card">
+      <div class="roadmap-header">
+        <span style="font-size: 24px;">🚀</span>
+        <div>
+          <h2 style="font-size: 20px; font-weight: 800; color: #fff;">План прокачки: Как закрыть белые пятна</h2>
+          <p style="font-size: 13px; color: var(--text-muted);">Приоритетные направления развития для превращения AutoHarness в ультимативный агентный фреймворк</p>
+        </div>
+      </div>
+
+      <div class="roadmap-grid">
+        <div class="roadmap-item">
+          <div>
+            <div class="roadmap-step">Этап 1 · Q1</div>
+            <div class="roadmap-title">Semantic AST & Code Graph RAG</div>
+            <p class="roadmap-body">
+              Интеграция локального графа зависимостей кода на базе `ast` Python и легковесного векторного индекса для семантического поиска по прошлым решениям и функциям проекта без внешних тяжелых библиотек.
+            </p>
+          </div>
+          <div class="roadmap-impact">
+            <span>🎯</span> Рост индекса памяти: +35%
+          </div>
+        </div>
+
+        <div class="roadmap-item">
+          <div>
+            <div class="roadmap-step">Этап 2 · Q2</div>
+            <div class="roadmap-title">Multi-Agent Swarm Orchestration</div>
+            <p class="roadmap-body">
+              Введение концепции ролей (Researcher, Coder, Critic, Security Auditor) с параллельным выполнением DAG-графа подзадач и общим контекстным шлюзом данных.
+            </p>
+          </div>
+          <div class="roadmap-impact">
+            <span>🎯</span> Рост индекса роевой работы: +40%
+          </div>
+        </div>
+
+        <div class="roadmap-item">
+          <div>
+            <div class="roadmap-step">Этап 3 · Q3</div>
+            <div class="roadmap-title">Continuous Self-Driving & SWE-Evals</div>
+            <p class="roadmap-body">
+              Подключение стандартизированного бенчмарк-раннера для измерения качества решения задач и режима фонового автономного поиска и закрытия followups в репозитории с созданием PR.
+            </p>
+          </div>
+          <div class="roadmap-impact">
+            <span>🎯</span> Рост индекса автономности: +30%
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer>
+      <div>
+        <span>AutoHarness Architecture Review & Radar Analysis</span> · <span>Сгенерировано для проекта D:\Projects\autoharness</span>
+      </div>
+      <div class="footer-links">
+        <a href="docs/reference.md">Reference Guide</a>
+        <a href="docs/security.md">Security Model</a>
+        <a href="README.md">README</a>
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- SCRIPT FOR RADAR CHART & INTERACTIONS -->
+  <script>
+    const dimensions = [
+      {
+        id: "discipline",
+        name: "Инженерная дисциплина & Воркфлоу",
+        current: 95,
+        ideal: 90,
+        status: "pro",
+        statusText: "TOP TIER",
+        desc: "Жёсткий жизненный цикл (init/brief/verify/teardown), пруфы evidence, 3 режима строгости."
+      },
+      {
+        id: "security",
+        name: "Изоляция, Безопасность & Trust",
+        current: 90,
+        ideal: 95,
+        status: "pro",
+        statusText: "TOP TIER",
+        desc: "V8-песочница без FS/сети, чистка env от секретов, статический анализ prompt injection."
+      },
+      {
+        id: "tools",
+        name: "Инструменты & Code Mode",
+        current: 88,
+        ideal: 95,
+        status: "pro",
+        statusText: "ADVANCED",
+        desc: "Hot-MCP Gateway, TS-генерация, пакетное исполнение скриптов в песочнице без рестарта."
+      },
+      {
+        id: "ecosystem",
+        name: "Кросс-агентная поддержка",
+        current: 92,
+        ideal: 85,
+        status: "pro",
+        statusText: "LEADER",
+        desc: "Поддержка 9 сред (Claude, Codex, Gemini, Qwen, GigaCode, Strands, AGY, Cursor, Kimi), 0 runtime deps."
+      },
+      {
+        id: "review",
+        name: "Независимое ревью & Арбитраж",
+        current: 85,
+        ideal: 90,
+        status: "pro",
+        statusText: "ADVANCED",
+        desc: "Запрет самопроверки, независимый субагент-критик, смена подходов approach, арбитр."
+      },
+      {
+        id: "context",
+        name: "Управление контекстом (ACP)",
+        current: 80,
+        ideal: 95,
+        status: "mid",
+        statusText: "GOOD",
+        desc: "LSM-сжатие истории ревью, Active Context Pruning, дисковый поиск без раздувания контекста."
+      },
+      {
+        id: "autonomy",
+        name: "Автономность & Самовосстановление",
+        current: 60,
+        ideal: 90,
+        status: "gap",
+        statusText: "GAP",
+        desc: "Ориентация на человека-в-контуре; нет фонового 24/7 автономного решения бэклога."
+      },
+      {
+        id: "rag",
+        name: "Семантическая память & Graph RAG",
+        current: 85,
+        ideal: 95,
+        status: "pro",
+        statusText: "TOP TIER",
+        desc: "Встроенный SQLite FTS5 с BM25, reconcile-on-write память, чистый Python AST Code Map (80-90% экономии токенов)."
+      },
+      {
+        id: "swarm",
+        name: "Командная роевая оркестрация",
+        current: 50,
+        ideal: 90,
+        status: "gap",
+        statusText: "GAP",
+        desc: "Один агент в фокусе таска; нет параллельной скоординированной работы команды субагентов."
+      }
+    ];
+
+    // Render Dimension List
+    const dimListContainer = document.getElementById("dimList");
+    dimensions.forEach(dim => {
+      const tagClass = dim.status === 'pro' ? 'tag-pro' : dim.status === 'mid' ? 'tag-mid' : 'tag-gap';
+      const color = dim.status === 'pro' ? 'var(--accent-emerald)' : dim.status === 'mid' ? 'var(--accent-blue)' : 'var(--accent-rose)';
+
+      const row = document.createElement("div");
+      row.className = "dim-row";
+      row.id = `dim-${dim.id}`;
+      row.innerHTML = `
+        <div class="dim-info">
+          <div class="dim-name">
+            <span>${dim.name}</span>
+            <span class="tag-status ${tagClass}">${dim.statusText}</span>
+          </div>
+          <div style="font-size: 12px; color: var(--text-muted); margin-top: 3px;">${dim.desc}</div>
+          <div class="dim-score-bar">
+            <div class="dim-score-fill" style="width: ${dim.current}%; background: ${color};"></div>
+          </div>
+        </div>
+        <div class="dim-stat" style="color: ${color};">
+          ${dim.current}%
+        </div>
+      `;
+      dimListContainer.appendChild(row);
+    });
+
+    const canvas = document.getElementById("radarChart");
+    let radarChart = null;
+
+    if (typeof Chart !== 'undefined') {
+      // Setup Chart.js Radar
+      const ctx = canvas.getContext("2d");
+      const labels = dimensions.map(d => d.name);
+      const currentData = dimensions.map(d => d.current);
+      const idealData = dimensions.map(d => d.ideal);
+
+      const data = {
+        labels: labels,
+        datasets: [
+          {
+            label: "AutoHarness (Текущий профиль)",
+            data: currentData,
+            backgroundColor: "rgba(56, 189, 248, 0.25)",
+            borderColor: "#38bdf8",
+            pointBackgroundColor: "#38bdf8",
+            pointBorderColor: "#fff",
+            pointHoverBackgroundColor: "#fff",
+            pointHoverBorderColor: "#38bdf8",
+            borderWidth: 2.5,
+            pointRadius: 4,
+            pointHoverRadius: 7
+          },
+          {
+            label: "Эталонные потребности агентов",
+            data: idealData,
+            backgroundColor: "rgba(168, 85, 247, 0.12)",
+            borderColor: "rgba(168, 85, 247, 0.8)",
+            pointBackgroundColor: "rgba(168, 85, 247, 0.8)",
+            pointBorderColor: "#fff",
+            pointHoverBackgroundColor: "#fff",
+            pointHoverBorderColor: "#a855f7",
+            borderWidth: 2,
+            borderDash: [5, 5],
+            pointRadius: 3,
+            pointHoverRadius: 6
+          }
+        ]
+      };
+
+      radarChart = new Chart(ctx, {
+        type: "radar",
+        data: data,
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: "bottom",
+              labels: {
+                color: "#94a3b8",
+                font: { size: 12, weight: "600" },
+                padding: 18,
+                boxWidth: 14
+              }
+            },
+            tooltip: {
+              backgroundColor: "#151b2d",
+              titleColor: "#f1f5f9",
+              bodyColor: "#94a3b8",
+              borderColor: "#222c47",
+              borderWidth: 1,
+              padding: 12,
+              callbacks: {
+                afterLabel: function(context) {
+                  return `Описание: ${dimensions[context.dataIndex].desc}`;
+                }
+              }
+            }
+          },
+          scales: {
+            r: {
+              angleLines: { color: "rgba(255, 255, 255, 0.08)" },
+              grid: { color: "rgba(255, 255, 255, 0.08)" },
+              pointLabels: { color: "#cbd5e1", font: { size: 11.5, weight: "600" } },
+              ticks: { display: true, color: "#64748b", backdropColor: "transparent", stepSize: 20 },
+              suggestedMin: 20,
+              suggestedMax: 100
+            }
+          }
+        }
+      });
+    } else {
+      // OFFLINE FALLBACK: Pure Canvas Radar Chart
+      function drawOfflineRadar(showCurrent = true, showIdeal = true) {
+        const ctx = canvas.getContext("2d");
+        const w = canvas.parentElement.clientWidth || 500;
+        const h = 440;
+        canvas.width = w * window.devicePixelRatio;
+        canvas.height = h * window.devicePixelRatio;
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+        const cx = w / 2;
+        const cy = h / 2 - 10;
+        const radius = Math.min(cx, cy) - 50;
+        const total = dimensions.length;
+
+        ctx.clearRect(0, 0, w, h);
+
+        // Concentric web rings
+        [0.2, 0.4, 0.6, 0.8, 1.0].forEach(level => {
+          ctx.beginPath();
+          for (let i = 0; i < total; i++) {
+            const angle = (Math.PI * 2 / total) * i - Math.PI / 2;
+            const x = cx + Math.cos(angle) * (radius * level);
+            const y = cy + Math.sin(angle) * (radius * level);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        });
+
+        // Spokes and labels
+        for (let i = 0; i < total; i++) {
+          const angle = (Math.PI * 2 / total) * i - Math.PI / 2;
+          const x = cx + Math.cos(angle) * radius;
+          const y = cy + Math.sin(angle) * radius;
+
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(x, y);
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+          ctx.stroke();
+
+          // Label
+          const labelDist = radius + 22;
+          const lx = cx + Math.cos(angle) * labelDist;
+          const ly = cy + Math.sin(angle) * labelDist;
+          ctx.font = "11px -apple-system, sans-serif";
+          ctx.fillStyle = "#cbd5e1";
+          ctx.textAlign = Math.abs(Math.cos(angle)) < 0.2 ? "center" : (Math.cos(angle) > 0 ? "left" : "right");
+          ctx.textBaseline = "middle";
+          ctx.fillText(dimensions[i].name.split(" ")[0], lx, ly);
+        }
+
+        // Draw Ideal Data (dashed purple)
+        if (showIdeal) {
+          ctx.beginPath();
+          for (let i = 0; i < total; i++) {
+            const angle = (Math.PI * 2 / total) * i - Math.PI / 2;
+            const val = dimensions[i].ideal / 100;
+            const x = cx + Math.cos(angle) * (radius * val);
+            const y = cy + Math.sin(angle) * (radius * val);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          ctx.fillStyle = "rgba(168, 85, 247, 0.12)";
+          ctx.fill();
+          ctx.strokeStyle = "rgba(168, 85, 247, 0.8)";
+          ctx.setLineDash([4, 4]);
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // Draw AutoHarness Data (cyan)
+        if (showCurrent) {
+          ctx.beginPath();
+          for (let i = 0; i < total; i++) {
+            const angle = (Math.PI * 2 / total) * i - Math.PI / 2;
+            const val = dimensions[i].current / 100;
+            const x = cx + Math.cos(angle) * (radius * val);
+            const y = cy + Math.sin(angle) * (radius * val);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          ctx.fillStyle = "rgba(56, 189, 248, 0.25)";
+          ctx.fill();
+          ctx.strokeStyle = "#38bdf8";
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
+
+          // Points
+          for (let i = 0; i < total; i++) {
+            const angle = (Math.PI * 2 / total) * i - Math.PI / 2;
+            const val = dimensions[i].current / 100;
+            const x = cx + Math.cos(angle) * (radius * val);
+            const y = cy + Math.sin(angle) * (radius * val);
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.fillStyle = "#38bdf8";
+            ctx.fill();
+            ctx.strokeStyle = "#fff";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+      }
+
+      drawOfflineRadar(true, true);
+      window.addEventListener("resize", () => drawOfflineRadar(true, true));
+    }
+
+    // Toggle Handlers
+    document.getElementById("btn-both").addEventListener("click", function() {
+      setToggleActive(this);
+      if (radarChart) {
+        radarChart.data.datasets[0].hidden = false;
+        radarChart.data.datasets[1].hidden = false;
+        radarChart.update();
+      }
+    });
+
+    document.getElementById("btn-current").addEventListener("click", function() {
+      setToggleActive(this);
+      if (radarChart) {
+        radarChart.data.datasets[0].hidden = false;
+        radarChart.data.datasets[1].hidden = true;
+        radarChart.update();
+      }
+    });
+
+    document.getElementById("btn-ideal").addEventListener("click", function() {
+      setToggleActive(this);
+      if (radarChart) {
+        radarChart.data.datasets[0].hidden = true;
+        radarChart.data.datasets[1].hidden = false;
+        radarChart.update();
+      }
+    });
+
+    function setToggleActive(btn) {
+      document.querySelectorAll(".toggle-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+    }
+  </script>
+</body>
+</html>

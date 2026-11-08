@@ -1653,6 +1653,49 @@ def gateway_approve(args, project) -> int:
     return 0
 
 
+def cmd_memory(args, project, catalog) -> int:
+    from autoharness import memory
+    if args.action == "index":
+        counts = memory.index_project_memory(project.root)
+        out({"status": "ok", "indexed": counts, "next": "Memory indexed in .autoharness/memory.db."})
+        return 0
+    elif args.action == "search":
+        con = memory.get_memory_db(project.root)
+        try:
+            results = memory.search_memory(con, args.query, kind=args.kind, limit=args.limit)
+        finally:
+            con.close()
+        out({"status": "ok", "query": args.query, "kind": args.kind, "matches_count": len(results), "results": results})
+        return 0
+    else:  # status
+        con = memory.get_memory_db(project.root)
+        try:
+            cur = con.cursor()
+            rows = cur.execute("SELECT kind, count(*) as cnt FROM memory_docs GROUP BY kind").fetchall()
+            by_kind = {r["kind"]: r["cnt"] for r in rows}
+            total = sum(by_kind.values())
+        finally:
+            con.close()
+        out({"status": "ok", "database": str(project.root / ".autoharness" / "memory.db"), "total_docs": total, "by_kind": by_kind})
+        return 0
+
+
+def cmd_codemap(args, project, catalog) -> int:
+    from autoharness import codemap
+    target = (project.root / args.path) if args.path else project.root
+    cmap = codemap.generate_codemap(target)
+    if args.query:
+        matches = codemap.search_codemap(cmap, args.query)
+        out({"status": "ok", "query": args.query, "matches_count": len(matches), "matches": matches})
+        return 0
+    if args.json:
+        out({"status": "ok", "codemap": cmap})
+        return 0
+    tree_text = codemap.format_codemap_tree(cmap)
+    print(tree_text)
+    return 0
+
+
 def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
     """The lock entry for `name` from the active task, else from kept.json, and the task it belongs to."""
     active = project.task() if project.active_id() else None
@@ -3237,6 +3280,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--settings", help="explicit settings file (agy: hooks.json)")
     s.add_argument("--remove", action="store_true", help="take the hook out again")
     s = sub.add_parser("agents", help="supported agents and where they keep MCP servers and skills")
+    s = sub.add_parser("memory", help="in-process SQLite FTS5 persistent memory with BM25 ranking")
+    s.add_argument("action", choices=["search", "index", "status"])
+    s.add_argument("query", nargs="?", default="", help="search term")
+    s.add_argument("--kind", choices=["all", "ruling", "lesson", "review", "followup"], default="all")
+    s.add_argument("--limit", type=int, default=5)
+    s = sub.add_parser("codemap", help="AST Symbol Map and structural code index")
+    s.add_argument("path", nargs="?", default=".", help="file or directory path")
+    s.add_argument("--query", "-q", help="search for class, method, or function symbols")
+    s.add_argument("--json", action="store_true", help="output full structured JSON")
     return p
 
 
@@ -3246,7 +3298,8 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "recipe": cmd_recipe, "install-skill": cmd_install_skill, "agents": cmd_agents,
             "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief,
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
-            "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim}
+            "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
+            "memory": cmd_memory, "codemap": cmd_codemap}
 
 
 def main(argv: list[str] | None = None) -> int:

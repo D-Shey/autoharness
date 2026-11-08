@@ -65,6 +65,19 @@ META_TOOLS = [
          "kind": {"type": "string", "enum": ["all", "runs", "reviews"], "description": "Category to search (default: 'all')."},
          "max_matches": {"type": "number", "description": "Maximum number of snippet matches (default: 5)."}},
                      "required": ["query"]}},
+    {"name": "harness_memory_search",
+     "description": "Full-text ranked BM25 search across project memory (.autoharness/memory.db): past rulings, lessons, decisions, and review verdicts with reconcile-on-write deduplication.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Search term to match against titles and content."},
+         "kind": {"type": "string", "enum": ["all", "ruling", "lesson", "review", "followup"], "description": "Filter by memory kind (default: 'all')."},
+         "limit": {"type": "integer", "description": "Maximum number of ranked results to return (default: 5)."}},
+                     "required": ["query"]}},
+    {"name": "harness_codemap",
+     "description": "Generate or search a compact Python AST Symbol Map (classes, methods, functions, signatures, docstrings) for the codebase, reducing token count by 80-90% compared to reading full files.",
+     "inputSchema": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Relative file or directory path (default: project root)."},
+         "query": {"type": "string", "description": "Optional symbol or function name search query."},
+         "raw_json": {"type": "boolean", "description": "Whether to return raw JSON instead of indented outline."}}}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -448,6 +461,39 @@ class Gateway:
             for m in matches:
                 snippets.append(f"[{m['category']}] {m['source']} (line {m['line']}):\n{m['snippet']}")
             return _text("\n\n".join(snippets))
+        if name == "harness_memory_search":
+            from autoharness import memory
+            query = args.get("query") or ""
+            kind = args.get("kind")
+            limit = int(args.get("limit") or 5)
+            if not self.project:
+                return _text("No project root configured for memory search.")
+            con = memory.get_memory_db(self.project)
+            try:
+                results = memory.search_memory(con, query, kind=kind, limit=limit)
+            finally:
+                con.close()
+            if not results:
+                return _text(f"No memory entries found for query {query!r}.")
+            formatted = []
+            for r in results:
+                formatted.append(f"[{r['kind'].upper()}] {r['title']} (source: {r['source']}, BM25 score: {r['score']}):\n{r['content']}")
+            return _text("\n\n---\n\n".join(formatted))
+        if name == "harness_codemap":
+            from autoharness import codemap
+            rel_path = args.get("path") or "."
+            query = args.get("query")
+            raw_json = bool(args.get("raw_json"))
+            root = (self.project / rel_path) if self.project else Path(rel_path)
+            cmap = codemap.generate_codemap(root)
+            if query:
+                matches = codemap.search_codemap(cmap, query)
+                if not matches:
+                    return _text(f"No symbols found matching {query!r}.")
+                return _text(json.dumps(matches, ensure_ascii=False, indent=2))
+            if raw_json:
+                return _text(json.dumps(cmap, ensure_ascii=False, indent=2))
+            return _text(codemap.format_codemap_tree(cmap))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

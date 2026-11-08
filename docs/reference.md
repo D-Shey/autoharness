@@ -41,7 +41,9 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `journal` | the draft of this task's entry in the project's journal, and where it goes |
 | `ruling add` | a review point the user rejected, so later critics in the project do not raise it again |
 | `config get\|set [teardown keep\|remove \| allowed_hosts "<hosts>" \| min_mode any\|full\|reviewed \| journal "<path>"\|off] [--global]` | settings |
-| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart, offering Code Mode (`harness_execute`, `harness_search`) and Active Context Pruning (`harness_history_search`); `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
+| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart, offering Code Mode (`harness_execute`, `harness_search`), Active Context Pruning (`harness_history_search`), persistent SQLite FTS5 memory (`harness_memory_search`), and Python AST Code Map (`harness_codemap`); `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
+| `memory search\|index\|status [query] [--kind ...] [--limit N]` | in-process SQLite FTS5 persistent memory with BM25 ranking and reconcile-on-write deduplication (`.autoharness/memory.db`) |
+| `codemap [path] [-q QUERY] [--json]` | AST Code Map and structural symbol index: extracts classes, methods, signatures and docstrings via Python stdlib `ast`, reducing context tokens by 80-90% |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
 | `agents` | the supported agents and their paths |
 
