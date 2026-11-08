@@ -69,3 +69,8 @@ def warning(found: dict, kind: str, name: str) -> list[str]:
         return []
     said = "; ".join(f"{p['action']} of `{p['name']}` in task {p['task']}: {p['reason']}" for p in past)
     return [f"an earlier task turned this down ({said}): check that the reason does not apply here"]
+
+
+# --- Active Context Pruning and History Search re-exports ---
+from autoharness.context_pruning import fold_reviews, format_folded_context, search_task_history  # noqa: E402
+

@@ -1457,7 +1457,7 @@ def test_gateway_serve_end_to_end(project):
         send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
         assert reply(1)["result"]["serverInfo"]["name"] == "autoharness"
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        assert tool_names(2) == ["harness_tools", "harness_call", "harness_search", "harness_execute"]
+        assert tool_names(2) == ["harness_tools", "harness_call", "harness_search", "harness_execute", "harness_history_search"]
 
         approved_servers(project, {"fake": FAKE_CFG})
         rid = 100

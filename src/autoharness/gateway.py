@@ -57,6 +57,14 @@ META_TOOLS = [
          "code": {"type": "string", "description": "The JavaScript code to execute. Use `return ...` to return data."},
          "timeout": {"type": "number", "description": "Execution timeout in seconds (default: 30)."}},
                      "required": ["code"]}},
+    {"name": "harness_history_search",
+     "description": "Search across task execution logs (`runs`), reviewer answers (`reviews`), and events on disk "
+                    "without loading entire log files into model context. Implements active context retrieval.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Search term matching log output, test names, or review findings."},
+         "kind": {"type": "string", "enum": ["all", "runs", "reviews"], "description": "Category to search (default: 'all')."},
+         "max_matches": {"type": "number", "description": "Maximum number of snippet matches (default: 5)."}},
+                     "required": ["query"]}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -419,6 +427,27 @@ class Gateway:
                 logs_repr = "\n".join(res["logs"])
                 text_repr = f"--- Logs ---\n{logs_repr}\n--- Result ---\n{text_repr}"
             return _text(text_repr)
+        if name == "harness_history_search":
+            from autoharness.context_pruning import search_task_history
+            query = args.get("query") or ""
+            kind = args.get("kind") or "all"
+            max_matches = int(args.get("max_matches") or 5)
+            task_dir = None
+            if self.project:
+                tasks_dir = self.project / ".autoharness" / "tasks"
+                if tasks_dir.is_dir():
+                    task_dirs = sorted([d for d in tasks_dir.iterdir() if d.is_dir()])
+                    if task_dirs:
+                        task_dir = task_dirs[-1]
+            if not task_dir:
+                return _text("No active task history found on disk.")
+            matches = search_task_history(task_dir, query=query, kind=kind, max_matches=max_matches)
+            if not matches:
+                return _text(f"No matches found for query {query!r} in {kind} logs.")
+            snippets = []
+            for m in matches:
+                snippets.append(f"[{m['category']}] {m['source']} (line {m['line']}):\n{m['snippet']}")
+            return _text("\n\n".join(snippets))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)
