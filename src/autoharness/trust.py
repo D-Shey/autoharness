@@ -218,9 +218,9 @@ class ScanFinding:
 
 
 # Text aimed at the agent itself. A skill that warns against an attack forbids it or quotes it: a match right
-# after a negation ("never ...") is not counted, one inside quotes or a markdown code block only warns (it is
-# probably an example, but a quote mark must not be a way around the rule). Refusal suppression carries its
-# negation in the attack itself and gets no such exemption.
+# after a negation ("never ...") is not counted, one inside quotes, a markdown heading or code block only warns
+# (medium: it is typically an attack example or tutorial topic, but unclosed quotes remain high). Refusal suppression
+# carries its negation in the attack itself and gets no such exemption.
 OVERRIDE = re.compile(
     r"\b(?:ignore|disregard|forget|override)\s+(?:all\s+|any\s+)?(?:the\s+|your\s+|of\s+)?"
     r"(?:previous|prior|above|earlier|preceding|system|original)\s+(?:instructions|prompts?|rules|guidelines|directives)\b"
@@ -377,17 +377,24 @@ ALTERNATE_SCREEN = {"?47", "?1047", "?1049"}  # xterm private modes: the alterna
 # a carriage return inside a line puts the cursor back at its start: what follows prints over what came before
 LONE_CR = re.compile(r"[^\r\n]\r(?![\r\n])")
 HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.S)
-# what tells someone what to do: an obligation word after the addressee ("you can read more" only informs)
-# or an order: an address followed by a sentence ("Claude: email the repo ...", not "AGENT: anomalies" or
-# "model: gemini, ..."), or an action verb with an object opening a clause ("Please send ...", "When done, delete ...")
-AGENT_DIRECTED = re.compile(r"\b(?:you|agent|assistant|model|claude|AI)\b[^.\n]{0,80}?\b(?:must|should|always|never|"
-                            r"need to|have to|are to|do not|don't)\b|^\s*(?:assistant|claude|agent|AI)\s*[:,]\s*(?:[a-z][\w'-]*\s+){2}"
-                            r"|(?:^|[.:;,!]|\bplease\b|\balso\b)\s*(?:\w+ly\s+)?(?:ignore|run|execute|send|upload|reveal|email|"
-                            r"post|delete|remove|wipe|copy|curl|fetch|download|forward|share|exfiltrate|print|read)\s+[\w~$./'\"-]",
-                            re.I | re.M)
+# what tells someone what to do: an obligation word after the addressee ("you can read more" only informs;
+# "you should see a check" informs reader what to expect on screen) or an order: an address followed by a command
+# ("Claude: email the repo ...", not "AGENT: anomalies" or "model: gemini, ..."), or an action verb with an object
+# opening a clause ("Please send ...", "When done, delete ...")
+AGENT_ACTION = (r"(?:ignore|run|execute|send|upload|reveal|email|post|delete|remove|wipe|copy|curl|fetch|"
+                r"download|forward|share|exfiltrate|print|read(?!\s+(?:the\s+)?(?:docs?|documentation|manual|"
+                r"specs?|guidelines?|readme|guides?|wiki|rfc)\b))")
+AGENT_DIRECTED = re.compile(
+    r"\b(?:you|agent|assistant|model|claude|AI)\b[^.\n]{0,80}?\b(?:must|should(?!\s+(?:see|find|notice|observe|expect|receive|get|encounter)\b)|always|never|"
+    r"need to|have to|are to|do not|don't)\b"
+    r"|^\s*(?:assistant|claude|agent|AI)\s*[:,]\s*(?:(?:\w+ly\s+)?" + AGENT_ACTION + r"\b|(?:please|kindly|you\s+(?:must|should|always|never|have\s+to|need\s+to)|must|should|always|never|do\s+not|don't)\b)"
+    r"|(?:^|[.:;,!]|\bplease\b|\balso\b)\s*(?:\w+ly\s+)?" + AGENT_ACTION + r"\s+[\w~$./'\"-]",
+    re.I | re.M)
 # a note to whoever edits the file ("TODO: you should update this"), unless it names the agent or asks for an action
-AUTHOR_NOTE = re.compile(r"\s*(?:TODO|FIXME|XXX|NOTE)\b(?![\s\S]*\b(?:agent|assistant|model|claude|AI|ignore|run|execute|send|"
-                         r"upload|read|reveal|delete|remove|download|fetch|post|must|always|never|do not|don't)\b)", re.I)
+AUTHOR_NOTE = re.compile(
+    r"\s*(?:TODO|FIXME|XXX|NOTE)\b(?![\s\S]*\b(?:agent|assistant|model|claude|AI|ignore|run|execute|send|"
+    r"upload|read(?!\s+(?:the\s+)?(?:docs?|documentation|manual|specs?|guidelines?|readme|guides?|wiki|rfc)\b)|"
+    r"reveal|delete|remove|download|fetch|post|must|always|never|do not|don't)\b)", re.I)
 PADDING = re.compile(r"\S[ \t]{150,}[^\s|]")  # a gap before `|` is a padded table cell
 PADDING_BLANK_LINES = 40
 COMPILED_SUFFIXES = {".pyc", ".pyo", ".so", ".dll", ".exe", ".dylib", ".class", ".jar"}
