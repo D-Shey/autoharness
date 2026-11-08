@@ -1786,6 +1786,54 @@ def cmd_swarm(args, project, catalog) -> int:
     return 1
 
 
+def cmd_drive(args, project, catalog) -> int:
+    from autoharness import drive
+    action = getattr(args, "action", "run") or "run"
+    if action == "status":
+        state = drive.load_drive_state(project.root)
+        queue = drive.get_drive_queue(project.root)
+        out({
+            "status": "ok",
+            "drive_status": state.get("status", "idle"),
+            "session_id": state.get("session_id"),
+            "current_task": state.get("current_task"),
+            "completed_count": len(state.get("completed", [])),
+            "failed_count": len(state.get("failed", [])),
+            "open_queue_count": len(queue),
+            "open_queue": queue,
+            "state": state,
+        })
+        return 0
+    if action == "queue":
+        queue = drive.get_drive_queue(project.root)
+        out({
+            "status": "ok",
+            "total_open": len(queue),
+            "queue": queue,
+        })
+        return 0
+    if action == "rollback":
+        ok, msg = drive.rollback_changes(project.root)
+        out({"status": "ok" if ok else "error", "message": msg})
+        return 0 if ok else 1
+    if action == "run":
+        max_tasks = getattr(args, "max_tasks", 3) or 3
+        dry_run = getattr(args, "dry_run", False)
+        followup_id = getattr(args, "followup", None)
+        test_cmd = getattr(args, "test_cmd", None)
+        res = drive.run_drive_loop(
+            project.root,
+            max_tasks=max_tasks,
+            dry_run=dry_run,
+            followup_id=followup_id,
+            test_command=test_cmd,
+        )
+        out(res)
+        return 0 if res.get("status") != "error" else 1
+    out({"status": "error", "error": f"Unknown drive action: {action}"})
+    return 1
+
+
 def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
     """The lock entry for `name` from the active task, else from kept.json, and the task it belongs to."""
     active = project.task() if project.active_id() else None
@@ -3386,6 +3434,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--title", help="title for the swarm plan (init)")
     s.add_argument("--file", help="tasks JSON file to initialize from (init)")
     s.add_argument("--parallel", type=int, default=4, help="maximum concurrent worker tasks (run)")
+    s = sub.add_parser("drive", help="Continuous autonomy self-driving loop for backlog resolution")
+    s.add_argument("action", nargs="?", choices=["run", "status", "queue", "rollback"], default="run", help="drive action")
+    s.add_argument("--max-tasks", type=int, default=3, help="maximum followups to process in this run")
+    s.add_argument("--followup", type=int, help="specific followup ID to execute")
+    s.add_argument("--dry-run", action="store_true", help="plan without executing modifications")
+    s.add_argument("--test-cmd", help="custom regression test command to verify before completing")
     return p
 
 
@@ -3396,7 +3450,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief,
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
-            "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm}
+            "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive}
 
 
 def main(argv: list[str] | None = None) -> int:

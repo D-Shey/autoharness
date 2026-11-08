@@ -88,6 +88,16 @@ META_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "plan_id": {"type": "string", "description": "Swarm plan ID or path to execute (default: most recent plan)."},
          "parallel": {"type": "integer", "description": "Maximum concurrent tasks (default: 4)."}}}},
+    {"name": "harness_drive_status",
+     "description": "Inspect continuous autonomy backlog queue and current self-driving session status.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "harness_drive_run",
+     "description": "Trigger an autonomous self-driving loop run over open followups with regression rollback protection.",
+     "inputSchema": {"type": "object", "properties": {
+         "max_tasks": {"type": "integer", "description": "Maximum followups to resolve in this session (default: 3)."},
+         "dry_run": {"type": "boolean", "description": "Whether to return planned tasks without modifying code."},
+         "followup_id": {"type": "integer", "description": "Optional specific followup ID to execute."},
+         "test_command": {"type": "string", "description": "Custom regression test command (e.g. pytest tests/test_drive.py)."}}}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -548,6 +558,33 @@ class Gateway:
                 return _text(json.dumps(summary, ensure_ascii=False, indent=2))
             except Exception as e:
                 return _text(f"Swarm execution failed: {e}", error=True)
+        if name == "harness_drive_status":
+            from autoharness import drive
+            if not self.project:
+                return _text("No project root configured for drive.")
+            state = drive.load_drive_state(self.project)
+            queue = drive.get_drive_queue(self.project)
+            summary = {
+                "drive_status": state.get("status", "idle"),
+                "session_id": state.get("session_id"),
+                "open_queue_count": len(queue),
+                "completed_count": len(state.get("completed", [])),
+                "failed_count": len(state.get("failed", [])),
+                "queue": queue[:5],
+            }
+            return _text(json.dumps(summary, indent=2, ensure_ascii=False))
+        if name == "harness_drive_run":
+            from autoharness import drive
+            if not self.project:
+                return _text("No project root configured for drive.")
+            max_tasks = int(args.get("max_tasks") or 3)
+            dry_run = bool(args.get("dry_run"))
+            followup_id = args.get("followup_id")
+            if followup_id is not None:
+                followup_id = int(followup_id)
+            test_cmd = args.get("test_command")
+            res = drive.run_drive_loop(self.project, max_tasks=max_tasks, dry_run=dry_run, followup_id=followup_id, test_command=test_cmd)
+            return _text(json.dumps(res, indent=2, ensure_ascii=False))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)
