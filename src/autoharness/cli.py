@@ -516,17 +516,17 @@ def cmd_evidence(args, project, catalog):
         raise HarnessError("facts are taken from a reference, not from memory: add the reference first (`autoharness "
                            "evidence add <file> --kind reference`), then measure, crop or extract from it and add "
                            "what you took as facts")
-    if (args.action == "diff" or args.kind == "result") and not args.closeup \
-            and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
+    if (args.action == "diff" or args.kind in ("result", "component")) and not args.closeup \
+            and not any(e["kind"] in ("result", "component") for e in task.info().get("evidence", [])) \
             and (why := evidence.needs_facts(catalog, task)):
         raise HarnessError(why)
-    if (args.action == "diff" or args.kind == "result") and not args.closeup \
+    if (args.action == "diff" or args.kind in ("result", "component")) and not args.closeup \
             and (why := _unresearched_review(task)):
         raise HarnessError(why)
-    if (args.action == "diff" or args.kind == "result") \
-            and not any(e["kind"] == "result" for e in task.info().get("evidence", [])) \
+    if (args.action == "diff" or args.kind in ("result", "component")) \
+            and not any(e["kind"] in ("result", "component") for e in task.info().get("evidence", [])) \
             and (unready := task.planned_skill_problems()[0] + _skills_not_installed(project, task)):
-        raise HarnessError("prepare before the first result: the skills the brief creates hold the know-how the "
+        raise HarnessError("prepare before the first result or component: the skills the brief creates hold the know-how the "
                            "work is built on, from the sources you read. " + "; ".join(unready))
     if args.action == "diff":
         item = evidence.add_diff(task, project.root, args.base, args.note or "")
@@ -535,17 +535,22 @@ def cmd_evidence(args, project, catalog):
                      "ones. " + evidence.self_review_hint(task)})
         return 0
     if not args.file or not args.kind:
-        raise HarnessError("usage: autoharness evidence add <file> --kind reference|facts|result [--note ...]")
-    item = evidence.add(task, Path(args.file), args.kind, args.note or "", closeup=args.closeup, catalog=catalog)
+        raise HarnessError("usage: autoharness evidence add <file> --kind reference|facts|component|result [--note ...]")
+    extra = {"for": args.for_item.upper()} if getattr(args, "for_item", None) else None
+    item = evidence.add(task, Path(args.file), args.kind, args.note or "", extra=extra, closeup=args.closeup, catalog=catalog)
     first = args.kind == "result" and not any(e["kind"] == "result" and e["n"] != item["n"]
                                               for e in task.info().get("evidence", []))
+    for_tag = f" for {item['for']}" if item.get("for") else ""
     nxt = ("Study it, then take from it with a tool what the result must match (measure, crop, extract, quote; for code, exact AST definitions), "
            "save those facts to a file and `autoharness evidence add <file> --kind facts`."
            if args.kind == "reference" else
-           "Build the first version as a block-in from these facts: the layout, proportions and main structure "
-           "right, no detail or polish yet. Add it as a result and run `autoharness critic` on it before you add "
-           "any detail: a wrong base costs every round after it."
+           "Decompose before building: identify 2-4 primary isolated components or layers. "
+           "Start small: build and verify each component in isolation (record with `autoharness evidence add <file> --kind component` "
+           "and test with `autoharness verify run`). Do not attempt a monolithic full build in one pass."
            if args.kind == "facts" else
+           f"Component #{item['n']}{for_tag} recorded: verify it in isolation (`autoharness verify run ... --for {item.get('for', 'C1')}`). "
+           "Build and verify remaining components, then programmatically assemble the integrated result and record with `autoharness evidence add <file> --kind result`."
+           if args.kind == "component" else
            "This is the base: run `autoharness critic` on it now, before any detail. " + evidence.CLAIMS
            + evidence.reliability(task)
            if first else
@@ -1000,15 +1005,21 @@ def _unresearched_review(task) -> str | None:
     if any(e["kind"] == "result" and e["n"] > (last.get("result") or 0) for e in info.get("evidence", [])):
         return None  # the round after this review already has its result
     owed = []
-    if task.skills_lock() and "skill_sources" in last and not (_skill_sources(task) - set(last["skill_sources"])):
+    has_new_sources = bool(_skill_sources(task) - set(last.get("skill_sources", [])))
+    skills_edited = any(
+        (task.skills_dir / name / "SKILL.md").is_file() and
+        hashlib.sha256((task.skills_dir / name / "SKILL.md").read_bytes()).hexdigest() != task.skills_lock().get(name, {}).get("sha256")
+        for name in task.skills_lock()
+    )
+    if task.skills_lock() and "skill_sources" in last and not (has_new_sources or skills_edited):
         owed.append(
             "find out how each point is done well before fixing it. For every point your skills do not already teach "
             "(how to build that part, the technique, the known pitfalls), search for it (the web, docs, worked "
             "examples, `autoharness search skill \"<query>\"`), read the best sources and write the technique into "
             "the skill it belongs to (" + ", ".join(task.skills_lock()) + ") or a new one (`autoharness skill new`), "
-            "with the address of the page you took it from (a page, not a site's front page). The critic's words "
-            "restated as rules are not research: a skill counts as changed when it cites a source it did not cite "
-            "at the review")
+            "with the address of the page, standard, or book you took it from. The critic's words "
+            "restated as rules are not research: a skill counts as changed when it cites a new source or adds concrete technique instructions "
+            "since the review")
     refs = [e["n"] for e in info.get("evidence", []) if e["kind"] == "reference"]
     if refs and not any(e["kind"] == "facts" and e["n"] > (last.get("result") or 0)
                         for e in info.get("evidence", [])):
@@ -1023,15 +1034,18 @@ def _unresearched_review(task) -> str | None:
 
 
 SOURCE = re.compile(r"https?://[^\s/)\]>\"'`]+/[^\s)\]>\"'`]*[\w-][^\s)\]>\"'`]*")
+SPEC_CITATION = re.compile(r"\b(?:RFC|ISO|IEEE|PEP|W3C|ECMA|ANSI|NIST)[- ]\d+\b|\b(?:man\s+\w+|book:\s*[^;\n\)]+|spec:\s*[^;\n\)]+)", re.IGNORECASE)
 
 
 def _skill_sources(task) -> set[str]:
-    """The page addresses the task's skills cite (a page: a site's front page alone cites nothing)."""
+    """The page addresses or formal technical references the task's skills cite."""
     found: set[str] = set()
     for name in task.skills_lock():
         md = task.skills_dir / name / "SKILL.md"
         if md.is_file():
-            found |= {u.rstrip(".,;:") for u in SOURCE.findall(md.read_text("utf-8", errors="replace"))}
+            content = md.read_text("utf-8", errors="replace")
+            found |= {u.rstrip(".,;:") for u in SOURCE.findall(content)}
+            found |= {c.strip(".,;:").lower() for c in SPEC_CITATION.findall(content)}
     return found
 
 
@@ -1198,6 +1212,7 @@ def cmd_brief(args, project, catalog):
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
                       | ({"review": args.review} if args.review else {})
                       | ({"fidelity": args.fidelity} if args.fidelity else {})
+                      | ({"components": args.components} if getattr(args, "components", None) else {})
                       | ({runs.PRESERVE: args.preserve} if args.preserve else {}))
     task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
@@ -1222,11 +1237,14 @@ def cmd_brief(args, project, catalog):
     if args.preserve:
         owed += (" The brief preserves existing behaviour: before teardown, run the regression check with "
                  f"`autoharness verify run \"<command>\" --for {runs.PRESERVE}` on the final code; it must pass.")
+    decomp_hint = (" Decompose first: build and verify each planned component (C items) in isolation "
+                   "(`autoharness evidence add <file> --kind component`, `autoharness verify run ... --for C1`) "
+                   "before full assembly. Do not attempt a monolithic build in one pass." if getattr(args, "components", None) else "")
     items = runs.brief_items(task.info()["brief"])
     out({"status": "ok", "task_id": task.id, "planned_skills": planned, "warnings": warnings,
          "brief_items": [f"{i['id']}: {i['text']}" for i in items],
          "next": "Install what you decided to take and get the missing inputs first. Then work by the method you "
-                 "found, step by step: the critic checks the result against it." + owed + create
+                 "found, step by step: the critic checks the result against it." + decomp_hint + owed + create
                  + " Then do the work and verify it the way the brief says: a check that is a command (tests, a "
                    "build, a script) runs through `autoharness verify run \"<command>\" --for <brief item, e.g. B1>`, "
                    "so it counts as checked, not as reported. Teardown refuses while a planned "
@@ -2688,6 +2706,13 @@ def _agy_prompt(transcript: str | None) -> str:
                     content = step.get("content", "")
                     m = AGY_USER_REQUEST.search(content)
                     request = m.group(1) if m else content
+                elif step.get("type") in ("SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE"):
+                    content = step.get("content", "")
+                    m = re.search(r"content=(.+)$", content, re.DOTALL)
+                    if m:
+                        msg = m.group(1).strip()
+                        if not request or "prompts" in msg or "critic" in msg or "vet" in msg or "arbiter" in msg:
+                            request = msg
     except OSError:
         pass
     return request
@@ -2774,12 +2799,19 @@ def cmd_hook(args, project, catalog):
             return 0   # the reviewer `critic --run` started for its pending prompt: read-only, no task of its own
         if active and sid and sid != task_info.get("owner"):
             # a subagent the author gave a pending prompt to: it reviews the task, it does not own or take it
-            told = str(data.get("prompt", "")) if event == "UserPromptSubmit" else ""
             if saved_state.get("state") == "reviewer" and saved_state.get("reviews") in _pending_answers(task_info):
                 return 0
+            told = str(data.get("prompt", "")) if event == "UserPromptSubmit" else ""
+            if not told and data.get("transcriptPath"):
+                told = _agy_prompt(data.get("transcriptPath"))
             if told and (reviews := _reviewer_prompt(told, active, task_info)):
                 set_session_state(sid, state="reviewer", reviews=reviews, prompt=told[:PROMPT_KEPT])
                 return 0
+        is_reviewer = bool(active and sid and sid != task_info.get("owner")
+                           and saved_state.get("state") == "reviewer"
+                           and saved_state.get("reviews") in _pending_answers(task_info))
+        if is_reviewer:
+            return 0
         owner = task_info.get("owner")
         # the task belongs to another session: this one is told about it and stays gated until it claims it
         foreign = bool(active and sid and owner and owner != sid and task_info.get("status") == "active")
@@ -3004,8 +3036,16 @@ def _stop_gate(data: dict, sid: str, state: str | None, active: str | None, task
         return 0
     if not owner and project and idle_hours(Task(project, active)) >= STALE_HOURS:
         return 0
-    mark = hashlib.sha256(json.dumps(task_info, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     saved = session_state(sid)
+    user_prompt = str(saved.get("prompt") or "").strip().lower()
+    # Conversational or pause signals from the user: do not block dialogue turns
+    if any(w in user_prompt for w in ("стоп", "stop", "пауза", "pause", "подожди", "wait", "?", "что скажешь", "как думаешь", "почему", "зачем", "как")):
+        return 0
+    # If the task's latest state/review explicitly tells the agent to ask or wait for the user
+    reviews = task_info.get("reviews", [])
+    if reviews and any(phrase in str(reviews[-1]).lower() for phrase in ("ask the user", "before they answer")):
+        return 0
+    mark = hashlib.sha256(json.dumps(task_info, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     if saved.get("stop_seen") == mark:
         return 0
     set_session_state(sid, **(saved | {"stop_seen": mark}))
@@ -3347,10 +3387,14 @@ def cmd_verify(args, project, catalog):
         changed = runs.changed_after_failing(task.info().get("runs", [])).get(item["n"])
         if changed and item["passed"]:
             item["check_changed"] = changed
+        comp_hint = ""
+        if item["passed"] and purpose and purpose.startswith("C"):
+            comp_hint = f" Component {purpose} verified (exit 0): record with `autoharness evidence add <file> --kind component --for {purpose}`."
         out({"status": "passed" if item["passed"] else "failed", "run": item,
              "next": (f"The check {changed}: teardown shows this; tell the user why the check changed. "
                       if changed and item["passed"] else "")
-                     + ("Recorded as checked on the current code. An edit to the code makes this run stale: run it "
+                     + comp_hint
+                     + (" Recorded as checked on the current code. An edit to the code makes this run stale: run it "
                         "again after your last change." if item["passed"] else
                         f"The check failed (exit {item['exit']}); the whole output is in {item['log']}. Fix the "
                         "cause and run it again.")})
@@ -3568,6 +3612,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--kind", choices=list(evidence.KINDS))
     s.add_argument("--base", default="HEAD", help="for `diff`: the revision to compare the working tree with")
     s.add_argument("--note", help="what it shows; reviewers see it as your label, not as a finding")
+    s.add_argument("--for", dest="for_item", help="the component or brief item this evidence corresponds to (e.g. C1, C2, B1)")
     s.add_argument("--closeup", "--part", dest="closeup", action="store_true",
                    help="with --kind result: a close-up or another part of the latest whole result (a crop, a "
                         "log beside the diff), not a new version of it")
@@ -3625,6 +3670,8 @@ def build_parser() -> argparse.ArgumentParser:
                        ("--candidates", "each discovered skill/MCP worth considering: take or skip, and why")]:
         s.add_argument(flag, required=flag != "--verify", help=what)
     s.add_argument("--fidelity", help="the level to judge the result at, e.g. `stylised poster, not photographic`")
+    s.add_argument("--components", default="",
+                   help="decompose into 2-4 primary isolated components: `<name>: <what it does / how to verify alone>; ...` or `none: <why>`")
     s.add_argument("--review", choices=list(evidence.REVIEWS),
                    help="require an independent critic for this task even if its capabilities do not; pair: "
                         "each round also a code-quality reviewer, both run again after every fix")

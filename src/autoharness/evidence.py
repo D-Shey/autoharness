@@ -31,7 +31,7 @@ from autoharness.env import HarnessError, Task
 
 # facts: what the result must match, taken from a reference with a tool (measured, cropped, extracted, quoted),
 # written down before the first result so the work is built from them, not from memory
-KINDS = ("reference", "facts", "result")
+KINDS = ("reference", "facts", "component", "result")
 # worst difference still fixable in a review; the task may stop once it is at most "minor"
 SEVERITIES = ("none", "minor", "major", "blocker")
 BLOCKING = ("major", "blocker")
@@ -190,8 +190,8 @@ def small_reference(task: Task) -> tuple[dict, dict] | None:
 
 
 def wholes(items: list[dict]) -> list[dict]:
-    """The results that are whole: every result that is not a close-up or a part of another."""
-    return [e for e in items if e["kind"] == "result" and not e.get("closeup")]
+    """The results or components that are whole: every result or component that is not a close-up or a part of another."""
+    return [e for e in items if e["kind"] in ("result", "component") and not e.get("closeup")]
 
 
 def version_of(e: dict) -> str:
@@ -211,8 +211,8 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
     if not path.is_file():
         raise HarnessError(f"no such file: {path}")
     items = task.info().get("evidence", [])
-    if closeup and kind != "result":
-        raise HarnessError("--closeup marks a close-up or part of a result: use it with --kind result")
+    if closeup and kind not in ("result", "component"):
+        raise HarnessError("--closeup marks a close-up or part of a result or component: use it with --kind result or --kind component")
     media = media_of(path.name)
     if kind == "reference":
         from autoharness.catalog import Catalog
@@ -243,11 +243,11 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
     if size:
         item["size"] = list(size)
     # a round is one whole result and its close-ups or parts; with images the author may not say which is which
-    if kind == "result" and (closeup or (not item.get("proof") and _is_closeup(size, whole))):
+    if kind in ("result", "component") and (closeup or (not item.get("proof") and _is_closeup(size, whole))):
         item["closeup"] = whole["n"]
     # a result byte for byte the same as a reference may be the reference handed in as the result:
     # recorded, so the author is warned and the critic is told, not refused (a faithful copy can be)
-    other = "reference" if kind == "result" else "result"
+    other = "reference" if kind in ("result", "component") else "result"
     twin = next((e for e in items if e["kind"] == other and e.get("sha256") == item["sha256"]), None)
     if twin:
         item["same_as"] = twin["n"]
@@ -969,6 +969,9 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
     facts_text = "" if not facts else (
         "Facts the author took from the reference (check a few of them against the reference yourself: a wrong "
         "fact is a difference of its own). Check the result against each fact:\n" + listing(facts) + "\n")
+    components = [e for e in info.get("evidence", []) if e["kind"] == "component"]
+    components_text = "" if not components else (
+        "Components built and verified in isolation before assembly:\n" + listing(components) + "\n")
     first_round = bool(refs and not any(r["by"] == "critic" for r in info.get("reviews", [])))
     if first_round:
         facts_text += ("This is the first critic round: judge the layout, proportions and main structure against "
@@ -1137,7 +1140,7 @@ shows it among other things (search results, a gallery, a collage, thumbnails, a
 either: the thing itself is open, whole and at its own size. If it is not
 the original, or it does not show what the task describes, say so as your first difference, a blocker:
 work matched to the wrong reference fails the task however close it is.
-Result to judge{whole}:
+{components_text}Result to judge{whole}:
 {listing(results)}
 {LABELS}
 The files that make the result (source, markup, code) are in the project directory: {task.project.root}

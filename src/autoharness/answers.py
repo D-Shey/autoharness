@@ -34,6 +34,8 @@ COVERAGE = re.compile(HEADING % "brief coverage", re.MULTILINE | re.IGNORECASE)
 UNREQUESTED = re.compile(HEADING % "unrequested", re.MULTILINE | re.IGNORECASE)
 COMPARISON = re.compile(HEADING % "comparison", re.MULTILINE | re.IGNORECASE)
 RUNS = re.compile(HEADING % "runs", re.MULTILINE | re.IGNORECASE)
+DIFFERENCES = re.compile(HEADING % r"(?:differences|issues|findings|problems)", re.MULTILINE | re.IGNORECASE)
+REF_CHECK = re.compile(HEADING % r"reference(?:\s+check)?", re.MULTILINE | re.IGNORECASE)
 RUN_LINE = re.compile(r"^\W*#?(\d+)\W+(checks|does not check)\b", re.MULTILINE | re.IGNORECASE)
 COVERAGE_LINE = re.compile(r"^\W*([BPE]\d+)\W+(met|partial|missing|contradicts)\b", re.MULTILINE | re.IGNORECASE)
 # "1. x", "1) x", "### 1. x", "**1.** x", "**1. x**"
@@ -108,18 +110,27 @@ def read(task: Task, path: Path, kind: str, subject: str) -> dict:
     body = body[:VERDICT_LINE.search(body).start()] if VERDICT_LINE.search(body) else body
     found = sorted((m.start(), m.end(), name) for name, rx in
                    (("previous", PREVIOUS), ("coverage", COVERAGE), ("unrequested", UNREQUESTED),
-                    ("comparison", COMPARISON), ("runs", RUNS))
+                    ("comparison", COMPARISON), ("runs", RUNS), ("differences", DIFFERENCES),
+                    ("ref_check", REF_CHECK))
                    if (m := rx.search(body)))
     accept_m = ACCEPT_LINE.search(body)
     sec_limit = accept_m.start() if accept_m else len(body)
     sections = {name: body[end:(found[i + 1][0] if i + 1 < len(found) else min(len(body), sec_limit))].strip()
                 for i, (_, end, name) in enumerate(found)}
     body = body[:found[0][0]] if found else body
+    parsed_items = items(sections.get("differences", "")) or items(body)
+    if not parsed_items and "runs" in sections:
+        parsed_items = items(sections["runs"])
+    diff_body = sections.get("differences") or (body if parsed_items else "")
+    if not diff_body and parsed_items:
+        diff_body = "\n".join(f"{n}. {i}" for n, i in enumerate(parsed_items, 1))
+    elif not diff_body and not parsed_items:
+        diff_body = body.strip()
     unrequested = sections.get("unrequested", "")
     if unrequested and ACCEPT_LINE.search(unrequested):
         unrequested = unrequested[:ACCEPT_LINE.search(unrequested).start()].strip()
     check, reason, closer = CHECK_LINE.findall(text), REASON_LINE.findall(text), CLOSER_LINE.findall(text)
-    return {"id": nonce, "kind": kind, "text": text, "body": body.strip(), "items": items(body),
+    return {"id": nonce, "kind": kind, "text": text, "body": diff_body.strip(), "items": parsed_items,
             "previous": sections.get("previous", ""),
             "coverage": {k.upper(): v.lower() for k, v in COVERAGE_LINE.findall(sections.get("coverage", ""))},
             "runs": {int(n): v.lower() for n, v in RUN_LINE.findall(sections.get("runs", ""))},
