@@ -19,9 +19,10 @@ from typing import Callable
 from autoharness import __version__, approvals, egress
 from autoharness.mcp_client import PROTOCOL_VERSIONS, McpError, make_client, withheld_env
 
-INSTRUCTIONS = ("Servers added with `autoharness add mcp` appear here without a restart. Call harness_tools to "
-                "see them and their tools, then harness_call(server, tool, arguments). If your client shows "
-                "tools named <server>__<tool>, you can call those directly.")
+INSTRUCTIONS = ("Servers added with `autoharness add mcp` appear here without a restart. In Code Mode, call "
+                "harness_search to find typed TypeScript signatures, and harness_execute(code) to run scripts in "
+                "an isolated sandbox. You can also call harness_tools to see raw schemas, "
+                "harness_call(server, tool, arguments), or native <server>__<tool> tools directly.")
 META_TOOLS = [
     {"name": "harness_tools",
      "description": "List the MCP servers autoharness added for this task: each server's status (running, or the "
@@ -43,6 +44,19 @@ META_TOOLS = [
          "tool": {"type": "string", "description": "Tool name on that server (not the <server>__<tool> name)."},
          "arguments": {"type": "object", "description": "The tool's arguments, per its input schema."}},
                      "required": ["server", "tool"]}},
+    {"name": "harness_search",
+     "description": "Search available MCP servers and tools in Code Mode. Returns compact TypeScript definitions "
+                    "(.d.ts) describing matching tool signatures and types. Omit `query` or pass '*' to return all.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Search term matching server, tool name, or description."}}}},
+    {"name": "harness_execute",
+     "description": "Execute JavaScript/TypeScript code in an isolated sandbox with RPC access to all added MCP "
+                    "servers via the global `mcp` object (e.g. `await mcp.server.tool(args)`). Combines chains of "
+                    "calls, loops, and data aggregation in a single step without context bloat or secret leakage.",
+     "inputSchema": {"type": "object", "properties": {
+         "code": {"type": "string", "description": "The JavaScript code to execute. Use `return ...` to return data."},
+         "timeout": {"type": "number", "description": "Execution timeout in seconds (default: 30)."}},
+                     "required": ["code"]}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -342,7 +356,20 @@ class Gateway:
             out["note"] = "no .autoharness/gateway.json found from the gateway's working directory upwards"
         return out
 
+    def _resolve_server(self, name: str | None) -> str | None:
+        if not name:
+            return None
+        with self._lock:
+            if name in self.clients or name in self.status:
+                return name
+            from autoharness.codegen import _sanitize_ident
+            for s in self.status:
+                if _sanitize_ident(s) == name:
+                    return s
+        return name
+
     def _forward(self, server: str | None, tool: str | None, arguments: dict) -> dict:
+        server = self._resolve_server(server)
         # a server added a moment ago is still starting in the background: the agent's first call waits
         # for it instead of failing, since `add` told the agent it is available now
         deadline = time.monotonic() + STARTUP_WAIT
@@ -373,6 +400,25 @@ class Gateway:
             return _text(json.dumps(self._describe(args.get("server")), ensure_ascii=False, indent=2))
         if name == "harness_call":
             return self._forward(args.get("server"), args.get("tool"), args.get("arguments") or {})
+        if name == "harness_search":
+            from autoharness import codegen
+            query = args.get("query")
+            with self._lock:
+                current_tools = {s: list(ts) for s, ts in self.tools.items()}
+            return _text(codegen.search_definitions(query, current_tools))
+        if name == "harness_execute":
+            from autoharness import sandbox
+            code = args.get("code") or ""
+            timeout = float(args.get("timeout") or 30.0)
+            res = sandbox.execute(code, forward_fn=self._forward, timeout=timeout)
+            if res.get("isError"):
+                return _text(res.get("error", "Code Mode execution failed"), error=True)
+            output = res.get("result")
+            text_repr = json.dumps(output, ensure_ascii=False, indent=2) if isinstance(output, (dict, list)) else str(output if output is not None else "undefined")
+            if res.get("logs"):
+                logs_repr = "\n".join(res["logs"])
+                text_repr = f"--- Logs ---\n{logs_repr}\n--- Result ---\n{text_repr}"
+            return _text(text_repr)
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)
