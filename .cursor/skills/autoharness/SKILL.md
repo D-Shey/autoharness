@@ -148,7 +148,7 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - `vet_required`: you do not judge the fit yourself. `autoharness vet mcp|skill <name>`, give
   its prompt unchanged to a fresh subagent, save the answer unedited to a file, record it with
   `--answer-file <file>`. No subagents at hand: `autoharness vet mcp|skill <name> --run
-  cursor|agy|claude|codex` starts the reviewer and records its answer. On `breaks`, pick another.
+  cursor|agy|claude|codex|kimi` starts the reviewer and records its answer. On `breaks`, pick another.
 - `approval_required` (exit 3): show the user name, trust score, reasons, needed secrets and any
   `egress` reason in one message; `--approve` only after a clear yes, never on your own.
 - `rejected`: dangerous patterns found; pick another (`--force` only if the user insists after
@@ -156,7 +156,7 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - Never paste secrets into commands or files: tell the user which env var to set.
 - A low-trust skill that brings little is worse than none: write down what you know instead.
 - `already_installed`: an earlier task kept it; use it.
-- `via: gateway`: works now, use `harness_tools` / `harness_call`. Otherwise the server is in
+- `via: gateway`: works now, use Code Mode (`harness_search`, `harness_execute`) or `harness_tools` / `harness_call`. Otherwise the server is in
   `.cursor/mcp.json`: tell the user to restart Cursor (or refresh in Cursor Settings > MCP) so it picks up the new server, and continue what does not depend on it. If `add`
   suggests `autoharness gateway install`, offer it once (`--user` puts it in your own config, for
   every project): later servers then need no restart.
@@ -197,7 +197,7 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    autoharness review --by self --diff "1 <most important>; 2 ..." --worst blocker|major|minor|none
    autoharness critic                                        # prompt for an independent reviewer
    autoharness review --by critic --answer-file <file>
-   autoharness critic --run cursor|agy|claude|codex                 # or: autoharness starts a read-only critic itself
+   autoharness critic --run cursor|agy|claude|codex|kimi                 # or: autoharness starts a read-only critic itself
    ```
 
    A check must be able to fail when its item is not met: one that only finds a name or a string in
