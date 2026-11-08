@@ -132,7 +132,7 @@ What to do in each agent after `gateway install`:
 | Cursor | `.cursor/mcp.json` | restart Cursor (or refresh in Cursor Settings > MCP) |
 | Kimi Code | `.kimi-code/mcp.json` | restart Kimi Code (or run `/mcp`) |
 
-Check: the tools `harness_tools` and `harness_call` should appear in the agent. In Claude Code they
+Check: the tools `harness_tools`, `harness_call`, `harness_search`, `harness_execute`, and `harness_history_search` should appear in the agent. In Claude Code they
 may arrive deferred; tool search finds them.
 
 The config gets the full path to the current Python and the command

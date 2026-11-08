@@ -288,14 +288,26 @@ dependency headings. To add a language, add `data/lang/<code>.json` (or `~/.auto
 for yourself) and a matching `tests/lang/<code>.json` with the cases it must understand; no code
 changes are needed.
 
-## Gateway: servers without a restart
+## Gateway: servers without a restart, Code Mode, and Active Context Pruning
 
 An agent usually sees a new MCP server only after a restart. The gateway removes that. One server,
 `autoharness`, is added to the agent's config once; from then on `add mcp` writes new servers to
-`.autoharness/gateway.json` and the gateway starts them on the fly. It gives the agent two
-permanent tools: `harness_tools` and `harness_call(server, tool, arguments)`. It also publishes
-native `<server>__<tool>` tools with `tools/list_changed`. In Claude Code they appear without a
-restart; in Codex and Gemini CLI the meta-tools are the reliable path. A server that arrived in
+`.autoharness/gateway.json` and the gateway starts them on the fly. It gives the agent a fixed set
+of meta-tools:
+
+- **`harness_execute(code)` (Code Mode)**: executes JavaScript/TypeScript scripts in an isolated Node.js
+  sandbox with an ambient `mcp` object (`await mcp.<server>.<tool>(args)`). Chains of tool calls, loops,
+  and data aggregation execute in a single round-trip without leaking secrets or blowing the context window
+  with intermediate payloads.
+- **`harness_search(query)`**: searches active MCP servers and returns compact TypeScript ambient definitions
+  (`.d.ts`) describing tool signatures, compressing thousands of schema tokens to ~500 tokens.
+- **`harness_history_search(query, kind)` (Active Context Pruning)**: queries task execution logs (`runs`),
+  reviewer answers (`reviews`), and events on disk on demand without loading raw logs into model context.
+- **`harness_tools` and `harness_call(server, tool, arguments)`**: direct schema inspection and classical
+  single-tool execution.
+
+It also publishes native `<server>__<tool>` tools with `tools/list_changed`. In Claude Code they appear
+without a restart; in Codex and Gemini CLI the meta-tools are the reliable path. A server that arrived in
 `gateway.json` through `git pull` does not start without approval on this machine
 (`autoharness gateway approve`).
 

@@ -156,7 +156,7 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - Never paste secrets into commands or files: tell the user which env var to set.
 - A low-trust skill that brings little is worse than none: write down what you know instead.
 - `already_installed`: an earlier task kept it; use it.
-- `via: gateway`: works now, use `harness_tools` / `harness_call`. Otherwise the server is in
+- `via: gateway`: works now, use Code Mode (`harness_search`, `harness_execute`) or `harness_tools` / `harness_call`. Otherwise the server is in
   `{{MCP_FILE}}`: tell the user to {{RELOAD}}, and continue what does not depend on it. If `add`
   suggests `autoharness gateway install`, offer it once (`--user` puts it in your own config, for
   every project): later servers then need no restart.

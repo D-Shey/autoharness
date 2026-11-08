@@ -41,7 +41,7 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `journal` | the draft of this task's entry in the project's journal, and where it goes |
 | `ruling add` | a review point the user rejected, so later critics in the project do not raise it again |
 | `config get\|set [teardown keep\|remove \| allowed_hosts "<hosts>" \| min_mode any\|full\|reviewed \| journal "<path>"\|off] [--global]` | settings |
-| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart; `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
+| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart, offering Code Mode (`harness_execute`, `harness_search`) and Active Context Pruning (`harness_history_search`); `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
 | `agents` | the supported agents and their paths |
 
