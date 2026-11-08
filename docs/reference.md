@@ -46,6 +46,7 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `codemap [path] [-q QUERY] [--json]` | AST Code Map and structural symbol index: extracts classes, methods, signatures and docstrings via Python stdlib `ast`, reducing context tokens by 80-90% |
 | `swarm init\|run\|status\|list [plan_id] [--title ...] [--file ...] [--parallel N]` | multi-agent DAG swarm workflow coordinator and runner: topological scheduling, concurrent worker execution pool with barrier synchronization, role separation, hard verification gates, and crash-proof persistence |
 | `drive [run\|status\|queue\|rollback] [--max-tasks N] [--followup ID] [--dry-run]` | continuous autonomy self-driving backlog loop: prioritized resolution of `followups.json`, pre- & post-flight regression sentinel checks, and automated git rollback on failures |
+| `update [--check] [--repo REPO] [--force] [--yes]` | check for updates and automated self-update of AutoHarness from GitHub releases/repository via `uv tool` or `pip` |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
 | `agents` | the supported agents and their paths |
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autoharness"
-version = "0.1.0"
+version = "1.0.0"
 description = "Engineering discipline for coding agents: prepare before building, check against the original, let an independent critic judge the result."
 readme = "README.md"
 requires-python = ">=3.11"

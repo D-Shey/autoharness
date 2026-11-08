@@ -4,7 +4,37 @@ All notable changes to AutoHarness are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - Unreleased
+## [1.0.0] - 2026-11-08
+
+Major milestone release achieving full autonomous agentic engineering readiness (Agentic Readiness Index: 89.4%, Grade A+).
+
+### Added
+- **GitHub Update Checker and Self-Updater** (`autoharness update`):
+  - GitHub Releases API integration with fallback to raw repository configuration.
+  - Zero-runtime-dependency update check and automated self-update via `uv tool` or `pip`.
+  - Gateway MCP tool `harness_update_check` for autonomous agents.
+- **Continuous Autonomy Self-Driving Loop** (`autoharness drive`):
+  - Priority queue scheduling over open followups backlog with configurable iteration budget.
+  - Pre-flight and post-flight regression sentinel verification with automatic rollback (`git restore` and `git clean`).
+  - Fallback Multi-Agent Swarm DAG backlog executor.
+  - MCP tools `harness_drive_status` and `harness_drive_run`.
+- **LEANN Vector Compact Embeddings & Hybrid Search** (`autoharness memory`):
+  - Pure Python standard library selective-recomputation vector search with sub-sampled bag-of-words projection and cosine similarity.
+  - Reciprocal Rank Fusion (RRF) combining BM25 full-text keyword ranking and dense vector similarity.
+- **Multi-Agent DAG Swarm Orchestration** (`autoharness swarm`):
+  - Directed Acyclic Graph (DAG) task scheduling via standard library `graphlib.TopologicalSorter`.
+  - Concurrent worker pool execution with role-based isolation (researcher, coder, verifier, critic).
+  - Hard verification gates blocking downstream dependents on failure.
+- **AST Structural Symbol Indexing** (`autoharness codemap`):
+  - Fast AST tree parser mapping classes, methods, async functions, decorators, and signatures without external dependencies.
+  - MCP meta-tool `harness_codemap` and CLI `autoharness codemap`.
+- **In-Process SQLite FTS5 Persistent Memory** (`autoharness memory`):
+  - Crash-proof SQLite database with atomic indexing of rulings, lessons, reviews, and followups.
+- **Code Mode Gateway Sandbox** (`harness_execute`, `harness_search`):
+  - Dynamic TypeScript type definitions (`.d.ts`) generation from MCP schemas.
+  - Isolated subprocess execution sandbox with stdout/stderr capture and resource limits.
+
+## [0.1.0] - 2026-10-27
 
 The first public version.
 

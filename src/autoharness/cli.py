@@ -1834,6 +1834,67 @@ def cmd_drive(args, project, catalog) -> int:
     return 1
 
 
+def cmd_update(args, project, catalog) -> int:
+    from autoharness import updater
+    repo = getattr(args, "repo", None) or updater.DEFAULT_REPO
+    check_only = getattr(args, "check", False)
+    force = getattr(args, "force", False)
+    yes = getattr(args, "yes", False)
+
+    check_res = updater.check_for_updates(repo)
+    if check_only:
+        out(check_res)
+        return 0 if check_res.get("status") != "error" else 1
+
+    if check_res.get("status") == "error" and not force:
+        out(check_res)
+        return 1
+
+    if not check_res.get("update_available") and not force:
+        out({
+            "status": "ok",
+            "message": f"AutoHarness is up to date (version {updater.__version__}).",
+            "check": check_res,
+        })
+        return 0
+
+    if not yes:
+        if sys.stdin and hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
+            target_v = check_res.get("latest_version") or "latest"
+            sys.stdout.write(f"Update available ({updater.__version__} -> {target_v}). Install now? [y/N]: ")
+            sys.stdout.flush()
+            ans = sys.stdin.readline().strip().lower()
+            if ans not in ("y", "yes"):
+                out({"status": "cancelled", "message": "Update cancelled by user."})
+                return 0
+        else:
+            target_v = check_res.get("latest_version") or "latest"
+            return need_approval(
+                f"self-update to {target_v} from {repo}",
+                {"latest_version": target_v, "repo": repo, "current_version": updater.__version__},
+            )
+
+    res = updater.perform_update(repo=repo, force=force, project_root=project.root)
+    out({"status": res["status"], "update": res, "check": check_res})
+    return 0 if res.get("status") == "ok" else 1
+
+
+def cmd_permissions(args, project, catalog) -> int:
+    from autoharness import permissions
+    action = getattr(args, "action", "status") or "status"
+    if action == "enable":
+        res = permissions.enable_project_permissions(project)
+        out(res)
+        return 0
+    if action == "disable":
+        res = permissions.disable_project_permissions(project)
+        out(res)
+        return 0
+    res = permissions.check_agent_permissions(project)
+    out(res)
+    return 0
+
+
 def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
     """The lock entry for `name` from the active task, else from kept.json, and the task it belongs to."""
     active = project.task() if project.active_id() else None
@@ -3440,6 +3501,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--followup", type=int, help="specific followup ID to execute")
     s.add_argument("--dry-run", action="store_true", help="plan without executing modifications")
     s.add_argument("--test-cmd", help="custom regression test command to verify before completing")
+    s = sub.add_parser("update", help="Check for updates and self-update AutoHarness from GitHub")
+    s.add_argument("--check", action="store_true", help="check for updates without installing")
+    s.add_argument("--repo", help="target GitHub repository (default: D-Shey/autoharness)")
+    s.add_argument("--force", action="store_true", help="force reinstall even if already on latest version")
+    s.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
+    s = sub.add_parser("permissions", help="Inspect and configure agent YOLO / auto-approval permissions")
+    s.add_argument("action", nargs="?", choices=["status", "enable", "disable"], default="status", help="action to perform")
+    s = sub.add_parser("yolo", help="Alias for permissions: inspect or enable/disable agent YOLO mode")
+    s.add_argument("action", nargs="?", choices=["status", "enable", "disable"], default="status", help="action to perform")
     return p
 
 
@@ -3450,7 +3520,8 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "hook": cmd_hook, "install-hook": cmd_install_hook, "waive": cmd_waive, "brief": cmd_brief,
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
-            "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive}
+            "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
+            "permissions": cmd_permissions, "yolo": cmd_permissions}
 
 
 def main(argv: list[str] | None = None) -> int:

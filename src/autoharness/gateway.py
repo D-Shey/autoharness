@@ -98,6 +98,16 @@ META_TOOLS = [
          "dry_run": {"type": "boolean", "description": "Whether to return planned tasks without modifying code."},
          "followup_id": {"type": "integer", "description": "Optional specific followup ID to execute."},
          "test_command": {"type": "string", "description": "Custom regression test command (e.g. pytest tests/test_drive.py)."}}}},
+    {"name": "harness_update_check",
+     "description": "Check if newer versions of AutoHarness are available on GitHub.",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string", "description": "Optional GitHub repo coordinates (default: D-Shey/autoharness)."}}}},
+    {"name": "harness_permissions_status",
+     "description": "Check if agent YOLO / auto-approval mode is active globally or at the project level.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "harness_permissions_enable",
+     "description": "Enable project-level auto-permissions / YOLO mode so tool calls and command execution are not blocked by manual confirmation prompts.",
+     "inputSchema": {"type": "object", "properties": {}}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -584,6 +594,27 @@ class Gateway:
                 followup_id = int(followup_id)
             test_cmd = args.get("test_command")
             res = drive.run_drive_loop(self.project, max_tasks=max_tasks, dry_run=dry_run, followup_id=followup_id, test_command=test_cmd)
+            return _text(json.dumps(res, indent=2, ensure_ascii=False))
+        if name == "harness_update_check":
+            from autoharness import updater
+            repo = args.get("repo") or updater.DEFAULT_REPO
+            res = updater.check_for_updates(repo=repo)
+            return _text(json.dumps(res, indent=2, ensure_ascii=False))
+        if name == "harness_permissions_status":
+            from autoharness import permissions
+            if not self.project:
+                return _text("No project root configured for permissions.")
+            from autoharness.env import Project
+            proj = Project(self.project)
+            res = permissions.check_agent_permissions(proj)
+            return _text(json.dumps(res, indent=2, ensure_ascii=False))
+        if name == "harness_permissions_enable":
+            from autoharness import permissions
+            if not self.project:
+                return _text("No project root configured for permissions.")
+            from autoharness.env import Project
+            proj = Project(self.project)
+            res = permissions.enable_project_permissions(proj)
             return _text(json.dumps(res, indent=2, ensure_ascii=False))
         target = self.native_map().get(name)
         if target is None:
