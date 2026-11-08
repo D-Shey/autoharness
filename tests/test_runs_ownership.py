@@ -1373,3 +1373,48 @@ def test_numbered_splits_inline_numbered_items_without_punctuation():
     assert items[0]["id"] == "B1" and items[0]["text"] == "first thing"
     assert items[1]["id"] == "B2" and items[1]["text"] == "second thing"
     assert items[2]["id"] == "B3" and items[2]["text"] == "third thing"
+
+
+def test_vague_items_ignores_fenced_code_blocks():
+    from autoharness import vague
+    md = """## Steps
+
+- First step that is fine.
+```bash
+- do it properly
+- make it clean
+```
+- Second step that is fine.
+"""
+    items = vague.items(md)
+    assert items == ["First step that is fine.", "Second step that is fine."]
+    assert not vague.vague_steps(md)
+
+
+def test_check_domains_accepts_have_mcp_servers():
+    searches = [{"query": "git", "results": []}, {"query": "browser", "results": []}]
+    text = "version_control: mcp github (searched: git); browser: mcp playwright (searched: browser)"
+    candidates = "github: take, github server; playwright: take, browser control"
+    with pytest.raises(cli.HarnessError, match="github"):
+        cli._check_domains(text, [], candidates, searches, builtin=(), kept=(), have=(), have_mcp=())
+    assert cli._check_domains(text, [], candidates, searches, builtin=(), kept=(), have=(), have_mcp=["github", "playwright"]) == text
+
+
+def test_hook_pending_allows_writing_args_files(project, capsys, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+    prompt = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "prompt": "please fix the quarterly report"}
+    hook(capsys, monkeypatch, project, prompt)
+    # state is now pending
+    # Writing normal source file is denied
+    write_code = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Write",
+                  "tool_input": {"file_path": "src/fix.py", "content": "x = 1"}}
+    res = hook(capsys, monkeypatch, project, write_code)
+    assert denied(res) and "autoharness first" in res["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # Writing args.json or brief.json or payload.json or .autoharness/args.json is allowed
+    for args_name in ("args.json", "brief.json", "payload.json", "task.args.json", ".autoharness/args.json"):
+        write_args = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Write",
+                      "tool_input": {"file_path": args_name, "content": "{}"}}
+        res = hook(capsys, monkeypatch, project, write_args)
+        assert res is None or not denied(res)
+

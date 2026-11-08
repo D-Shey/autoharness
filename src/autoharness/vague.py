@@ -20,6 +20,7 @@ FILLER = {"helper", "helpers", "util", "utils", "utility", "utilities", "tool", 
 ABBREVIATIONS = re.compile(r"(?<![\w.])(?:i\.e\.|e\.g\.|etc\.|т\.\s?[екдп]\.|and/or|и/или)", re.IGNORECASE)
 STEPS = re.compile(r"^##\s+Steps\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
 MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+FENCE = re.compile(r"^\s*(?:```|~~~)")
 # a step with this many words or fewer once its vague words are gone says nothing else ("Write and test it")
 STEP_WORDS = 4
 
@@ -51,7 +52,14 @@ def items(markdown: str) -> list[str]:
     """The list items of `markdown`, each with all its lines: an item runs from its marker to a blank line, the next
     marker or a heading, so its indented and lazy continuation lines are read with it (CommonMark: list items)."""
     found, current = [], None
+    in_fence = False
     for line in markdown.splitlines():
+        if FENCE.match(line):
+            in_fence = not in_fence
+            current = None
+            continue
+        if in_fence:
+            continue
         if MARKER.match(line):
             current = [MARKER.sub("", line, count=1)]
             found.append(current)

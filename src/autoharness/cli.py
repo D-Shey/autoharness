@@ -912,10 +912,11 @@ MIN_DOMAINS = 2
 
 
 def _check_domains(text: str, planned: list[str], candidates: str, searches: list[dict], builtin=(),
-                   kept=(), have=()) -> str:
+                   kept=(), have=(), have_mcp=()) -> str:
     """The brief's areas of know-how, each covered by a skill or a server found by a search of this task (or built
-    into the agent, or a skill an earlier task kept in the project, or one the agent already has: `have`), or by a
-    skill this task creates. Raises when an area is covered by nothing, or its search was never run."""
+    into the agent, or a skill an earlier task kept in the project, or one the agent already has: `have`, or an MCP
+    server already configured or built in: `have_mcp`), or by a skill this task creates. Raises when an area is
+    covered by nothing, or its search was never run."""
     usage = ("--domains splits the task into the areas of know-how it takes, the way an engineer splits building "
              "a machine into its disciplines, and says how each is covered: `<area>: skill <name> (searched: "
              "<query>); <area>: mcp <name> (searched: <query>); <area>: create <skill-name> (searched: <query>)`. "
@@ -930,6 +931,8 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
     if len(entries) < MIN_DOMAINS:
         raise HarnessError(usage)
     run = {s["query"].strip().lower() for s in searches}
+    builtin_lower = {b.lower() for b in builtin}
+    have_mcp_lower = {s.lower() for s in have_mcp} | {local_mcp_name(s).lower() for s in have_mcp}
     for entry in entries:
         m = DOMAIN.match(entry)
         if not m:
@@ -943,13 +946,14 @@ def _check_domains(text: str, planned: list[str], candidates: str, searches: lis
             raise HarnessError(f"area `{m['area'].strip()}` creates `{name}`: name it in --gaps too "
                                f"(`create {name}: <capability>`)")
         found = next((s.get("results", []) for s in searches if s["query"].strip().lower() == query), [])
-        real = how == "skill" and (library.exists(name) or name in kept or name in have) or (
-            how == "mcp" and name in builtin) or any(
+        real = (how == "skill" and (library.exists(name) or name in kept or name in have)) or (
+            how == "mcp" and (name.lower() in builtin_lower or name.lower() in have_mcp_lower or local_mcp_name(name).lower() in have_mcp_lower)) or any(
             r.lower() == name.lower() or re.search(rf"[@/]{re.escape(name.lower())}$", r.lower()) for r in found)
         if how in ("skill", "mcp") and not real:
             raise HarnessError(f"area `{m['area'].strip()}`: `{name}` is not among what the search `{query}` found"
                                + (" nor a skill you have (your library, kept in this project, or the agent's project, user "
-                                  "and plugin skills)" if how == "skill" else "")
+                                  "and plugin skills)" if how == "skill" else
+                                  " nor an MCP server already configured or built into your agent")
                                + ": name a "
                                f"{how} that search returned (" + (", ".join(found) or "it found nothing") + "), "
                                "or create the skill (`create <skill-name>`)")
@@ -1058,11 +1062,12 @@ def _skills_not_installed(project, task, templates: bool = True) -> list[str]:
                                "cannot be installed or vetting rejects it, record the brief again with another "
                                "candidate from your searches for that area, or `create` a skill for it")
         elif m and m["how"].lower() == "mcp":
-            name = local_mcp_name(m["name"])
+            raw_name = m["name"].strip()
+            name = local_mcp_name(raw_name)
+            installed = {s.lower() for s in _agent_mcp_servers(project)} | {s.lower() for s in task.mcp_lock()}
             stores = [project.agent.mcp_store(project.root), project.agent.user_mcp_store()]
-            if not (name in task.mcp_lock() or name in project.kept()["mcp"]
-                    or any(s is not None and s.has(name) for s in stores)
-                    or name in [b.name for b in agents.builtin_mcp(project.agent.name)]):
+            if not (name.lower() in installed or raw_name.lower() in installed
+                    or any(s is not None and (s.has(name) or s.has(raw_name)) for s in stores)):
                 missing.append(f"area `{m['area'].strip()}` is covered by MCP server `{m['name']}`, not installed: "
                                f"`autoharness inspect mcp {m['name']}`, then `autoharness add mcp {m['name']}`, and "
                                "use it (through harness_call when it was added through the gateway); if it cannot "
@@ -1081,12 +1086,19 @@ def _mcp_not_used(project, task) -> list[str]:
         m = DOMAIN.match(entry.strip())
         if not (m and m["how"].lower() == "mcp"):
             continue
-        name = local_mcp_name(m["name"])
+        raw_name = m["name"].strip()
+        name = local_mcp_name(raw_name)
+        installed = {s.lower() for s in _agent_mcp_servers(project)} | {s.lower() for s in lock}
         stores = [project.agent.mcp_store(project.root), project.agent.user_mcp_store()]
-        if not (name in lock or name in project.kept()["mcp"] or any(s is not None and s.has(name) for s in stores)):
+        if not (name.lower() in installed or raw_name.lower() in installed
+                or any(s is not None and (s.has(name) or s.has(raw_name)) for s in stores)):
             continue   # not installed at all: _skills_not_installed says so
         since = lock.get(name, {}).get("added") or info.get("created", "")
-        if made.get(name, {}).get("last", "") < since:
+        last_call = ""
+        for s_key, s_data in made.items():
+            if s_key.lower() in (name.lower(), raw_name.lower()) and isinstance(s_data, dict):
+                last_call = max(last_call, s_data.get("last", ""))
+        if last_call < since:
             unused.append(f"area `{m['area'].strip()}` is covered by MCP server `{m['name']}`, which was never called "
                           "in this task: do the work for that area with it (" +
                           ("harness_tools, then harness_call" if lock.get(name, {}).get("via") == "gateway" else
@@ -1128,7 +1140,8 @@ def cmd_brief(args, project, catalog):
     _check_constraints(args.constraints, task)
     domains = _check_domains(args.domains, planned, args.candidates, task.info().get("searches", []),
                              [b.name for b in agents.builtin_mcp(project.agent.name)], kept,
-                             [p.parent.name for p in _agent_skills(project)])
+                             [p.parent.name for p in _agent_skills(project)],
+                             _agent_mcp_servers(project))
     live = [c.name for c, _ in catalog.classify(task.about()) if c.interactive]
     if live and not any((m := DOMAIN.match(e.strip())) and m["how"].lower() == "mcp" for e in domains.split(";")):
         raise HarnessError(
@@ -2442,6 +2455,15 @@ RECORDS_DENIED = ("`.autoharness/` holds this task's records, and only autoharne
 KEY_DENIED = "autoharness's integrity key seals the task records: it is not for tools to read or change."
 
 
+def _is_args_file(path: Path | str) -> bool:
+    """Whether a path is an arguments/brief payload file or in scratch: agents can write these to pass to CLI."""
+    p = Path(path)
+    name = p.name.lower()
+    return (name in ("args.json", "brief.json", "payload.json")
+            or name.endswith(".args.json") or name.endswith(".brief.json")
+            or "scratch" in p.parts)
+
+
 def _path_values(tool_input: dict) -> list[str]:
     """The paths a write tool is aimed at: Claude Code's `file_path`/`notebook_path`, agy's `TargetFile` and the
     like (any argument whose name says path or file)."""
@@ -2462,6 +2484,8 @@ def _writes_records(tool: str, tool_input: dict, root: Path) -> str | None:
             except OSError:
                 continue
             if (target == state or state in target.parents) and target != state / "config.json":
+                if _is_args_file(target):
+                    continue
                 return RECORDS_DENIED
         return None
     if tool not in ("Bash", "PowerShell"):
@@ -2469,7 +2493,7 @@ def _writes_records(tool: str, tool_input: dict, root: Path) -> str | None:
     command = str(tool_input.get("command", ""))
     if KEY_FILE.search(command):
         return KEY_DENIED
-    command = re.sub(r"\.autoharness[\\/]config\.json", "", _shell_code(command))
+    command = re.sub(r"\.autoharness[\\/](?:config\.json|args\.json|brief\.json|payload\.json|[^/\\]+\.(?:args|brief)\.json|scratch[\\/]\S+)", "", _shell_code(command))
     if RECORDS.search(command) and any(w.search(command) for w in SHELL_WRITES):
         return RECORDS_DENIED
     return None
@@ -2510,6 +2534,37 @@ def _agent_skills(project, plugins: bool = True) -> list[Path]:
     if plugins and plugin_dir.is_dir():
         found += [p for p in plugin_dir.rglob("SKILL.md") if p.parent.parent.name == "skills"]
     return found
+
+
+def _agent_mcp_servers(project) -> list[str]:
+    """All MCP server names known, installed, or built into the agent or project."""
+    servers = set()
+    try:
+        for b in agents.builtin_mcp(project.agent.name):
+            servers.add(b.name)
+    except Exception:
+        pass
+    kept_mcp = project.kept().get("mcp", {})
+    if isinstance(kept_mcp, dict):
+        servers.update(kept_mcp.keys())
+    elif isinstance(kept_mcp, (list, set, tuple)):
+        servers.update(kept_mcp)
+    for store in (project.agent.mcp_store(project.root), project.agent.user_mcp_store()):
+        if store is not None and hasattr(store, "names"):
+            try:
+                servers.update(store.names())
+            except Exception:
+                pass
+    if project.agent.name == "claude":
+        claude_json = Path.home() / ".claude.json"
+        if claude_json.exists():
+            try:
+                data = json.loads(claude_json.read_text("utf-8") or "{}")
+                if isinstance(data.get("mcpServers"), dict):
+                    servers.update(data["mcpServers"].keys())
+            except Exception:
+                pass
+    return sorted(servers)
 
 
 def _routine(project, text: str) -> str | None:
@@ -2795,6 +2850,10 @@ def cmd_hook(args, project, catalog):
                                             "permissionDecisionReason": reason}})
                 return 0
             if state == "pending" and GATED_TOOLS.match(tool):
+                if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+                    paths = [Path(v) for v in _path_values(tool_input)]
+                    if paths and all(_is_args_file(p) for p in paths):
+                        return 0
                 reason = handoff(Task(project, active), sid) if foreign else (
                     "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "
                     "MCP servers it discovers, and record `autoharness brief ...` before using " + tool + ". "

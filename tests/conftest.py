@@ -19,7 +19,7 @@ def test_domains_need_no_search(monkeypatch):
     """A test brief's areas stand without the searches a real task runs; any other areas are checked as usual."""
     real = cli._check_domains
     monkeypatch.setattr(cli, "_check_domains",
-                        lambda text, *a: text if text == TEST_DOMAINS else real(text, *a))
+                        lambda text, *a, **kw: text if text == TEST_DOMAINS else real(text, *a, **kw))
 
 
 @pytest.fixture(autouse=True)

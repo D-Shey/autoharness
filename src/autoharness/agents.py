@@ -248,6 +248,14 @@ class JsonMcpStore:
     def has(self, name: str) -> bool:
         return name in _read_json_file(self.path).get("mcpServers", {})
 
+    def names(self) -> list[str]:
+        if not self.path.exists():
+            return []
+        try:
+            return list(_read_json_file(self.path).get("mcpServers", {}).keys())
+        except Exception:
+            return []
+
     def add(self, name: str, native: dict) -> None:
         _write_text(self.path, self.preview_add(name, native))
 
@@ -314,6 +322,14 @@ class TomlMcpStore:
 
     def has(self, name: str) -> bool:
         return name in self._parse(self._text()).get("mcp_servers", {})
+
+    def names(self) -> list[str]:
+        if not self.path.exists():
+            return []
+        try:
+            return list(self._parse(self._text()).get("mcp_servers", {}).keys())
+        except Exception:
+            return []
 
     def _parse(self, text: str) -> dict:
         try:
