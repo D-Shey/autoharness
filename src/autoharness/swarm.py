@@ -11,6 +11,7 @@ Provides:
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import graphlib
 import json
 import os
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -107,67 +109,116 @@ def get_swarm_dir(project_root: Path) -> Path:
     return swarm_dir
 
 
-def save_swarm_plan(plan: SwarmPlan, project_root: Path) -> Path:
-    """Save Swarm plan atomically using a temporary file and os.replace."""
-    plan.updated_at = time.time()
+_SWARM_THREAD_LOCK = threading.RLock()
+
+
+@contextmanager
+def swarm_persistence_lock(project_root: Path):
+    """Serialize plan persistence operations to prevent Windows os.replace permission errors and race conditions."""
     swarm_dir = get_swarm_dir(project_root)
-    file_path = swarm_dir / f"{plan.id}.json"
-    temp_path = swarm_dir / f".tmp_{plan.id}_{os.getpid()}_{int(time.monotonic() * 1000)}.json"
-    data_str = json.dumps(plan.to_dict(), indent=2, ensure_ascii=False) + "\n"
-    try:
-        temp_path.write_text(data_str, encoding="utf-8")
-        os.replace(temp_path, file_path)
-    finally:
-        if temp_path.exists():
+    with _SWARM_THREAD_LOCK:
+        lock_file = swarm_dir / ".swarm_persistence.lock"
+        with lock_file.open("a+b") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+            deadline = time.monotonic() + 20.0
+            while True:
+                try:
+                    stream.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Timed out waiting for swarm persistence lock")
+                    time.sleep(0.01)
             try:
-                temp_path.unlink()
-            except OSError:
-                pass
-    return file_path
+                yield
+            finally:
+                stream.seek(0)
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+
+
+def save_swarm_plan(plan: SwarmPlan, project_root: Path) -> Path:
+    """Save Swarm plan atomically using a temporary file and os.replace under persistence lock."""
+    with swarm_persistence_lock(project_root):
+        plan.updated_at = time.time()
+        swarm_dir = get_swarm_dir(project_root)
+        file_path = swarm_dir / f"{plan.id}.json"
+        temp_path = swarm_dir / f".tmp_{plan.id}_{os.getpid()}_{int(time.monotonic() * 1000)}_{uuid.uuid4().hex[:6]}.json"
+        data_str = json.dumps(plan.to_dict(), indent=2, ensure_ascii=False) + "\n"
+        try:
+            temp_path.write_text(data_str, encoding="utf-8")
+            os.replace(temp_path, file_path)
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+        return file_path
 
 
 def load_swarm_plan(plan_id_or_path: str | Path, project_root: Path) -> SwarmPlan:
-    path = Path(plan_id_or_path)
-    if not path.is_file():
-        swarm_dir = get_swarm_dir(project_root)
-        candidate = swarm_dir / f"{plan_id_or_path}.json"
-        if candidate.is_file():
-            path = candidate
-        else:
-            candidate2 = swarm_dir / str(plan_id_or_path)
-            if candidate2.is_file():
-                path = candidate2
+    with swarm_persistence_lock(project_root):
+        path = Path(plan_id_or_path)
+        if not path.is_file():
+            swarm_dir = get_swarm_dir(project_root)
+            candidate = swarm_dir / f"{plan_id_or_path}.json"
+            if candidate.is_file():
+                path = candidate
             else:
-                raise FileNotFoundError(f"Swarm plan file not found: {plan_id_or_path}")
+                candidate2 = swarm_dir / str(plan_id_or_path)
+                if candidate2.is_file():
+                    path = candidate2
+                else:
+                    raise FileNotFoundError(f"Swarm plan file not found: {plan_id_or_path}")
 
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return SwarmPlan.from_dict(data)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return SwarmPlan.from_dict(data)
 
 
 def list_swarm_plans(project_root: Path) -> list[dict[str, Any]]:
-    swarm_dir = get_swarm_dir(project_root)
-    plans = []
-    for f in swarm_dir.glob("*.json"):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            tasks = data.get("tasks", {})
-            total = len(tasks)
-            completed = sum(1 for t in (tasks.values() if isinstance(tasks, dict) else tasks) if t.get("status") == "completed")
-            failed = sum(1 for t in (tasks.values() if isinstance(tasks, dict) else tasks) if t.get("status") == "failed")
-            plans.append({
-                "id": data.get("id", f.stem),
-                "title": data.get("title", ""),
-                "status": data.get("status", "unknown"),
-                "total_tasks": total,
-                "completed": completed,
-                "failed": failed,
-                "updated_at": data.get("updated_at", f.stat().st_mtime),
-                "path": str(f),
-            })
-        except (json.JSONDecodeError, OSError, KeyError, TypeError):
-            continue
-    plans.sort(key=lambda x: x["updated_at"], reverse=True)
-    return plans
+    with swarm_persistence_lock(project_root):
+        swarm_dir = get_swarm_dir(project_root)
+        plans = []
+        for f in swarm_dir.glob("*.json"):
+            if f.name.startswith(".tmp_"):
+                continue
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                tasks = data.get("tasks", {})
+                total = len(tasks)
+                completed = sum(1 for t in (tasks.values() if isinstance(tasks, dict) else tasks) if t.get("status") == "completed")
+                failed = sum(1 for t in (tasks.values() if isinstance(tasks, dict) else tasks) if t.get("status") == "failed")
+                plans.append({
+                    "id": data.get("id", f.stem),
+                    "title": data.get("title", ""),
+                    "status": data.get("status", "unknown"),
+                    "total_tasks": total,
+                    "completed": completed,
+                    "failed": failed,
+                    "updated_at": data.get("updated_at", f.stat().st_mtime),
+                    "path": str(f),
+                })
+            except (json.JSONDecodeError, OSError, KeyError, TypeError):
+                continue
+        plans.sort(key=lambda x: x["updated_at"], reverse=True)
+        return plans
 
 
 def validate_dag(plan: SwarmPlan) -> list[str]:
@@ -396,7 +447,7 @@ def execute_swarm_plan(
 
 def create_sample_swarm_plan(title: str, tasks: list[dict[str, Any]] | None = None) -> SwarmPlan:
     """Create a new structured SwarmPlan with reasonable defaults."""
-    clean_id = f"swarm_{int(time.time() * 1000) % 1000000}"
+    clean_id = f"swarm_{uuid.uuid4().hex}"
     if not tasks:
         # Default sample 4-stage pipeline: Research -> Code (2 parallel) -> Verify
         tasks = [

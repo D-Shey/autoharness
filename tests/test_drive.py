@@ -197,3 +197,85 @@ def test_cli_and_gateway_drive_commands(tmp_path: Path, monkeypatch, capsys):
     assert not res_run.get("isError")
     parsed_gw_run = json.loads(res_run["content"][0]["text"])
     assert parsed_gw_run["status"] == "dry_run"
+
+
+def test_classify_test_failure_harness_vs_assertion():
+    # 1. SyntaxError in harness
+    out_syntax = "FAILED tests/test_foo.py - SyntaxError: invalid syntax (test_foo.py, line 42)"
+    c_syntax = drive.classify_test_failure(out_syntax)
+    assert c_syntax["is_harness_fault"] is True
+    assert c_syntax["fault_type"] == "harness_syntax"
+    assert "SyntaxError" in c_syntax["summary"]
+
+    # 2. Missing fixture
+    out_fixture = "ERROR at setup of test_db - fixture 'fake_pool' not found"
+    c_fixture = drive.classify_test_failure(out_fixture)
+    assert c_fixture["is_harness_fault"] is True
+    assert c_fixture["fault_type"] == "harness_fixture"
+
+    # 3. Collection / ModuleNotFoundError
+    out_coll = "ERROR collecting tests/test_api.py - ModuleNotFoundError: No module named 'fastapi'"
+    c_coll = drive.classify_test_failure(out_coll)
+    assert c_coll["is_harness_fault"] is True
+    assert c_coll["fault_type"] == "harness_collection"
+
+    # 4. Legitimate assertion failure
+    out_assert = "FAILED tests/test_calc.py::test_add - AssertionError: assert 2 + 2 == 5"
+    c_assert = drive.classify_test_failure(out_assert)
+    assert c_assert["is_harness_fault"] is False
+    assert c_assert["fault_type"] == "assertion_failure"
+
+
+def test_sentinel_result_backward_compatibility():
+    res = drive.SentinelResult(False, "SyntaxError: unexpected EOF")
+    # Verify tuple unpacking
+    passed, output = res
+    assert passed is False
+    assert output == "SyntaxError: unexpected EOF"
+    assert res.passed is False
+    assert res.output == "SyntaxError: unexpected EOF"
+    assert res.classification["is_harness_fault"] is True
+    assert res.classification["fault_type"] == "harness_syntax"
+
+
+def test_drive_broken_harness_recorded(tmp_path: Path, monkeypatch):
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    proj = Project(proj_root)
+    f1 = followups.add(proj, "Fix serialization bug", task_id="t1")
+
+    # Mock task succeeds but regression check fails with broken test fixture
+    def mock_executor(item):
+        return True, "Task code written"
+
+    sentinel_calls = []
+
+    def mock_sentinel(p, cmd):
+        sentinel_calls.append(1)
+        if len(sentinel_calls) == 1:
+            # Pre-flight sentinel passes
+            return drive.SentinelResult(True, "1 passed")
+        # Post-flight regression check fails with broken fixture
+        return drive.SentinelResult(
+            False,
+            "ERROR at setup of test_core - fixture 'test_db' not found"
+        )
+
+    monkeypatch.setattr(drive, "run_regression_sentinel", mock_sentinel)
+    monkeypatch.setattr(drive, "rollback_changes", lambda p: (True, "Rollback ok"))
+
+    res = drive.run_drive_loop(
+        proj_root,
+        max_tasks=1,
+        dry_run=False,
+        task_executor=mock_executor,
+        test_command="pytest",
+    )
+
+    assert res["status"] == "completed"
+    assert len(res["failed"]) == 1
+    fail_rec = res["failed"][0]
+    assert fail_rec["is_harness_fault"] is True
+    assert fail_rec["fault_type"] == "harness_fixture"
+    assert "Broken test harness detected" in fail_rec["reason"]
+

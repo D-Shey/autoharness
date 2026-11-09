@@ -17,6 +17,7 @@ import re
 import sqlite3
 import struct
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -84,25 +85,29 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
 
 def init_vector_table(con: sqlite3.Connection) -> None:
     """Ensure vector embeddings table exists in memory database."""
-    with con:
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vector_embeddings (
-                doc_id TEXT PRIMARY KEY,
-                vector BLOB NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """
-        )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vector_embeddings (
+            doc_id TEXT PRIMARY KEY,
+            vector BLOB NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """
+    )
 
 
-def index_document_vector(con: sqlite3.Connection, doc_id: str, text: str) -> None:
+def index_document_vector(
+    con: sqlite3.Connection,
+    doc_id: str,
+    text: str,
+    manage_transaction: bool = True,
+) -> None:
     """Compute and store binary vector embedding for a document."""
     init_vector_table(con)
     vec = compute_embedding(text)
     blob = pack_vector(vec)
     now = time.time()
-    with con:
+    if not manage_transaction:
         con.execute(
             """
             INSERT INTO vector_embeddings(doc_id, vector, updated_at)
@@ -113,6 +118,35 @@ def index_document_vector(con: sqlite3.Connection, doc_id: str, text: str) -> No
             """,
             (doc_id, blob, now),
         )
+        return
+
+    was_in_transaction = con.in_transaction
+    sp_name = f"sp_vec_{uuid.uuid4().hex[:12]}"
+    con.execute(f"SAVEPOINT {sp_name}")
+    try:
+        con.execute(
+            """
+            INSERT INTO vector_embeddings(doc_id, vector, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                vector = excluded.vector,
+                updated_at = excluded.updated_at
+            """,
+            (doc_id, blob, now),
+        )
+        con.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        try:
+            con.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            con.execute(f"RELEASE SAVEPOINT {sp_name}")
+        except sqlite3.Error:
+            pass
+        if not was_in_transaction and con.in_transaction:
+            try:
+                con.rollback()
+            except sqlite3.Error:
+                pass
+        raise
 
 
 def search_vectors(

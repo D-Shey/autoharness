@@ -78,6 +78,7 @@ META_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "path": {"type": "string", "description": "Relative file or directory path (default: project root)."},
          "query": {"type": "string", "description": "Optional symbol or function name search query."},
+         "policy": {"type": "boolean", "description": "Check deterministic AST structural policies (dead private methods, silenced exceptions, unclosed files)."},
          "raw_json": {"type": "boolean", "description": "Whether to return raw JSON instead of indented outline."}}}},
     {"name": "harness_swarm_status",
      "description": "Inspect status and progress of multi-agent swarm plans in .autoharness/swarm. Omit plan_id to inspect the most recent plan.",
@@ -521,7 +522,11 @@ class Gateway:
             rel_path = args.get("path") or "."
             query = args.get("query")
             raw_json = bool(args.get("raw_json"))
+            check_policy = bool(args.get("policy"))
             root = (self.project / rel_path) if self.project else Path(rel_path)
+            if check_policy:
+                violations = codemap.scan_ast_policies(root)
+                return _text(json.dumps({"total_violations": len(violations), "violations": violations}, ensure_ascii=False, indent=2))
             cmap = codemap.generate_codemap(root)
             if query:
                 matches = codemap.search_codemap(cmap, query)

@@ -238,3 +238,115 @@ def test_gateway_memory_and_codemap_tools(tmp_path, monkeypatch):
     tree_text = tree_call["result"]["content"][0]["text"]
     assert "worker.py" in tree_text
     assert "class TaskWorker:" in tree_text
+
+    # 4. Test harness_codemap policy check via Gateway
+    (proj_dir / "flawed.py").write_text(
+        "class Engine:\n"
+        "    def _unused_method(self):\n"
+        "        pass\n"
+        "    def run(self):\n"
+        "        try:\n"
+        "            pass\n"
+        "        except Exception:\n"
+        "            pass\n",
+        encoding="utf-8"
+    )
+    policy_call = gw.handle({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {"name": "harness_codemap", "arguments": {"policy": True}}
+    })
+    policy_res = json.loads(policy_call["result"]["content"][0]["text"])
+    assert policy_res["total_violations"] >= 2
+    rules = {v["rule"] for v in policy_res["violations"]}
+    assert "DEAD_PRIVATE_METHOD" in rules
+    assert "SILENCED_EXCEPTION" in rules
+
+
+def test_ast_policy_dead_private_methods():
+    code = """
+class OrderService:
+    def __init__(self):
+        self._used_helper()
+
+    def _used_helper(self):
+        return 42
+
+    def _dead_helper(self):
+        return 99
+
+    @property
+    def _dynamic_prop(self):
+        return 1
+"""
+    violations = codemap.check_ast_policies(code, filename="test.py")
+    rules = [v["rule"] for v in violations]
+    symbols = [v["symbol"] for v in violations]
+    assert "DEAD_PRIVATE_METHOD" in rules
+    assert "OrderService._dead_helper" in symbols
+    assert "OrderService._used_helper" not in symbols
+    assert "OrderService._dynamic_prop" not in symbols
+
+
+def test_ast_policy_silenced_exceptions():
+    code = """
+def process():
+    try:
+        do_work()
+    except Exception:
+        pass
+
+    try:
+        do_work()
+    except BaseException:
+        '''ignore'''
+        continue
+
+    try:
+        do_work()
+    except (ValueError, Exception):
+        pass
+
+    try:
+        do_work()
+    except ValueError:
+        # specific exception allowed
+        pass
+
+    try:
+        do_work()
+    except Exception as e:
+        log_error(e)
+        raise
+"""
+    violations = codemap.check_ast_policies(code, filename="test.py")
+    silenced = [v for v in violations if v["rule"] == "SILENCED_EXCEPTION"]
+    assert len(silenced) == 3
+    # Check lines: lines 5, 11, 17 are flagged, but ValueError and log_error+raise are not
+    lines = [v["line"] for v in silenced]
+    assert len(lines) == 3
+
+
+def test_ast_policy_unbounded_open(tmp_path):
+    code = """
+def bad_reader():
+    f = open('data.txt')
+    return f.read()
+
+def good_reader():
+    with open('data.txt') as f:
+        return f.read()
+
+def safe_finally():
+    f = open('data.txt')
+    try:
+        return f.read()
+    finally:
+        f.close()
+"""
+    violations = codemap.check_ast_policies(code, filename="test.py")
+    open_violations = [v for v in violations if v["rule"] == "UNBOUNDED_RESOURCE_OPEN"]
+    assert len(open_violations) == 1
+    assert open_violations[0]["line"] == 3
+

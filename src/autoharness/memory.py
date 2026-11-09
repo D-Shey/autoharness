@@ -10,6 +10,7 @@ import json
 import re
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +79,10 @@ def reconcile_and_store(
     meta_json = json.dumps(metadata or {}, ensure_ascii=False)
     now = time.time()
 
-    with con:
+    was_in_transaction = con.in_transaction
+    sp_name = f"sp_mem_{uuid.uuid4().hex[:12]}"
+    con.execute(f"SAVEPOINT {sp_name}")
+    try:
         cur = con.cursor()
         if not doc_id:
             row = cur.execute(
@@ -88,12 +92,13 @@ def reconcile_and_store(
             if row:
                 existing_id, existing_content = row["id"], row["content"]
                 if existing_content.strip() == content.strip():
+                    con.execute(f"RELEASE SAVEPOINT {sp_name}")
                     return existing_id
                 doc_id = existing_id
 
         if not doc_id:
-            clean_source = source.replace("\\", "/").rsplit("/", 1)[-1].replace(".", "_")
-            doc_id = f"{kind}_{clean_source}_{int(now * 1000) % 1000000}"
+            clean_source = source.replace("\\", "/").strip("/").replace("/", "_").replace(".", "_") or "doc"
+            doc_id = f"{kind}_{clean_source}_{uuid.uuid4().hex}"
 
         cur.execute(
             """
@@ -110,12 +115,23 @@ def reconcile_and_store(
             (doc_id, kind, source, title, content, meta_json, now),
         )
 
+        from autoharness import vector
+        vector.index_document_vector(con, doc_id, f"{title or ''} {content}", manage_transaction=False)
+
+        con.execute(f"RELEASE SAVEPOINT {sp_name}")
+        return doc_id
+    except Exception:
         try:
-            from autoharness import vector
-            vector.index_document_vector(con, doc_id, f"{title or ''} {content}")
-        except (sqlite3.Error, ImportError, ValueError):
+            con.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            con.execute(f"RELEASE SAVEPOINT {sp_name}")
+        except sqlite3.Error:
             pass
-    return doc_id
+        if not was_in_transaction and con.in_transaction:
+            try:
+                con.rollback()
+            except sqlite3.Error:
+                pass
+        raise
 
 
 def search_memory(
@@ -137,47 +153,46 @@ def search_memory(
         return []
     fts_query = " ".join(f'"{t}"*' for t in tokens)
 
-    with con:
-        cur = con.cursor()
-        if kind and kind != "all":
-            sql = """
-                SELECT d.id, d.kind, d.source, d.title, d.content, d.metadata, d.updated_at,
-                       bm25(memory_fts) as rank
-                FROM memory_fts f
-                JOIN memory_docs d ON f.rowid = d.rowid
-                WHERE memory_fts MATCH ? AND d.kind = ?
-                ORDER BY rank
-                LIMIT ?
-            """
-            params = (fts_query, kind, limit)
-        else:
-            sql = """
-                SELECT d.id, d.kind, d.source, d.title, d.content, d.metadata, d.updated_at,
-                       bm25(memory_fts) as rank
-                FROM memory_fts f
-                JOIN memory_docs d ON f.rowid = d.rowid
-                WHERE memory_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-            """
-            params = (fts_query, limit)
+    cur = con.cursor()
+    if kind and kind != "all":
+        sql = """
+            SELECT d.id, d.kind, d.source, d.title, d.content, d.metadata, d.updated_at,
+                   bm25(memory_fts) as rank
+            FROM memory_fts f
+            JOIN memory_docs d ON f.rowid = d.rowid
+            WHERE memory_fts MATCH ? AND d.kind = ?
+            ORDER BY rank
+            LIMIT ?
+        """
+        params = (fts_query, kind, limit)
+    else:
+        sql = """
+            SELECT d.id, d.kind, d.source, d.title, d.content, d.metadata, d.updated_at,
+                   bm25(memory_fts) as rank
+            FROM memory_fts f
+            JOIN memory_docs d ON f.rowid = d.rowid
+            WHERE memory_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        """
+        params = (fts_query, limit)
 
-        try:
-            rows = cur.execute(sql, params).fetchall()
-        except sqlite3.OperationalError:
-            # Fallback to simple LIKE if FTS expression has syntax peculiarities
-            fallback_sql = """
-                SELECT id, kind, source, title, content, metadata, updated_at, 0.0 as rank
-                FROM memory_docs
-                WHERE (lower(title) LIKE ? OR lower(content) LIKE ?)
-            """
-            param_str = f"%{query.lower()}%"
-            if kind and kind != "all":
-                fallback_sql += " AND kind = ? LIMIT ?"
-                rows = cur.execute(fallback_sql, (param_str, param_str, kind, limit)).fetchall()
-            else:
-                fallback_sql += " LIMIT ?"
-                rows = cur.execute(fallback_sql, (param_str, param_str, limit)).fetchall()
+    try:
+        rows = cur.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        # Fallback to simple LIKE if FTS expression has syntax peculiarities
+        fallback_sql = """
+            SELECT id, kind, source, title, content, metadata, updated_at, 0.0 as rank
+            FROM memory_docs
+            WHERE (lower(title) LIKE ? OR lower(content) LIKE ?)
+        """
+        param_str = f"%{query.lower()}%"
+        if kind and kind != "all":
+            fallback_sql += " AND kind = ? LIMIT ?"
+            rows = cur.execute(fallback_sql, (param_str, param_str, kind, limit)).fetchall()
+        else:
+            fallback_sql += " LIMIT ?"
+            rows = cur.execute(fallback_sql, (param_str, param_str, limit)).fetchall()
 
     results = []
     for r in rows:

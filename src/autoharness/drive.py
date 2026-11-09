@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -81,12 +82,102 @@ def get_drive_queue(project_root: Path) -> list[dict[str, Any]]:
     return sorted(items, key=lambda x: x.get("id", 0))
 
 
+def classify_test_failure(output: str) -> dict[str, Any]:
+    """Classify whether a test suite failure is a broken test harness vs real assertion failure.
+
+    Distinguishes:
+      - harness_syntax: SyntaxError in test or harness files.
+      - harness_collection: CollectionError, ModuleNotFoundError, ImportError in test setup.
+      - harness_fixture: Missing or failing pytest fixture.
+      - harness_internal: Pytest internal error or crash.
+      - assertion_failure: Legitimate business logic / test assertion failure.
+      - timeout: Execution timed out.
+      - unknown: Unclassified failure.
+    """
+    out_lower = output.lower()
+
+    if "syntaxerror:" in out_lower:
+        match = re.search(r"SyntaxError:\s*([^\n]+)", output)
+        detail = match.group(0) if match else "SyntaxError in test or harness code"
+        return {
+            "is_harness_fault": True,
+            "fault_type": "harness_syntax",
+            "summary": detail,
+        }
+
+    if "fixture" in out_lower and ("not found" in out_lower or "fixture lookup error" in out_lower):
+        match = re.search(r"fixture '[^']+' not found", output, re.IGNORECASE)
+        detail = match.group(0) if match else "Pytest fixture resolution error"
+        return {
+            "is_harness_fault": True,
+            "fault_type": "harness_fixture",
+            "summary": detail,
+        }
+
+    if "error collecting" in out_lower or "collectionerror" in out_lower or ("modulenotfounderror:" in out_lower and "tests" in out_lower):
+        match = re.search(r"(?:ModuleNotFoundError|ImportError):\s*([^\n]+)", output)
+        detail = match.group(0) if match else "Test collection or import failure"
+        return {
+            "is_harness_fault": True,
+            "fault_type": "harness_collection",
+            "summary": detail,
+        }
+
+    if "internalerror>" in out_lower:
+        return {
+            "is_harness_fault": True,
+            "fault_type": "harness_internal",
+            "summary": "Internal test runner failure (INTERNALERROR)",
+        }
+
+    if "timed out after" in out_lower:
+        return {
+            "is_harness_fault": False,
+            "fault_type": "timeout",
+            "summary": "Test run timed out",
+        }
+
+    if "assert" in out_lower or "assertionerror" in out_lower or "failed:" in out_lower or "fail" in out_lower:
+        match = re.search(r"(?:AssertionError:\s*[^\n]+|E\s+assert\s+[^\n]+)", output)
+        detail = match.group(0) if match else "Assertion failure in test execution"
+        return {
+            "is_harness_fault": False,
+            "fault_type": "assertion_failure",
+            "summary": detail,
+        }
+
+    return {
+        "is_harness_fault": False,
+        "fault_type": "unknown",
+        "summary": "Unknown test execution failure",
+    }
+
+
+class SentinelResult(tuple):
+    """Result tuple of regression sentinel verification: (passed, output).
+
+    Extends standard 2-tuple for full backward compatibility while providing
+    structured classification of broken test harness vs assertion failures.
+    """
+    passed: bool
+    output: str
+    classification: dict[str, Any]
+
+    def __new__(cls, passed: bool, output: str, classification: dict[str, Any] | None = None):
+        cls_dict = classification if classification is not None else classify_test_failure(output)
+        obj = super().__new__(cls, (passed, output))
+        obj.passed = passed
+        obj.output = output
+        obj.classification = cls_dict
+        return obj
+
+
 def run_regression_sentinel(
     project_root: Path,
     test_command: str = "pytest",
     timeout: int = 60,
-) -> tuple[bool, str]:
-    """Execute regression test command and return (passed, output)."""
+) -> SentinelResult:
+    """Execute regression test command and return SentinelResult (passed, output)."""
     try:
         res = subprocess.run(
             test_command,
@@ -98,12 +189,19 @@ def run_regression_sentinel(
             timeout=timeout,
         )
         passed = (res.returncode == 0)
-        output = (res.stdout or "") + (res.stderr or "")
-        return passed, output.strip()
+        output = ((res.stdout or "") + (res.stderr or "")).strip()
+        classification = classify_test_failure(output) if not passed else {
+            "is_harness_fault": False,
+            "fault_type": "none",
+            "summary": "All tests passed",
+        }
+        return SentinelResult(passed, output, classification)
     except subprocess.TimeoutExpired:
-        return False, f"Regression test timed out after {timeout}s"
+        msg = f"Regression test timed out after {timeout}s"
+        return SentinelResult(False, msg, {"is_harness_fault": False, "fault_type": "timeout", "summary": msg})
     except (subprocess.SubprocessError, OSError) as e:
-        return False, f"Regression test execution error: {e}"
+        msg = f"Regression test execution error: {e}"
+        return SentinelResult(False, msg, {"is_harness_fault": True, "fault_type": "harness_execution", "summary": msg})
 
 
 def rollback_changes(project_root: Path) -> tuple[bool, str]:
@@ -282,11 +380,19 @@ def run_drive_loop(
             # Failure detected: trigger rollback
             rollback_ok, rollback_msg = rollback_changes(project_root)
             fail_reason = task_log if not task_passed else f"Regression check failed: {regression_log}"
+            classification = getattr(regression_passed, "classification", {})
+            if not classification and isinstance(regression_log, str):
+                classification = classify_test_failure(regression_log)
+            if classification.get("is_harness_fault"):
+                fail_reason = f"Broken test harness detected [{classification.get('fault_type')}]: {classification.get('summary')}"
+
             record = {
                 "id": fid,
                 "text": ftext,
                 "status": "failed",
                 "reason": fail_reason,
+                "fault_type": classification.get("fault_type", "unknown"),
+                "is_harness_fault": classification.get("is_harness_fault", False),
                 "rollback": rollback_ok,
                 "rollback_msg": rollback_msg,
                 "failed_at": time.time(),

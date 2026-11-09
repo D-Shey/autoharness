@@ -149,7 +149,8 @@ def parse_python_file(file_path: Path) -> dict[str, Any]:
         "code_lines": code_lines,
         "imports": imports,
         "classes": classes,
-        "functions": functions
+        "functions": functions,
+        "policy_violations": check_ast_policies(content, filename=str(file_path)),
     }
 
 
@@ -277,3 +278,172 @@ def search_codemap(codemap: dict[str, Any], query: str) -> list[dict[str, Any]]:
                 })
 
     return matches
+
+
+def check_ast_policies(
+    source_or_path: str | Path,
+    filename: str = "<unknown>",
+) -> list[dict[str, Any]]:
+    """Deterministic structural AST policy verification (zero runtime dependencies).
+
+    Checks code against reliable engineering invariants:
+      - DEAD_PRIVATE_METHOD: private class methods that are never called/referenced within the class.
+      - SILENCED_EXCEPTION: broad exceptions (Exception, BaseException, bare except) swallowed silently.
+      - UNBOUNDED_RESOURCE_OPEN: standalone file open() without 'with' or try/finally cleanup.
+    """
+    if isinstance(source_or_path, Path):
+        file_path = source_or_path
+        filename = str(file_path).replace("\\", "/")
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return [{"rule": "READ_ERROR", "severity": "blocker", "file": filename, "line": 0, "symbol": "", "message": str(e)}]
+    elif isinstance(source_or_path, str):
+        content = source_or_path
+        p = Path(source_or_path)
+        if len(source_or_path) < 1024 and "\n" not in source_or_path and p.is_file():
+            filename = str(p).replace("\\", "/")
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return [{"rule": "READ_ERROR", "severity": "blocker", "file": filename, "line": 0, "symbol": "", "message": str(e)}]
+    else:
+        return []
+
+    try:
+        tree = ast.parse(content, filename=filename)
+    except SyntaxError as e:
+        return [{
+            "rule": "SYNTAX_ERROR",
+            "severity": "blocker",
+            "file": filename,
+            "line": e.lineno or 0,
+            "symbol": "",
+            "message": f"SyntaxError: {e.msg} at line {e.lineno}",
+        }]
+
+    violations: list[dict[str, Any]] = []
+
+    # 1. DEAD_PRIVATE_METHOD check
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            private_methods: dict[str, Any] = {}
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    m_name = item.name
+                    if m_name.startswith("_") and not m_name.startswith("__"):
+                        # Skip properties, overrides, abstractmethods
+                        decs = {ast.unparse(d) if hasattr(ast, "unparse") else "" for d in item.decorator_list}
+                        if any("property" in d or "abstractmethod" in d or "override" in d for d in decs):
+                            continue
+                        private_methods[m_name] = item
+
+            if private_methods:
+                referenced: set[str] = set()
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Attribute) and child.attr in private_methods:
+                        referenced.add(child.attr)
+                    elif isinstance(child, ast.Name) and child.id in private_methods:
+                        referenced.add(child.id)
+
+                for m_name, m_node in private_methods.items():
+                    if m_name not in referenced:
+                        violations.append({
+                            "rule": "DEAD_PRIVATE_METHOD",
+                            "severity": "major",
+                            "file": filename,
+                            "line": m_node.lineno,
+                            "symbol": f"{node.name}.{m_name}",
+                            "message": f"Private method '{node.name}.{m_name}' declared at line {m_node.lineno} is never referenced in class '{node.name}'.",
+                        })
+
+    # 2. SILENCED_EXCEPTION check
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler):
+            is_broad = False
+            exc_name = "bare except"
+            if node.type is None:
+                is_broad = True
+            elif isinstance(node.type, ast.Name):
+                exc_name = node.type.id
+                if exc_name in ("Exception", "BaseException"):
+                    is_broad = True
+            elif isinstance(node.type, ast.Tuple):
+                names = [elt.id for elt in node.type.elts if isinstance(elt, ast.Name)]
+                if any(n in ("Exception", "BaseException") for n in names):
+                    is_broad = True
+                    exc_name = ", ".join(names)
+
+            if is_broad:
+                is_silenced = True
+                for stmt in node.body:
+                    if isinstance(stmt, (ast.Pass, ast.Continue)):
+                        continue
+                    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+                        continue
+                    is_silenced = False
+                    break
+
+                if is_silenced:
+                    violations.append({
+                        "rule": "SILENCED_EXCEPTION",
+                        "severity": "major",
+                        "file": filename,
+                        "line": node.lineno,
+                        "symbol": exc_name,
+                        "message": f"Broad exception handler at line {node.lineno} ({exc_name}) silences error without handling, re-raising, or returning.",
+                    })
+
+    # 3. UNBOUNDED_RESOURCE_OPEN check
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            calls_open: list[ast.Call] = []
+            has_with_or_finally = False
+            for child in ast.walk(node):
+                if isinstance(child, ast.With):
+                    has_with_or_finally = True
+                elif isinstance(child, ast.Try) and child.finalbody:
+                    has_with_or_finally = True
+                elif isinstance(child, ast.Call):
+                    if isinstance(child.func, ast.Name) and child.func.id == "open":
+                        calls_open.append(child)
+
+            if calls_open and not has_with_or_finally:
+                for c in calls_open:
+                    violations.append({
+                        "rule": "UNBOUNDED_RESOURCE_OPEN",
+                        "severity": "major",
+                        "file": filename,
+                        "line": c.lineno,
+                        "symbol": "open",
+                        "message": f"Standalone 'open()' call at line {c.lineno} outside a 'with' context manager or try/finally block.",
+                    })
+
+    violations.sort(key=lambda x: (x.get("line", 0), x.get("rule", "")))
+    return violations
+
+
+def scan_ast_policies(
+    root_path: Path,
+    max_depth: int = 5,
+    exclude_dirs: set[str] | None = None
+) -> list[dict[str, Any]]:
+    """Scan all Python modules under root_path for AST policy violations."""
+    excludes = DEFAULT_EXCLUDES | (exclude_dirs or set())
+    root = root_path.resolve()
+    all_violations: list[dict[str, Any]] = []
+
+    if root.is_file():
+        if root.suffix == ".py":
+            return check_ast_policies(root)
+        return []
+
+    for path in sorted(root.rglob("*.py")):
+        parts = set(path.relative_to(root).parts[:-1])
+        if parts & excludes:
+            continue
+        if len(path.relative_to(root).parts) > max_depth:
+            continue
+        all_violations.extend(check_ast_policies(path))
+
+    return all_violations
