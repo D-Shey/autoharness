@@ -29,7 +29,7 @@ session is gone), `autoharness claim <your session id> --reason "<their words>"`
 ## 1. Start at the right level
 
 ```bash
-autoharness --agent cursor init "<the user's task, verbatim>" --mode light|full|reviewed|auto
+autoharness --agent {{AGENT}} init "<the user's task, verbatim>" --mode light|full|reviewed|auto
 ```
 
 - `light`: a chore that needs no capability (a typo, a git commit). No search, no brief: do the
@@ -110,14 +110,15 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get 
   --method "<technique or steps>: <url>; ...; searched: <queries>" \
   --constraints "<verbatim>" --verify "<checks, against what>" \
   --candidates "<name>: take|skip, why; ...; searched: <queries>" \
-  --gaps "create <skill-name>: <capability>; ..."   # or "none: <why tools at hand cover it>"
+  --gaps "create <skill-name>: <capability>; ..."   # or "none: <why tools at hand cover it>" \
+  --components "<name>: <what it does / how to verify alone>; ..."   # decompose into 2-4 isolated subcomponents (or none)
   # --fidelity "<level to judge at>" (required for work judged by eye: "stylised poster, not photographic")
   # optional: --review critic|pair (pair: + a code-quality reviewer)
   #           --preserve "<existing behaviour that must keep working>"
 ```
 
-Number the goal's parts (`1 ...; 2 ...`): they become brief items B1, B2, ... (and P1, ... for
-`--preserve`), which checks and the critic report on one by one.
+Number the goal's parts (`1 ...; 2 ...`): they become brief items B1, B2, ... (and C1, C2, ... for
+`--components`, P1, ... for `--preserve`), which checks and the critic report on one by one.
 
 Give a verdict for every plausible candidate. Show the user the brief in a few lines.
 For browser, API (your own, or a third-party one: `api-client`), logs or database checks, `autoharness verify guide <kind>` has a template:
@@ -157,7 +158,7 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - A low-trust skill that brings little is worse than none: write down what you know instead.
 - `already_installed`: an earlier task kept it; use it.
 - `via: gateway`: works now, use Code Mode (`harness_search`, `harness_execute`) or `harness_tools` / `harness_call`. Otherwise the server is in
-  `.cursor/mcp.json`: tell the user to restart Cursor (or refresh in Cursor Settings > MCP) so it picks up the new server, and continue what does not depend on it. If `add`
+  `{{MCP_FILE}}`: tell the user to {{RELOAD}}, and continue what does not depend on it. If `add`
   suggests `autoharness gateway install`, offer it once (`--user` puts it in your own config, for
   every project): later servers then need no restart.
 
@@ -178,8 +179,24 @@ Matching a reference (an API's response, a sample file, a layout, a picture, the
 Take its facts from the reference itself with a tool, not from memory: field names and values,
 sizes, positions, timings, the exact output. For codebases, avoid burning tokens reading whole files or searching blind with grep: extract exact definitions, signatures, and file:line coordinates with AST tools (`xerj def <symbol>`, `xerj search -k 3` or codebase MCP servers). Save them to a file and record it before the first
 result (`autoharness evidence add <file> --kind facts`); the critic checks the result against them.
-Build the first version as a block-in from these facts: layout, proportions and main structure,
-no detail yet, and run the critic on it before adding detail. A wrong base costs every later round.
+
+**Decompose, don't monolith.** Never try to solve or generate an entire complex scene, architecture or multi-component system in a single unverified pass. Break it into isolated subcomponents (for a picture: focal subject, secondary figure, perspective environment, atmosphere/lighting layers; for a system: data layer, protocol, state engine). Build and verify each subcomponent progressively before full assembly.
+
+**Start small and build progressively.**
+1. Select the smallest, most definitive isolated subcomponent.
+2. Build it in isolation (e.g. `officer_k.svg`, `auth_token.py`).
+3. Visually inspect or test it alone. Record it with `autoharness evidence add <file> --kind component --for C1`.
+4. If a component looks flawed or tests fail, change the paradigm immediately: do not micro-tweak broken abstractions or geometry in-place. Pivot to a different representation, isolate the failure, and rebuild.
+5. **Programmatic assembly, no manual copy-paste duplication.** Assemble verified components into the integrated system using modular imports, composition functions, or dedicated build pipelines (`import`, `<use xlink:href="...">`, modular templates). Avoid retyping or copy-pasting monolithic string blobs where regressions and stale geometry hide.
+6. Only once all individual components are verified and assembled, verify the integrated base (`autoharness verify run "<command>" --for B1`) and record (`autoharness evidence add <file> --kind result`).
+
+**Resist LLM defaults and training biases.** Models naturally gravitate towards symmetric 2D flat templates, generic stubs and standard boilerplate. When matching a real reference, discard default memory shortcuts: construct geometry, anatomy and architecture directly from authentic domain principles (e.g. 3/4 perspective planes, foreshortening, anatomical landmarks, structural framing).
+
+**Syntactic checks vs Semantic expertise.** Programmatic tests (`verify run`) check formal invariants (types, schema, exit code, pixel bounds, syntax). The independent critic (`autoharness critic`) evaluates deep semantic fidelity, architecture, and aesthetic nuance against facts and references. A passing exit 0 test is not enough on its own: both formal checks and critic review are essential.
+
+**Visual feedback loop.** In visual or layout tasks, never write hundreds of coordinate numbers blindly. Render the component to an image and inspect it with your eyes at each milestone before proceeding to the next layer.
+
+**Change paradigm on friction.** If two rounds of review flag the same part or structural defect, stop micro-tweaking the same code in place. Change the underlying representation or method: isolate the failing component, test it alone, and rebuild its structure from measured reference facts.
 
 Found work outside this task (a bug next door, a critic point beyond the brief)? Do not fix it
 now and do not drop it: `autoharness followup add "<what, where>"`. `init` shows open follow-ups;
@@ -190,9 +207,9 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 1. **Verify against the quality bar and keep the evidence** (light mode: verify, then teardown).
 
    ```bash
-   autoharness evidence add <file> --kind reference|facts|result   # the thing itself; the whole result, then close-ups
+   autoharness evidence add <file> --kind reference|facts|component|result   # reference, facts, subcomponent, or whole result
    autoharness evidence add <file> --kind result --closeup   # a close-up or part of the latest whole result
-   autoharness verify run "<test command>" --for B1|preserve   # autoharness runs it: exit code decides
+   autoharness verify run "<test command>" --for B1|C1|preserve   # autoharness runs it: exit code decides
    autoharness evidence diff                                 # code: the whole working-tree diff
    autoharness review --by self --diff "1 <most important>; 2 ..." --worst blocker|major|minor|none
    autoharness critic                                        # prompt for an independent reviewer
