@@ -33,7 +33,13 @@ Issues = "https://github.com/D-Shey/autoharness/issues"
 Changelog = "https://github.com/D-Shey/autoharness/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "tree-sitter>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-java>=0.23.0",
+]
 codemap = [
     "tree-sitter>=0.23.0",
     "tree-sitter-javascript>=0.23.0",

@@ -352,6 +352,8 @@ def safe_finally():
 
 
 def test_codemap_parse_javascript_file(tmp_path):
+    if codemap.get_tree_sitter_parser("javascript") is None:
+        pytest.skip("tree-sitter-javascript unavailable")
     js_file = tmp_path / "service.js"
     js_file.write_text("""import express from "express";
 const { helper } = require("./utils");
@@ -388,6 +390,8 @@ const transform = async (data) => data.toUpperCase();
 
 
 def test_codemap_parse_typescript_and_tsx_file(tmp_path):
+    if codemap.get_tree_sitter_parser("typescript") is None:
+        pytest.skip("tree-sitter-typescript unavailable")
     ts_file = tmp_path / "user.ts"
     ts_file.write_text("""import { Observable } from "rxjs";
 
@@ -435,6 +439,8 @@ export const hashPassword = (raw: string): string => raw;
 
 
 def test_codemap_parse_java_file(tmp_path):
+    if codemap.get_tree_sitter_parser("java") is None:
+        pytest.skip("tree-sitter-java unavailable")
     java_file = tmp_path / "OrderService.java"
     java_file.write_text("""package com.example.orders;
 import java.util.List;
@@ -482,6 +488,16 @@ def test_codemap_tree_renders_error_modules():
     assert "[ERROR: Tree-sitter parser for javascript unavailable]" in tree
 
 
+def test_codemap_graceful_fallback_when_parser_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(codemap, "get_tree_sitter_parser", lambda lang: None)
+    js_file = tmp_path / "index.js"
+    js_file.write_text("class Server {};", encoding="utf-8")
+    parsed = codemap.parse_source_file(js_file)
+    assert parsed["exists"] is True
+    assert "unavailable" in parsed.get("error", "")
+    assert parsed["classes"] == []
+
+
 def test_codemap_excludes_node_modules_and_venv(tmp_path):
     repo = tmp_path / "test_repo"
     repo.mkdir()
@@ -501,6 +517,8 @@ def test_codemap_excludes_node_modules_and_venv(tmp_path):
 
 
 def test_codemap_parsing_benchmark(tmp_path):
+    if codemap.get_tree_sitter_parser("javascript") is None:
+        pytest.skip("tree-sitter unavailable")
     import time
     repo = tmp_path / "bench_repo"
     repo.mkdir()
@@ -534,6 +552,8 @@ def test_codemap_parsing_benchmark(tmp_path):
 
 
 def test_codemap_polyglot_repository_scan_and_tree(tmp_path):
+    if any(codemap.get_tree_sitter_parser(l) is None for l in ("javascript", "typescript", "java")):
+        pytest.skip("tree-sitter grammars unavailable")
     repo = tmp_path / "polyglot_repo"
     repo.mkdir()
     (repo / "app.py").write_text("class PyApp:\n    def start(self): pass\n", encoding="utf-8")
