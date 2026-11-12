@@ -29,7 +29,7 @@ session is gone), `autoharness claim <your session id> --reason "<their words>"`
 ## 1. Start at the right level
 
 ```bash
-autoharness --agent {{AGENT}} init "<the user's task, verbatim>" --mode light|full|reviewed|auto
+autoharness --agent cursor init "<the user's task, verbatim>" --mode light|full|reviewed|auto
 ```
 
 - `light`: a chore that needs no capability (a typo, a git commit). No search, no brief: do the
@@ -158,7 +158,7 @@ autoharness decision mcp|skill <name> select|skip --reason "..."
 - A low-trust skill that brings little is worse than none: write down what you know instead.
 - `already_installed`: an earlier task kept it; use it.
 - `via: gateway`: works now, use Code Mode (`harness_search`, `harness_execute`) or `harness_tools` / `harness_call`. Otherwise the server is in
-  `{{MCP_FILE}}`: tell the user to {{RELOAD}}, and continue what does not depend on it. If `add`
+  `.cursor/mcp.json`: tell the user to restart Cursor (or refresh in Cursor Settings > MCP) so it picks up the new server, and continue what does not depend on it. If `add`
   suggests `autoharness gateway install`, offer it once (`--user` puts it in your own config, for
   every project): later servers then need no restart.
 

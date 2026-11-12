@@ -677,6 +677,8 @@ def cmd_review(args, project, catalog):
     if quality:
         extra["quality"] = {"answer_id": quality["id"], "verdict": quality["verdict"],
                             "diff": answers.as_diff(quality)}
+        if quality.get("lean"):
+            extra["quality"]["lean"] = quality["lean"]
     pair = task.info().get("comparisons", {}).get(answer["id"]) if answer else None
     if pair and (cmp := evidence.compared(pair, answer["closer"])):
         extra["compared"] = cmp
@@ -1613,10 +1615,20 @@ def cmd_teardown(args, project, catalog):
         names = ", ".join(u["name"] for u in result["unsaved_generated"])
         nxt += (f" Skills you wrote are not in the library: {names}. If they are worth reusing, "
                 "run `autoharness skill save <name>` and ask the user.")
+    harvested = followups.harvest(project, task.id)
+    if harvested["added"] > 0:
+        task.log(f"teardown auto-harvested {harvested['added']} shortcut(s) into followups")
     found = followups.from_task(project, task.id)
     if found:
         nxt += (" Tell the user the follow-ups this task left for later: "
                 + "; ".join(f"#{i['id']} {i['text']}" for i in found) + ".")
+    last_quality_rev = next((r for r in reversed(info.get("reviews", []))
+                             if "quality" in r or r.get("by") == "quality"), None)
+    lean_savings = ((last_quality_rev.get("quality", {}) or {}).get("lean")
+                    or last_quality_rev.get("lean")) if last_quality_rev else None
+    if lean_savings:
+        checked["lean"] = lean_savings
+        nxt += f" Lean optimization: {lean_savings}."
     if learned and not info.get("lessons_seen"):
         nxt += (" The task ended on the user's word with friction left unrecorded (`lessons`): offer once to keep "
                 "what it taught (`autoharness lesson add` or a skill); do nothing if they decline.")
@@ -3263,8 +3275,23 @@ def cmd_followup(args, project, catalog):
     if args.action == "list":
         out({"status": "ok", "followups": followups.listing(project, args.all)})
         return 0
+    task_id = project.active_id()
+    if args.action == "harvest":
+        marker = getattr(args, "marker", None) or "shortcut"
+        res = followups.harvest(project, task_id, marker=marker)
+        if task_id and res["added"] > 0:
+            project.task().log(f"harvested {res['added']} shortcut(s) into followups")
+        out({
+            "status": "ok",
+            "harvested": res["added"],
+            "found": res["found"],
+            "no_trigger": res["no_trigger"],
+            "new_followups": res["new_followups"],
+            "next": f"{res['found']} shortcut marker(s) found ({res['no_trigger']} without trigger), {res['added']} added to followups."
+        })
+        return 0
     if not args.value:
-        raise HarnessError("usage: autoharness followup add \"<what, where>\" | done <id> [--note ...]")
+        raise HarnessError("usage: autoharness followup add \"<what, where>\" | done <id> [--note ...] | harvest [--marker ...]")
     task_id = project.active_id()
     if args.action == "add":
         item = followups.add(project, args.value, task_id)
@@ -3497,10 +3524,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name")
     s.add_argument("verdict", choices=["select", "skip"])
     s.add_argument("--reason", required=True)
-    s = sub.add_parser("followup", help="keep work found outside the task for later tasks: add, list, done")
-    s.add_argument("action", choices=["add", "list", "done"])
+    s = sub.add_parser("followup", help="keep work found outside the task for later tasks: add, list, done, harvest")
+    s.add_argument("action", choices=["add", "list", "done", "harvest"])
     s.add_argument("value", nargs="?", help="add: what is left to do and where; done: its number")
     s.add_argument("--note", help="done: what settled it")
+    s.add_argument("--marker", default="shortcut", help="harvest: marker comment keyword to scan (default: shortcut)")
     s.add_argument("--all", action="store_true", help="list: include done items")
     sub.add_parser("journal", help="draft this task's entry for the project's journal (JOURNAL.md or the `journal` "
                                    "setting), in the journal's own form")

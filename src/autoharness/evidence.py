@@ -847,16 +847,23 @@ them, not only the diff.
 {ruled_text}
 {COMMIT_BEFORE_CRITIQUE}
 List the most important defects in how the work is done, most important first, at most 8, numbered 1., 2., ...
-with each point's tags on the same line. Look for: bugs and wrong behaviour on inputs the code will meet;
-errors and edge cases left unhandled; security problems; changed behaviour with no test that shows it; tests
-removed, weakened or made to pass without checking anything; needless complexity or duplication the next change
-will pay for; code that ignores the conventions of the code around it; a break of the user's constraints.
+with each point's tags on the same line. Look for:
+- bugs and wrong behaviour on inputs the code will meet;
+- errors and edge cases left unhandled; security problems;
+- changed behaviour with no test that shows it; tests removed, weakened or made to pass without checking anything;
+- needless complexity, over-engineering, or duplication the next change will pay for;
+- code that should not exist (dead code, unrequested speculative options, abstractions with only one implementation);
+- reinvented helpers where the codebase or standard library already provides the capability;
+- new dependencies added where standard library or existing dependencies suffice;
+- code that ignores the conventions of the code around it; a break of the user's constraints.
 Not your job: whether the brief's items are met, and style preferences that cost nothing.
 List only real defects, each with the file and line; if you find none, write "No differences." instead of a list.
 Tag each one:
 - severity: blocker (the work fails or does damage), major (a real defect someone will hit), or minor (polish);
 - fixable or not within the user's constraints.
 Give each defect the severity it has, without praise.
+If any lean findings exist (unneeded abstractions, bloat, reinvented helpers), add a summary line before VERDICT:
+Lean: -<N> lines possible (name the files and what can be removed or reused).
 {previous}
 End with exactly one line naming the worst severity among the FIXABLE defects:
 VERDICT: blocker | major | minor | none"""
