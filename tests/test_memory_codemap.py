@@ -350,3 +350,215 @@ def safe_finally():
     assert len(open_violations) == 1
     assert open_violations[0]["line"] == 3
 
+
+def test_codemap_parse_javascript_file(tmp_path):
+    js_file = tmp_path / "service.js"
+    js_file.write_text("""import express from "express";
+const { helper } = require("./utils");
+
+/**
+ * Main Controller service
+ */
+class ApiController extends BaseController {
+    constructor(db) { this.db = db; }
+    async handleRequest(req, res) { return res.json({}); }
+}
+
+function computeStats(items) { return items.length; }
+const transform = async (data) => data.toUpperCase();
+""", encoding="utf-8")
+
+    parsed = codemap.parse_source_file(js_file)
+    assert parsed["exists"] is True
+    assert len(parsed["classes"]) == 1
+    cls = parsed["classes"][0]
+    assert cls["name"] == "ApiController"
+    assert "BaseController" in cls["bases"]
+    assert "Main Controller service" in cls["doc"]
+    assert len(cls["methods"]) == 2
+    method_names = [m["name"] for m in cls["methods"]]
+    assert "constructor" in method_names and "handleRequest" in method_names
+    handle_m = next(m for m in cls["methods"] if m["name"] == "handleRequest")
+    assert handle_m["is_async"] is True
+
+    fn_names = [f["name"] for f in parsed["functions"]]
+    assert "computeStats" in fn_names and "transform" in fn_names
+    transform_fn = next(f for f in parsed["functions"] if f["name"] == "transform")
+    assert transform_fn["is_async"] is True
+
+
+def test_codemap_parse_typescript_and_tsx_file(tmp_path):
+    ts_file = tmp_path / "user.ts"
+    ts_file.write_text("""import { Observable } from "rxjs";
+
+export interface IUser {
+    getUser(id: string): Promise<UserDTO>;
+}
+
+/**
+ * User manager handles user authentication and lookup.
+ */
+export class UserManager implements IUser {
+    private repo: Repo;
+    async getUser(id: string): Promise<UserDTO> { return null; }
+}
+
+/**
+ * Hashes raw user password with salt.
+ */
+export const hashPassword = (raw: string): string => raw;
+""", encoding="utf-8")
+
+    parsed = codemap.parse_source_file(ts_file)
+    assert parsed["exists"] is True
+    class_names = [c["name"] for c in parsed["classes"]]
+    assert "IUser" in class_names and "UserManager" in class_names
+
+    user_mgr = next(c for c in parsed["classes"] if c["name"] == "UserManager")
+    assert "IUser" in user_mgr["bases"]
+    assert "User manager handles user authentication" in user_mgr["doc"]
+    assert len(user_mgr["methods"]) == 1
+    m = user_mgr["methods"][0]
+    assert m["name"] == "getUser"
+    assert "Promise<UserDTO>" in m["returns"]
+    assert m["is_async"] is True
+
+    fn = next(f for f in parsed["functions"] if f["name"] == "hashPassword")
+    assert "string" in fn["returns"]
+    assert "Hashes raw user password with salt" in fn["doc"]
+
+    # Test TSX
+    tsx_file = tmp_path / "component.tsx"
+    tsx_file.write_text("""export const Header = (props: Props) => <div className="head">{props.title}</div>;""", encoding="utf-8")
+    parsed_tsx = codemap.parse_source_file(tsx_file)
+    assert any(f["name"] == "Header" for f in parsed_tsx["functions"])
+
+
+def test_codemap_parse_java_file(tmp_path):
+    java_file = tmp_path / "OrderService.java"
+    java_file.write_text("""package com.example.orders;
+import java.util.List;
+import org.springframework.stereotype.Service;
+
+@Service
+public class OrderService extends BaseService implements IOrderService {
+    public OrderService() {}
+
+    @Transactional
+    public List<Order> getActiveOrders(Long userId) { return List.of(); }
+}
+
+public interface IOrderService {
+    List<Order> getActiveOrders(Long userId);
+}
+""", encoding="utf-8")
+
+    parsed = codemap.parse_source_file(java_file)
+    assert parsed["exists"] is True
+    assert "package com.example.orders;" in parsed["imports"]
+    class_names = [c["name"] for c in parsed["classes"]]
+    assert "OrderService" in class_names and "IOrderService" in class_names
+
+    order_svc = next(c for c in parsed["classes"] if c["name"] == "OrderService")
+    assert "BaseService" in order_svc["bases"]
+    assert "IOrderService" in order_svc["bases"]
+    assert any("@Service" in d for d in order_svc["decorators"])
+
+    method_names = [m["name"] for m in order_svc["methods"]]
+    assert "OrderService" in method_names and "getActiveOrders" in method_names
+    get_orders = next(m for m in order_svc["methods"] if m["name"] == "getActiveOrders")
+    assert "List<Order>" in get_orders["returns"]
+    assert "Long userId" in get_orders["args"]
+    assert any("@Transactional" in d for d in get_orders["decorators"])
+
+
+def test_codemap_tree_renders_error_modules():
+    fake_cmap = {
+        "modules": {
+            "broken.js": {"error": "Tree-sitter parser for javascript unavailable"}
+        }
+    }
+    tree = codemap.format_codemap_tree(fake_cmap)
+    assert "[ERROR: Tree-sitter parser for javascript unavailable]" in tree
+
+
+def test_codemap_excludes_node_modules_and_venv(tmp_path):
+    repo = tmp_path / "test_repo"
+    repo.mkdir()
+    (repo / "index.ts").write_text("export const main = () => {};", encoding="utf-8")
+    nm = repo / "node_modules" / "some-lib"
+    nm.mkdir(parents=True)
+    (nm / "lib.js").write_text("module.exports = {};", encoding="utf-8")
+    venv = repo / ".venv" / "lib"
+    venv.mkdir(parents=True)
+    (venv / "site.py").write_text("x = 1", encoding="utf-8")
+
+    cmap = codemap.generate_codemap(repo)
+    assert cmap["modules_count"] == 1
+    assert "index.ts" in cmap["modules"]
+    assert not any("node_modules" in k for k in cmap["modules"])
+    assert not any(".venv" in k for k in cmap["modules"])
+
+
+def test_codemap_parsing_benchmark(tmp_path):
+    import time
+    repo = tmp_path / "bench_repo"
+    repo.mkdir()
+    for i in range(15):
+        (repo / f"mod_{i}.py").write_text(
+            f"class Worker{i}:\n    def do_work(self, item: int) -> bool:\n        return True\n",
+            encoding="utf-8"
+        )
+        (repo / f"service_{i}.ts").write_text(
+            f"export class Service{i} {{\n    process(data: string): boolean {{ return true; }}\n}}\n",
+            encoding="utf-8"
+        )
+        (repo / f"handler_{i}.js").write_text(
+            f"function handle{i}(req, res) {{ return req.id; }}\nconst fn{i} = () => 42;\n",
+            encoding="utf-8"
+        )
+        (repo / f"Entity{i}.java").write_text(
+            f"public class Entity{i} {{\n    public int getId() {{ return {i}; }}\n}}\n",
+            encoding="utf-8"
+        )
+
+    t0 = time.perf_counter()
+    cmap = codemap.generate_codemap(repo)
+    elapsed = time.perf_counter() - t0
+
+    assert cmap["modules_count"] == 60
+    assert elapsed < 2.0
+    matches = codemap.search_codemap(cmap, "Worker10")
+    assert len(matches) == 1
+    assert matches[0]["name"] == "Worker10"
+
+
+def test_codemap_polyglot_repository_scan_and_tree(tmp_path):
+    repo = tmp_path / "polyglot_repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("class PyApp:\n    def start(self): pass\n", encoding="utf-8")
+    (repo / "client.ts").write_text("export class TsClient { fetch() {} }\n", encoding="utf-8")
+    (repo / "worker.js").write_text("const work = () => {};\n", encoding="utf-8")
+    (repo / "Server.java").write_text("public class Server { public void listen() {} }\n", encoding="utf-8")
+
+    cmap = codemap.generate_codemap(repo)
+    assert cmap["modules_count"] == 4
+    assert any(k.endswith("app.py") for k in cmap["modules"])
+    assert any(k.endswith("client.ts") for k in cmap["modules"])
+    assert any(k.endswith("worker.js") for k in cmap["modules"])
+    assert any(k.endswith("Server.java") for k in cmap["modules"])
+
+    tree = codemap.format_codemap_tree(cmap)
+    assert "PyApp" in tree
+    assert "TsClient" in tree
+    assert "Server" in tree
+    assert "work" in tree
+
+    # Symbol search across polyglot files
+    matches_server = codemap.search_codemap(cmap, "Server")
+    assert any(m["name"] == "Server" and m["file"].endswith("Server.java") for m in matches_server)
+
+    matches_ts = codemap.search_codemap(cmap, "TsClient")
+    assert any(m["name"] == "TsClient" and m["file"].endswith("client.ts") for m in matches_ts)
+
+

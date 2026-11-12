@@ -8,6 +8,8 @@ Reduces token overhead by 80-90% compared to reading full raw source files.
 from __future__ import annotations
 
 import ast
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,265 @@ DEFAULT_EXCLUDES = {
     ".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".autoharness",
     "build", "dist", ".egg-info", "node_modules", ".playwright-mcp"
 }
+
+SUPPORTED_EXTENSIONS: dict[str, str] = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".java": "java",
+}
+
+_LANG_CACHE: dict[str, Any] = {}
+_LANG_LOCK = threading.Lock()
+
+
+def get_tree_sitter_parser(lang: str) -> Any | None:
+    """Load or retrieve thread-safe cached Tree-sitter Language and return a fresh Parser."""
+    language = _LANG_CACHE.get(lang)
+    if not language:
+        with _LANG_LOCK:
+            if lang in _LANG_CACHE:
+                language = _LANG_CACHE[lang]
+            else:
+                try:
+                    from tree_sitter import Language
+                    if lang in ("javascript", "js"):
+                        import tree_sitter_javascript as ts_mod
+                        language = Language(ts_mod.language())
+                    elif lang in ("typescript", "ts"):
+                        import tree_sitter_typescript as ts_mod
+                        language = Language(ts_mod.language_typescript())
+                    elif lang == "tsx":
+                        import tree_sitter_typescript as ts_mod
+                        language = Language(ts_mod.language_tsx())
+                    elif lang == "java":
+                        import tree_sitter_java as ts_mod
+                        language = Language(ts_mod.language())
+                    else:
+                        return None
+                    _LANG_CACHE[lang] = language
+                except (ImportError, AttributeError):
+                    return None
+    if language:
+        from tree_sitter import Parser
+        return Parser(language)
+    return None
+
+
+def _clean_params(raw_params: str) -> str:
+    raw = raw_params.strip()
+    if raw.startswith("(") and raw.endswith(")"):
+        return raw[1:-1].strip()
+    return raw
+
+
+def _clean_returns(raw_ret: str) -> str:
+    ret = raw_ret.strip()
+    if not ret:
+        return ""
+    if ret.startswith(":"):
+        return f" -> {ret[1:].strip()}"
+    if not ret.startswith("->"):
+        return f" -> {ret}"
+    return ret
+
+
+def parse_treesitter_file(file_path: Path, lang: str) -> dict[str, Any]:
+    """Parse a JS/TS/Java source file using Tree-sitter into uniform codemap structure."""
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return {"file": str(file_path), "error": str(e), "exists": False}
+
+    lines = content.splitlines()
+    total_lines = len(lines)
+    code_lines = sum(1 for l in lines if l.strip() and not l.strip().startswith("//") and not l.strip().startswith("/*"))
+
+    parser = get_tree_sitter_parser(lang)
+    if not parser:
+        return {
+            "file": str(file_path).replace("\\", "/"),
+            "exists": True,
+            "error": f"Tree-sitter parser for {lang} unavailable",
+            "total_lines": total_lines,
+            "code_lines": code_lines,
+            "imports": [],
+            "classes": [],
+            "functions": [],
+            "policy_violations": [],
+        }
+
+    src_bytes = content.encode("utf-8")
+    tree = parser.parse(src_bytes)
+    root = tree.root_node
+
+    imports: list[str] = []
+    classes: list[dict[str, Any]] = []
+    functions: list[dict[str, Any]] = []
+    consumed_comments: set[int] = set()
+
+    def get_text(node) -> str:
+        if not node:
+            return ""
+        return src_bytes[node.start_byte:node.end_byte].decode("utf-8", "replace")
+
+    def extract_doc(node) -> str:
+        if not node:
+            return ""
+        prev = node.prev_named_sibling
+        if prev and prev.type == "comment" and prev.start_byte not in consumed_comments:
+            text = get_text(prev).strip()
+            comment_lines = [l.lstrip("/*# \t").rstrip("*/ \t") for l in text.splitlines()]
+            return next((l for l in comment_lines if l), "")
+        return ""
+
+    def extract_decorators(node) -> list[str]:
+        decs = []
+        nodes_to_check = list(node.children)
+        for c in node.children:
+            if c.type == "modifiers":
+                nodes_to_check.extend(c.children)
+        for child in nodes_to_check:
+            if child.type in ("decorator", "annotation", "marker_annotation"):
+                decs.append(get_text(child).strip())
+        return decs
+
+    # Extract module-level doc from first comment if present
+    module_doc = ""
+    if root.named_children and root.named_children[0].type == "comment":
+        comment_node = root.named_children[0]
+        consumed_comments.add(comment_node.start_byte)
+        text = get_text(comment_node).strip()
+        comment_lines = [l.lstrip("/*# \t").rstrip("*/ \t") for l in text.splitlines()]
+        module_doc = next((l for l in comment_lines if l), "")
+
+    def process_class_like(node, outer_node, is_interface: bool = False):
+        name_node = node.child_by_field_name("name")
+        if not name_node:
+            return
+        cls_name = get_text(name_node)
+        bases: list[str] = []
+        for child in node.children:
+            if child.type in ("class_heritage", "extends_clause", "implements_clause", "superclass", "super_interfaces", "extends_interfaces"):
+                for item_node in child.named_children:
+                    if item_node.type in ("extends_clause", "implements_clause", "type_list"):
+                        for id_node in item_node.named_children:
+                            b_name = get_text(id_node).strip()
+                            if b_name and b_name not in ("extends", "implements"):
+                                bases.append(b_name)
+                    else:
+                        b_name = get_text(item_node).strip()
+                        if b_name and b_name not in ("extends", "implements"):
+                            bases.append(b_name)
+
+        doc = extract_doc(outer_node) or extract_doc(node) or (f"interface {cls_name}" if is_interface else "")
+        methods: list[dict[str, Any]] = []
+        body_node = node.child_by_field_name("body")
+        if body_node:
+            for item in body_node.named_children:
+                if item.type in ("method_definition", "method_declaration", "constructor_declaration", "method_signature"):
+                    m_name_node = item.child_by_field_name("name")
+                    if not m_name_node:
+                        continue
+                    m_name = get_text(m_name_node)
+                    m_params = _clean_params(get_text(item.child_by_field_name("parameters")))
+                    m_ret_node = item.child_by_field_name("return_type") or item.child_by_field_name("type")
+                    m_ret = _clean_returns(get_text(m_ret_node)) if m_ret_node else ""
+                    is_async = any(c.type == "async" or get_text(c) == "async" for c in item.children)
+                    methods.append({
+                        "name": m_name,
+                        "is_async": is_async,
+                        "args": m_params,
+                        "returns": m_ret,
+                        "doc": extract_doc(item),
+                        "line": item.start_point.row + 1,
+                        "decorators": extract_decorators(item)
+                    })
+
+        classes.append({
+            "name": cls_name,
+            "bases": bases,
+            "doc": doc,
+            "line": outer_node.start_point.row + 1,
+            "methods": methods,
+            "decorators": extract_decorators(node) or extract_decorators(outer_node)
+        })
+
+    def process_function_like(node, outer_node, explicit_name: str = "", is_async: bool = False):
+        name_node = node.child_by_field_name("name")
+        name = explicit_name or (get_text(name_node) if name_node else "")
+        if not name:
+            return
+        params = _clean_params(get_text(node.child_by_field_name("parameters")))
+        ret_node = node.child_by_field_name("return_type") or node.child_by_field_name("type")
+        ret = _clean_returns(get_text(ret_node)) if ret_node else ""
+        if not is_async:
+            is_async = any(c.type == "async" or get_text(c) == "async" for c in node.children)
+        doc = extract_doc(outer_node) or extract_doc(node)
+        functions.append({
+            "name": name,
+            "is_async": is_async,
+            "args": params,
+            "returns": ret,
+            "doc": doc,
+            "line": outer_node.start_point.row + 1,
+            "decorators": extract_decorators(node) or extract_decorators(outer_node)
+        })
+
+    for child in root.named_children:
+        target = child
+        if child.type == "export_statement":
+            decl = child.child_by_field_name("declaration")
+            if decl:
+                target = decl
+
+        if target.type in ("import_statement", "import_declaration"):
+            imports.append(get_text(target).strip())
+        elif target.type in ("package_declaration",):
+            imports.insert(0, get_text(target).strip())
+        elif target.type in ("class_declaration",):
+            process_class_like(target, outer_node=child, is_interface=False)
+        elif target.type in ("interface_declaration",):
+            process_class_like(target, outer_node=child, is_interface=True)
+        elif target.type in ("function_declaration",):
+            process_function_like(target, outer_node=child)
+        elif target.type in ("lexical_declaration", "variable_declaration"):
+            for decl in target.named_children:
+                if decl.type == "variable_declarator":
+                    v_name_node = decl.child_by_field_name("name")
+                    v_val_node = decl.child_by_field_name("value")
+                    if v_name_node and v_val_node and v_val_node.type in ("arrow_function", "function_expression"):
+                        is_async = any(c.type == "async" or get_text(c) == "async" for c in v_val_node.children)
+                        process_function_like(v_val_node, outer_node=child, explicit_name=get_text(v_name_node), is_async=is_async)
+
+    return {
+        "file": str(file_path).replace("\\", "/"),
+        "exists": True,
+        "doc": module_doc,
+        "total_lines": total_lines,
+        "code_lines": code_lines,
+        "imports": imports,
+        "classes": classes,
+        "functions": functions,
+        "policy_violations": [],
+    }
+
+
+def parse_source_file(file_path: Path) -> dict[str, Any]:
+    """Parse any supported source file (.py, .js, .ts, .java) into a uniform symbol map."""
+    suffix = file_path.suffix.lower()
+    if suffix == ".py":
+        return parse_python_file(file_path)
+    lang = SUPPORTED_EXTENSIONS.get(suffix)
+    if lang:
+        return parse_treesitter_file(file_path, lang)
+    return {"file": str(file_path), "error": f"Unsupported extension {suffix}", "exists": file_path.exists()}
 
 
 def _format_arg(arg: ast.arg) -> str:
@@ -159,33 +420,38 @@ def generate_codemap(
     max_depth: int = 5,
     exclude_dirs: set[str] | None = None
 ) -> dict[str, Any]:
-    """Recursively scan root_path for Python files and generate codebase symbol map."""
+    """Recursively scan root_path for supported source files (.py, .js, .ts, .java) and generate codebase symbol map."""
     excludes = DEFAULT_EXCLUDES | (exclude_dirs or set())
     root = root_path.resolve()
     modules: dict[str, dict[str, Any]] = {}
 
     if root.is_file():
-        if root.suffix == ".py":
+        if root.suffix.lower() in SUPPORTED_EXTENSIONS:
             rel_name = root.name
-            modules[rel_name] = parse_python_file(root)
+            modules[rel_name] = parse_source_file(root)
         return {"root": str(root).replace("\\", "/"), "modules": modules}
 
-    for path in sorted(root.rglob("*.py")):
-        # Check if any parent or path segment is excluded
-        parts = set(path.relative_to(root).parts[:-1])
-        if parts & excludes:
-            continue
-        if len(path.relative_to(root).parts) > max_depth:
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune excluded directories in-place so os.walk does not descend into them
+        dirnames[:] = [d for d in dirnames if d not in excludes]
+        rel_dir = Path(dirpath).relative_to(root)
+        depth = len(rel_dir.parts)
+        if depth >= max_depth:
+            dirnames.clear()
             continue
 
-        rel_key = str(path.relative_to(root)).replace("\\", "/")
-        parsed = parse_python_file(path)
-        modules[rel_key] = parsed
+        for fname in sorted(filenames):
+            fpath = Path(dirpath) / fname
+            if fpath.suffix.lower() in SUPPORTED_EXTENSIONS:
+                rel_key = str(fpath.relative_to(root)).replace("\\", "/")
+                parsed = parse_source_file(fpath)
+                modules[rel_key] = parsed
 
+    sorted_modules = {k: modules[k] for k in sorted(modules.keys())}
     return {
         "root": str(root).replace("\\", "/"),
-        "modules_count": len(modules),
-        "modules": modules
+        "modules_count": len(sorted_modules),
+        "modules": sorted_modules
     }
 
 
@@ -193,12 +459,15 @@ def format_codemap_tree(codemap: dict[str, Any], include_docstrings: bool = True
     """Format the codemap into an ultra-compact indented outline representation."""
     lines: list[str] = []
     modules = codemap.get("modules", {})
-    lines.append(f"# Codebase Symbol Map ({len(modules)} Python modules)")
+    lines.append(f"# Codebase Symbol Map ({len(modules)} modules)")
     lines.append("")
 
     for mod_path, mod_data in modules.items():
         if mod_data.get("syntax_error"):
             lines.append(f"## {mod_path} [SYNTAX ERROR: {mod_data['syntax_error']}]")
+            continue
+        if mod_data.get("error"):
+            lines.append(f"## {mod_path} [ERROR: {mod_data['error']}]")
             continue
         total_l = mod_data.get("total_lines", 0)
         code_l = mod_data.get("code_lines", 0)

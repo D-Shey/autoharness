@@ -74,7 +74,7 @@ META_TOOLS = [
          "limit": {"type": "integer", "description": "Maximum number of ranked results to return (default: 5)."}},
                      "required": ["query"]}},
     {"name": "harness_codemap",
-     "description": "Generate or search a compact Python AST Symbol Map (classes, methods, functions, signatures, docstrings) for the codebase, reducing token count by 80-90% compared to reading full files.",
+     "description": "Generate or search a compact multi-language AST Symbol Map (Python, JS, TS, Java classes, methods, functions, signatures, docstrings) for the codebase, reducing token count by 80-90% compared to reading full files.",
      "inputSchema": {"type": "object", "properties": {
          "path": {"type": "string", "description": "Relative file or directory path (default: project root)."},
          "query": {"type": "string", "description": "Optional symbol or function name search query."},
