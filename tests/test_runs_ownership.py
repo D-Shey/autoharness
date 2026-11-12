@@ -1451,3 +1451,108 @@ def test_earlier_level_lightened_does_not_force_full_on_restart(project, capsys,
     assert cli._earlier_level(project, "explicit full task") == "full"
 
 
+def test_skim_output_preserves_short_output():
+    short = "hello world\nstatus: ok\n"
+    res = runs.skim_output(short, exit_code=0)
+    assert res == short.rstrip()
+
+
+def test_skim_output_compresses_passing_test_output():
+    long_dots = ["rootdir: /proj", "collected 500 items"] + [f"tests/test_{i}.py . [100%]" for i in range(150)] + ["=== 500 passed in 12.5s ==="]
+    raw = "\n".join(long_dots)
+    res = runs.skim_output(raw, exit_code=0, budget_chars=500, max_lines=20)
+    assert len(res) < len(raw)
+    assert "... [" in res and "compressed (passed)]" in res
+    assert "=== 500 passed in 12.5s ===" in res
+
+
+def test_skim_output_extracts_pytest_failure_block():
+    lines = ["collected 50 items"] + [f"test_{i}.py ." for i in range(40)] + [
+        "=== FAILURES ===",
+        "___ test_foo ___",
+        "    assert 1 == 2",
+        "E   AssertionError",
+        "=== short test summary info ===",
+        "FAILED test_foo - AssertionError",
+        "=== 1 failed, 40 passed in 2.1s ==="
+    ]
+    raw = "\n".join(lines)
+    res = runs.skim_output(raw, exit_code=1, budget_chars=1000, max_lines=20)
+    assert "=== FAILURES ===" in res
+    assert "AssertionError" in res
+    assert "FAILED test_foo" in res
+    assert "test_10.py ." not in res
+
+
+def test_skim_output_extracts_traceback_and_exception():
+    lines = [f"info line {i}" for i in range(50)] + [
+        "Traceback (most recent call last):",
+        "  File 'app.py', line 42, in <module>",
+        "    main()",
+        "TypeError: missing required argument",
+        "exiting now"
+    ]
+    raw = "\n".join(lines)
+    res = runs.skim_output(raw, exit_code=1, budget_chars=800, max_lines=20)
+    assert "Traceback" in res
+    assert "TypeError: missing required argument" in res
+
+
+def test_skim_output_enforces_budget_ceiling():
+    massive = "\n".join([f"repetitive log line {i} with lots of filler text" for i in range(500)])
+    res = runs.skim_output(massive, exit_code=0, budget_chars=300)
+    assert len(res) <= 300
+
+
+def test_verify_run_records_skim_and_includes_in_summary(project, capsys):
+    briefed(capsys, project)
+    code, res = ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    assert code == 0
+    assert "skim" in res["run"]
+    assert "42" in res["run"]["skim"]
+    assert "42" in res["run"]["tail"]
+    summary = runs.summary(project.task())
+    assert summary["ran"][0]["skim"] == res["run"]["skim"]
+
+
+def test_skim_output_failure_boundary_preserves_first_line():
+    lines = ["$ pytest tests/test_foo.py", "=== FAILURES ===", "def test_fail():", "    assert False"]
+    res = runs.skim_output("\n".join(lines), exit_code=1)
+    assert lines[0] in res
+    assert "=== FAILURES ===" in res
+
+
+def test_skim_output_error_indices_respects_max_lines():
+    lines = ["header line 0", "header line 1"] + [f"Error: failure number {i}" for i in range(100)] + ["footer line"]
+    res = runs.skim_output("\n".join(lines), exit_code=1, budget_chars=10000, max_lines=15)
+    assert len(res.splitlines()) <= 20  # bounded by max_lines + minimal skip markers
+    assert "header line 0" in res
+
+
+def test_skim_output_fallback_respects_max_lines():
+    lines = [f"unremarkable log line {i}" for i in range(100)]
+    res = runs.skim_output("\n".join(lines), exit_code=2, budget_chars=5000, max_lines=10)
+    assert len(res.splitlines()) <= 12
+    assert "... [91 lines skipped] ..." in res
+
+
+def test_prompts_render_skim_blocks(project, capsys, tmp_path):
+    briefed(capsys, project)
+    code, res = ah(capsys, project, "verify", "run", OK, "--for", "B1")
+    assert code == 0
+    dummy_res = tmp_path / "result.txt"
+    dummy_res.write_text("def handle_webhook(): pass", encoding="utf-8")
+    evidence.add(project.task(), dummy_res, "result")
+    
+    q_prompt = evidence.quality_prompt(project.task())["prompt"]
+    assert "skim:" in q_prompt
+    assert "42" in q_prompt
+
+    from autoharness.catalog import Catalog
+    c_prompt = evidence.critic_prompt(Catalog.load(), project.task())["prompt"]
+    assert "skim:" in c_prompt
+    assert "42" in c_prompt
+
+
+
+

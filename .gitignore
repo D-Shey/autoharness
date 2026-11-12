@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 build/
 .playwright-mcp/
+scratch/

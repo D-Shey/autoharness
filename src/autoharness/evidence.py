@@ -801,6 +801,14 @@ def pair_review(task: Task) -> bool:
     return task.info().get("brief", {}).get("review") == "pair"
 
 
+def _skim_block(r: dict) -> str:
+    skim = r.get("skim")
+    if not skim or not skim.strip():
+        return ""
+    indented = "\n".join(f"    {line}" for line in skim.strip().splitlines())
+    return f"\n  skim:\n{indented}"
+
+
 def quality_prompt(task: Task) -> dict:
     """A self-contained prompt for the second reviewer of a pair: the quality of how the work is done, not
     whether it does what was asked (the critic judges that)."""
@@ -815,6 +823,7 @@ def quality_prompt(task: Task) -> dict:
         "\nautoharness itself ran these checks (the exit code decides; the whole output is in each log):\n"
         + "\n".join(f"- `{r['command']}`: {'passed' if r['passed'] else 'failed'}"
                     f"{'' if runs.is_fresh(r, task.project.root) is not False else ', stale'}: {r['log']}"
+                    + _skim_block(r)
                     for r in ran) + "\n")
     ruled = rulings.for_critic(task.project, None)
     ruled_text = "" if not ruled else (
@@ -1110,6 +1119,7 @@ the whole worse, that is a difference of its own. Then give your full list as be
                         f"- #{r['n']}" + (f" for {r['for']}" if r.get("for") else "")
                         + f" `{r['command']}`: {'passed' if r['passed'] else 'failed'}"
                         f"{'' if runs.is_fresh(r, task.project.root) is not False else ', stale'}: {r['log']}"
+                        + _skim_block(r)
                         for r in ran) + "\n" + RUNS_ASK)
     settled_points = [p for r in critics for p in r.get("settled", [])]
     if settled_points:

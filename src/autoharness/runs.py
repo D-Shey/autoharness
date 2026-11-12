@@ -21,7 +21,6 @@ from pathlib import Path
 from autoharness import evidence, transactions
 from autoharness.env import HarnessError, Task
 
-TAIL_LINES = 20
 DEFAULT_TIMEOUT = 600
 PRESERVE = "preserve"
 VERDICTS = ("met", "partial", "missing", "contradicts")
@@ -107,8 +106,126 @@ def is_fresh(item: dict, root: Path) -> bool | None:
         return None
 
 
-def _tail(output: str) -> str:
-    return "\n".join(output.rstrip().splitlines()[-TAIL_LINES:])
+ERROR_MARKERS = (
+    "Traceback (most recent call last):",
+    "=== FAILURES ===",
+    "=== ERRORS ===",
+    "short test summary info",
+    "FAILED",
+    "AssertionError",
+    "Error:",
+    "Exception:",
+    "fatal:",
+    "SyntaxError:",
+    "TypeError:",
+    "ValueError:",
+    "ImportError:",
+    "ModuleNotFoundError:",
+)
+
+
+def skim_output(output: str, exit_code: int | None = 0, budget_chars: int = 2500, max_lines: int = 40) -> str:
+    """Token-budgeted compression of run logs (inspired by skim).
+
+    Extracts high-signal failure blocks and root-cause exceptions on error,
+    or concise summaries on pass, discarding redundant passing dots and boilerplate.
+    """
+    if not output:
+        return ""
+    lines = output.rstrip().splitlines()
+    if len(lines) <= max_lines and len(output) <= budget_chars:
+        return output.rstrip()
+
+    # If the command passed cleanly (exit 0)
+    if exit_code == 0:
+        summary_lines = [l for l in lines[-10:] if any(k in l for k in ("passed", "PASSED", "OK", "success", "100%"))]
+        head_lines = lines[:2]
+        if summary_lines:
+            omitted = len(lines) - len(head_lines) - len(summary_lines)
+            if omitted > 0:
+                res = "\n".join(head_lines + [f"... [{omitted} lines compressed (passed)] ..."] + summary_lines)
+                if len(res) <= budget_chars:
+                    return res
+        head = lines[:3]
+        tail = lines[-5:]
+        omitted = len(lines) - len(head) - len(tail)
+        if omitted > 0:
+            res = "\n".join(head + [f"... [{omitted} lines compressed] ..."] + tail)
+        else:
+            res = "\n".join(lines[-max_lines:])
+        if len(res) > budget_chars:
+            suffix = "\n... [budget]"
+            cutoff = max(0, budget_chars - len(suffix))
+            return res[:cutoff].rstrip() + suffix
+        return res
+
+    # If the command failed (exit != 0 or None)
+    failure_start = -1
+    for i, line in enumerate(lines):
+        if "=== FAILURES ===" in line or "=== ERRORS ===" in line:
+            failure_start = i
+            break
+        if "short test summary info" in line and failure_start == -1:
+            failure_start = max(0, i - 10)
+
+    if failure_start != -1:
+        failure_block = lines[failure_start:]
+        if len(failure_block) <= max_lines:
+            header = [lines[0]] if failure_start > 0 else []
+            omitted_msg = [f"... [omitted {failure_start - 1} setup/passing lines] ..."] if failure_start > 1 else []
+            res = "\n".join(header + omitted_msg + failure_block)
+        else:
+            header = [lines[0]] if failure_start > 0 else []
+            tail_block = failure_block[-max_lines:]
+            omitted = len(lines) - len(header) - len(tail_block)
+            res = "\n".join(header + [f"... [{omitted} lines compressed] ..."] + tail_block)
+        if len(res) > budget_chars:
+            suffix = "\n... [truncated to token budget]"
+            cutoff = max(0, budget_chars - len(suffix))
+            return res[:cutoff].rstrip() + suffix
+        return res
+
+    # General failure: scan for error markers and keep surrounding context
+    error_indices = set()
+    for i, line in enumerate(lines):
+        if any(m in line for m in ERROR_MARKERS):
+            for ctx in range(max(0, i - 2), min(len(lines), i + 4)):
+                error_indices.add(ctx)
+
+    if error_indices:
+        selected = set(range(min(2, len(lines)))) | error_indices | set(range(max(0, len(lines) - 5), len(lines)))
+        sorted_indices = sorted(selected)
+        if len(sorted_indices) > max_lines:
+            head_idx = [i for i in sorted_indices if i < 2]
+            rem = max(0, max_lines - len(head_idx))
+            sorted_indices = sorted(set(head_idx + sorted_indices[-rem:]))
+        chunks = []
+        last_idx = -1
+        for idx in sorted_indices:
+            if last_idx != -1 and idx > last_idx + 1:
+                chunks.append(f"... [{idx - last_idx - 1} lines skipped] ...")
+            chunks.append(lines[idx])
+            last_idx = idx
+        res = "\n".join(chunks)
+        if len(res) > budget_chars:
+            suffix = "\n... [truncated to token budget]"
+            cutoff = max(0, budget_chars - len(suffix))
+            return res[:cutoff].rstrip() + suffix
+        return res
+
+    head = lines[:2]
+    tail_len = min(len(lines) - len(head), max(0, max_lines - len(head) - 1))
+    tail = lines[-tail_len:] if tail_len > 0 else []
+    omitted = len(lines) - len(head) - len(tail)
+    if omitted > 0:
+        res = "\n".join(head + [f"... [{omitted} lines skipped] ..."] + tail)
+    else:
+        res = "\n".join(lines[-max_lines:])
+    if len(res) > budget_chars:
+        suffix = "\n... [budget]"
+        cutoff = max(0, budget_chars - len(suffix))
+        return res[:cutoff].rstrip() + suffix
+    return res
 
 
 def run(task: Task, command: str, name: str = "", purpose: str = "", timeout: float = DEFAULT_TIMEOUT) -> dict:
@@ -142,13 +259,16 @@ def _record(task: Task, items: list, n: int, command: str, name: str, purpose: s
     log.write_text(f"$ {command}\n# exit {code}{' (timed out)' if timed_out else ''}, {seconds}s\n\n{output}",
                    "utf-8")
     # taken after the run: a check that writes tracked files (formatters, snapshots) is judged on what it left
+    skimmed = skim_output(output, exit_code=code, budget_chars=2500, max_lines=40)
     item = {"n": n, "name": name, "command": command, "for": purpose, "exit": code, "passed": code == 0,
             "seconds": seconds, "log": str(log), "fingerprint": fingerprint(root),
-            "time": time.strftime("%Y-%m-%dT%H:%M:%S")} | ({"timed_out": True} if timed_out else {})         | ({"trivial": True} if is_trivial(command) else {})
+            "skim": skimmed,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S")} | ({"timed_out": True} if timed_out else {}) \
+           | ({"trivial": True} if is_trivial(command) else {})
     task._update_info(runs=items + [item])
     task.log(f"run #{n} `{command}`" + (f" for {purpose}" if purpose else "")
              + f": {'passed' if item['passed'] else 'failed'} (exit {code})")
-    return item | {"tail": _tail(output)}
+    return item | {"tail": skimmed}
 
 
 def latest_for(task: Task, purpose: str) -> dict | None:
@@ -242,7 +362,8 @@ def summary(task: Task) -> dict:
                     "passed": r["passed"], "code": {True: "current", False: "stale", None: "unknown"}[fresh]}
                    | ({"not_a_check": True} if r.get("trivial") or empty else {})
                    | ({"critic": "does not check"} if empty else {})
-                   | ({"check_changed": changed[r["n"]]} if r["n"] in changed else {}))
+                   | ({"check_changed": changed[r["n"]]} if r["n"] in changed else {})
+                   | ({"skim": r["skim"]} if r.get("skim") else {}))
     critics = [{"round": r["round"], "worst": r["worst"],
                 "answer": ("run by autoharness: " + r["ran"]) if r.get("ran") else
                           "from the critic's answer file" if r.get("answer_id") else "retold by the agent"}
