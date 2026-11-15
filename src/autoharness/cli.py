@@ -1899,6 +1899,26 @@ def cmd_swarm(args, project, catalog) -> int:
             out({"status": "error", "error": str(e)})
             return 1
 
+    if action == "verify":
+        plan_id = args.plan_id
+        if not plan_id:
+            plans = swarm.list_swarm_plans(project.root)
+            if not plans:
+                out({"status": "error", "error": "No swarm plans found to verify."})
+                return 1
+            plan_id = plans[0]["id"]
+        try:
+            plan = swarm.load_swarm_plan(plan_id, project.root)
+            report = swarm.verify_swarm_plan_contracts(plan, project.root)
+            if getattr(args, "json", False):
+                out(report)
+            else:
+                print(swarm.format_swarm_verify_report(report))
+            return 0 if report.get("status") == "passed" else 1
+        except Exception as e:
+            out({"status": "error", "error": str(e)})
+            return 1
+
     out({"status": "error", "error": f"Unknown swarm action: {action}"})
     return 1
 
@@ -4052,11 +4072,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--callers", help="find direct callers for a symbol")
     s.add_argument("--check-shims", action="store_true", help="scan for fake implementation stubs and mock cheats (Anti-Shim Sentinel)")
     s = sub.add_parser("swarm", help="Multi-agent DAG swarm workflow coordinator and runner")
-    s.add_argument("action", choices=["init", "run", "status", "list"], help="swarm action")
+    s.add_argument("action", choices=["init", "run", "status", "list", "verify"], help="swarm action")
     s.add_argument("plan_id", nargs="?", help="plan ID or JSON plan path")
     s.add_argument("--title", help="title for the swarm plan (init)")
     s.add_argument("--file", help="tasks JSON file to initialize from (init)")
     s.add_argument("--parallel", type=int, default=4, help="maximum concurrent worker tasks (run)")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     s = sub.add_parser("drive", help="Continuous autonomy self-driving loop for backlog resolution")
     s.add_argument("action", nargs="?", choices=["run", "status", "queue", "rollback"], default="run", help="drive action")
     s.add_argument("--max-tasks", type=int, default=3, help="maximum followups to process in this run")

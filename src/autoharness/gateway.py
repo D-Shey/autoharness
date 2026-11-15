@@ -100,6 +100,12 @@ META_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "plan_id": {"type": "string", "description": "Swarm plan ID or path to execute (default: most recent plan)."},
          "parallel": {"type": "integer", "description": "Maximum concurrent tasks (default: 4)."}}}},
+    {"name": "harness_swarm_verify",
+     "description": "Verify multi-agent swarm DAG contracts, topological invariants, artifact existence, and role isolation barriers (Google Research Harness² model).",
+     "inputSchema": {"type": "object", "properties": {
+         "plan_id": {"type": "string", "description": "Optional swarm plan ID or file path to verify (defaults to latest active plan)."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON instead of Markdown report."}},
+         "required": []}},
     {"name": "harness_drive_status",
      "description": "Inspect continuous autonomy backlog queue and current self-driving session status.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -670,6 +676,25 @@ class Gateway:
                 return _text(json.dumps(summary, ensure_ascii=False, indent=2))
             except Exception as e:
                 return _text(f"Swarm execution failed: {e}", error=True)
+        if name == "harness_swarm_verify":
+            from autoharness import swarm
+            plan_id = args.get("plan_id")
+            raw_json = bool(args.get("raw_json"))
+            if not self.project:
+                return _text("No project root configured for swarm operations.", error=True)
+            if not plan_id:
+                plans = swarm.list_swarm_plans(self.project)
+                if not plans:
+                    return _text("No swarm plans found to verify.", error=True)
+                plan_id = plans[0]["id"]
+            try:
+                plan = swarm.load_swarm_plan(plan_id, self.project)
+                report = swarm.verify_swarm_plan_contracts(plan, self.project)
+                if raw_json:
+                    return _text(json.dumps(report, ensure_ascii=False, indent=2))
+                return _text(swarm.format_swarm_verify_report(report))
+            except Exception as e:
+                return _text(f"Swarm verification failed: {e}", error=True)
         if name == "harness_slots":
             from autoharness import slots, probe
             action = args.get("action") or "inspect"

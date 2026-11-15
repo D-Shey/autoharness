@@ -37,6 +37,9 @@ class SwarmTask:
     timeout: float = 60.0
     status: str = "pending"  # pending, running, completed, failed, blocked, skipped
     result: dict[str, Any] = field(default_factory=dict)
+    expected_artifacts: list[str] = field(default_factory=list)
+    barrier_assertions: list[dict[str, Any]] = field(default_factory=list)
+    allowed_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,6 +56,9 @@ class SwarmTask:
             timeout=float(data.get("timeout") or 60.0),
             status=str(data.get("status") or "pending"),
             result=dict(data.get("result") or {}),
+            expected_artifacts=list(data.get("expected_artifacts") or []),
+            barrier_assertions=list(data.get("barrier_assertions") or []),
+            allowed_paths=list(data.get("allowed_paths") or []),
         )
 
 
@@ -276,6 +282,286 @@ def compute_execution_tiers(plan: SwarmPlan) -> list[list[str]]:
     return tiers
 
 
+def validate_task_barriers(
+    task: SwarmTask,
+    project_root: Path,
+    execution_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate contract barriers, expected artifacts, and role isolation for a swarm task.
+
+    Returns:
+        dict containing 'status' ('passed'|'failed'), 'violations', 'passed_count', 'total_checks'.
+    """
+    violations: list[dict[str, Any]] = []
+    passed_count = 0
+    total_checks = 0
+
+    root = project_root.resolve()
+
+    # 1. Check expected artifacts
+    for art_path in task.expected_artifacts:
+        total_checks += 1
+        target = (root / art_path).resolve()
+        # Security: protect against directory traversal outside project root
+        try:
+            target.relative_to(root)
+        except ValueError:
+            violations.append({
+                "kind": "path_traversal",
+                "target": art_path,
+                "message": f"Artifact path {art_path!r} escapes project root",
+            })
+            continue
+
+        if not target.exists():
+            violations.append({
+                "kind": "missing_artifact",
+                "target": art_path,
+                "message": f"Expected artifact '{art_path}' not found on disk",
+            })
+        elif not target.is_file():
+            violations.append({
+                "kind": "invalid_artifact_type",
+                "target": art_path,
+                "message": f"Expected artifact '{art_path}' is a directory, not a file",
+            })
+        elif target.stat().st_size == 0:
+            violations.append({
+                "kind": "empty_artifact",
+                "target": art_path,
+                "message": f"Expected artifact '{art_path}' is empty (0 bytes)",
+            })
+        else:
+            passed_count += 1
+
+    # 2. Check barrier assertions
+    for assertion in task.barrier_assertions:
+        total_checks += 1
+        a_type = assertion.get("type") or assertion.get("kind")
+        target_rel = assertion.get("target") or assertion.get("file")
+        target = (root / target_rel).resolve() if target_rel else None
+
+        if a_type == "file_exists":
+            if target and target.is_file():
+                passed_count += 1
+            else:
+                violations.append({
+                    "kind": "assertion_failure",
+                    "assertion": "file_exists",
+                    "target": target_rel,
+                    "message": f"Barrier assertion 'file_exists' failed for '{target_rel}'",
+                })
+        elif a_type == "file_non_empty":
+            if target and target.is_file() and target.stat().st_size > 0:
+                passed_count += 1
+            else:
+                violations.append({
+                    "kind": "assertion_failure",
+                    "assertion": "file_non_empty",
+                    "target": target_rel,
+                    "message": f"Barrier assertion 'file_non_empty' failed for '{target_rel}'",
+                })
+        elif a_type == "file_contains":
+            pattern = assertion.get("pattern") or assertion.get("text") or ""
+            if not target or not target.is_file():
+                violations.append({
+                    "kind": "assertion_failure",
+                    "assertion": "file_contains",
+                    "target": target_rel,
+                    "message": f"File '{target_rel}' does not exist for pattern check",
+                })
+            else:
+                try:
+                    if target.stat().st_size > 10_000_000:
+                        violations.append({
+                            "kind": "assertion_failure",
+                            "assertion": "file_contains",
+                            "target": target_rel,
+                            "message": f"File '{target_rel}' exceeds safe read size limit",
+                        })
+                    else:
+                        content = target.read_text("utf-8", errors="replace")
+                        if pattern in content:
+                            passed_count += 1
+                        else:
+                            violations.append({
+                                "kind": "assertion_failure",
+                                "assertion": "file_contains",
+                                "target": target_rel,
+                                "message": f"File '{target_rel}' does not contain expected pattern: {pattern!r}",
+                            })
+                except OSError as e:
+                    violations.append({
+                        "kind": "assertion_failure",
+                        "assertion": "file_contains",
+                        "target": target_rel,
+                        "message": f"Failed to read '{target_rel}': {e}",
+                    })
+        elif a_type == "min_lines":
+            min_lines = int(assertion.get("count") or assertion.get("lines") or 1)
+            if not target or not target.is_file():
+                violations.append({
+                    "kind": "assertion_failure",
+                    "assertion": "min_lines",
+                    "target": target_rel,
+                    "message": f"File '{target_rel}' not found for min_lines check",
+                })
+            else:
+                try:
+                    content = target.read_text("utf-8", errors="replace")
+                    line_count = len([l for l in content.splitlines() if l.strip()])
+                    if line_count >= min_lines:
+                        passed_count += 1
+                    else:
+                        violations.append({
+                            "kind": "assertion_failure",
+                            "assertion": "min_lines",
+                            "target": target_rel,
+                            "message": f"File '{target_rel}' has only {line_count} non-empty lines (expected >= {min_lines})",
+                        })
+                except OSError as e:
+                    violations.append({
+                        "kind": "assertion_failure",
+                        "assertion": "min_lines",
+                        "target": target_rel,
+                        "message": f"Failed to read '{target_rel}': {e}",
+                    })
+        elif a_type == "json_valid":
+            if not target or not target.is_file():
+                violations.append({
+                    "kind": "assertion_failure",
+                    "assertion": "json_valid",
+                    "target": target_rel,
+                    "message": f"File '{target_rel}' not found for json validation",
+                })
+            else:
+                try:
+                    json.loads(target.read_text("utf-8", errors="replace"))
+                    passed_count += 1
+                except (json.JSONDecodeError, OSError) as e:
+                    violations.append({
+                        "kind": "assertion_failure",
+                        "assertion": "json_valid",
+                        "target": target_rel,
+                        "message": f"File '{target_rel}' contains invalid JSON: {e}",
+                    })
+        elif a_type == "exit_code":
+            expected_code = int(assertion.get("code", 0))
+            actual_code = execution_result.get("returncode") if execution_result else None
+            if actual_code == expected_code:
+                passed_count += 1
+            else:
+                violations.append({
+                    "kind": "assertion_failure",
+                    "assertion": "exit_code",
+                    "message": f"Expected returncode {expected_code}, got {actual_code}",
+                })
+        else:
+            violations.append({
+                "kind": "unknown_assertion",
+                "assertion": a_type,
+                "message": f"Unknown barrier assertion type: {a_type!r}",
+            })
+
+    # 3. Check role boundaries if allowed_paths or role restrictions apply
+    if task.allowed_paths:
+        total_checks += 1
+        allowed_normalized = [str(Path(p).as_posix()).rstrip("/") for p in task.allowed_paths]
+        for art in task.expected_artifacts:
+            art_posix = str(Path(art).as_posix())
+            if not any(art_posix == a or art_posix.startswith(a + "/") for a in allowed_normalized):
+                violations.append({
+                    "kind": "role_violation",
+                    "role": task.role,
+                    "target": art,
+                    "message": f"Task role '{task.role}' declared artifact '{art}' outside allowed_paths {task.allowed_paths}",
+                })
+        if not any(v.get("kind") == "role_violation" for v in violations):
+            passed_count += 1
+
+    # Role specific constraints: researcher/critic cannot author implementation source code
+    if task.role in ("researcher", "critic"):
+        code_exts = {".py", ".ts", ".js", ".go", ".rs", ".java", ".c", ".cpp"}
+        for art in task.expected_artifacts:
+            p_obj = Path(art)
+            if p_obj.suffix.lower() in code_exts and not str(art).startswith((".autoharness", "scratch")):
+                total_checks += 1
+                violations.append({
+                    "kind": "role_boundary_breach",
+                    "role": task.role,
+                    "target": art,
+                    "message": f"Role '{task.role}' is restricted from authoring implementation source file '{art}'",
+                })
+
+    is_passed = len(violations) == 0
+    return {
+        "status": "passed" if is_passed else "failed",
+        "task_id": task.id,
+        "task_name": task.name,
+        "role": task.role,
+        "violations": violations,
+        "passed_count": passed_count,
+        "total_checks": total_checks,
+    }
+
+
+def verify_swarm_plan_contracts(plan: SwarmPlan, project_root: Path) -> dict[str, Any]:
+    """Verify DAG plan structure, topological constraints, and artifact barrier contracts."""
+    root = project_root.resolve()
+    dag_errors: list[str] = []
+    topo_order: list[str] = []
+    try:
+        topo_order = validate_dag(plan)
+    except ValueError as e:
+        dag_errors.append(str(e))
+
+    task_reports: dict[str, Any] = {}
+    total_violations = 0
+    for tid, t in plan.tasks.items():
+        b_res = validate_task_barriers(t, root, t.result)
+        task_reports[tid] = b_res
+        total_violations += len(b_res["violations"])
+
+    all_passed = len(dag_errors) == 0 and total_violations == 0
+    return {
+        "status": "passed" if all_passed else "failed",
+        "plan_id": plan.id,
+        "title": plan.title,
+        "dag_valid": len(dag_errors) == 0,
+        "dag_errors": dag_errors,
+        "topological_order": topo_order,
+        "total_tasks": len(plan.tasks),
+        "total_violations": total_violations,
+        "task_reports": task_reports,
+    }
+
+
+def format_swarm_verify_report(report: dict[str, Any]) -> str:
+    """Format Swarm contract barrier verification results into clean Markdown."""
+    lines = [
+        f"# Swarm Plan Contract Verification: `{report.get('plan_id', 'unknown')}`",
+        f"- **Title:** {report.get('title', 'N/A')}",
+        f"- **Overall Status:** `{'PASSED' if report.get('status') == 'passed' else 'FAILED'}`",
+        f"- **DAG Valid:** {'yes' if report.get('dag_valid') else 'no'}",
+        f"- **Total Violations:** {report.get('total_violations', 0)}",
+    ]
+    if report.get("dag_errors"):
+        lines.append("\n## DAG Topology Errors")
+        for err in report["dag_errors"]:
+            lines.append(f"- ❌ {err}")
+
+    lines.append("\n## Task Contract Barriers")
+    for tid, tr in report.get("task_reports", {}).items():
+        st_icon = "✅" if tr.get("status") == "passed" else "❌"
+        lines.append(f"### {st_icon} Task `{tid}` [{tr.get('role', 'coder')}]: {tr.get('task_name', tid)}")
+        lines.append(f"- **Checks:** {tr.get('passed_count', 0)} / {tr.get('total_checks', 0)} passed")
+        if tr.get("violations"):
+            for v in tr["violations"]:
+                lines.append(f"  - ⚠️ `[{v.get('kind')}]` {v.get('message')}")
+
+    return "\n".join(lines).strip()
+
+
 def default_task_executor(task: SwarmTask, project_root: Path) -> dict[str, Any]:
     """Execute a single task node: run command or evaluate step."""
     start_time = time.monotonic()
@@ -412,7 +698,15 @@ def execute_swarm_plan(
             for fut, tid in futures:
                 try:
                     res = fut.result()
-                    status = "completed" if res.get("success", True) else "failed"
+                    task_obj = plan.tasks[tid]
+                    # Evaluate barrier assertions and artifact contracts
+                    barrier_res = validate_task_barriers(task_obj, project_root, res)
+                    res["barrier_validation"] = barrier_res
+                    if barrier_res["status"] != "passed":
+                        status = "failed"
+                        res["error"] = f"Barrier contract validation failed: {len(barrier_res['violations'])} violation(s)"
+                    else:
+                        status = "completed" if res.get("success", True) else "failed"
                     update_task_state(tid, status, res)
 
                     # Index artifact to project memory

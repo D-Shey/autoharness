@@ -322,6 +322,11 @@ harness.
   `autoharness compact prune [--keep-last 5] [--json]` — rotate and purge older folded transcripts to reclaim disk space with atomic state registry synchronization.
   Exposed to agents via `harness_compact_session` and `harness_session_status` Gateway MCP tools.
 
+- **Multi-Agent Contract-First Artifact Barriers & Role Isolation for Swarms (Google Research Harness² Model)**:
+  `autoharness swarm verify [<plan_id>] [--json]` — audit DAG topology and validate declarative task artifact barriers (`expected_artifacts`, `barrier_assertions`, `allowed_paths`) and role boundaries (`researcher`, `coder`, `verifier`, `critic`). Blocks downstream branches immediately when an upstream barrier fails to prevent cascading agent hallucination.
+  Exposed to agents via `harness_swarm_verify` Gateway MCP tool.
+
+
 
 
 
