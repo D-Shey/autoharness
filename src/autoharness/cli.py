@@ -1778,6 +1778,20 @@ def cmd_codemap(args, project, catalog) -> int:
         if getattr(args, "fail_on_cycle", False) and (cycles or violations):
             return 1
         return 0
+    if getattr(args, "impact", None):
+        call_graph = codemap.build_call_graph(cmap)
+        impact_data = codemap.analyze_impact(call_graph, args.impact)
+        if args.json:
+            out({"status": "ok", "impact": impact_data})
+        else:
+            report = codemap.format_impact_report(impact_data)
+            print(report)
+        return 0
+    if getattr(args, "callers", None):
+        call_graph = codemap.build_call_graph(cmap)
+        callers = codemap.find_callers(call_graph, args.callers)
+        out({"status": "ok", "symbol": args.callers, "callers_count": len(callers), "callers": callers})
+        return 0
     if args.query:
         matches = codemap.search_codemap(cmap, args.query)
         out({"status": "ok", "query": args.query, "matches_count": len(matches), "matches": matches})
@@ -3751,6 +3765,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help="output full structured JSON")
     s.add_argument("--arch", action="store_true", help="analyze architecture dependency graph, cycles, and boundary violations")
     s.add_argument("--fail-on-cycle", action="store_true", help="exit with code 1 if cycles or boundary violations exist")
+    s.add_argument("--impact", help="analyze blast radius and callers impact for a symbol")
+    s.add_argument("--callers", help="find direct callers for a symbol")
     s = sub.add_parser("swarm", help="Multi-agent DAG swarm workflow coordinator and runner")
     s.add_argument("action", choices=["init", "run", "status", "list"], help="swarm action")
     s.add_argument("plan_id", nargs="?", help="plan ID or JSON plan path")

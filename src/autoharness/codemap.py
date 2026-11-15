@@ -314,6 +314,21 @@ def _format_args(args: ast.arguments) -> str:
     return ", ".join(parts)
 
 
+def _extract_ast_calls(node: ast.AST) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            name = ""
+            if isinstance(child.func, ast.Name):
+                name = child.func.id
+            elif isinstance(child.func, ast.Attribute):
+                val_name = child.func.value.id if isinstance(child.func.value, ast.Name) else ""
+                name = f"{val_name}.{child.func.attr}" if val_name else child.func.attr
+            if name:
+                calls.append({"name": name, "line": getattr(child, "lineno", 0)})
+    return calls
+
+
 def parse_python_file(file_path: Path) -> dict[str, Any]:
     """Parse a single Python file into a structured symbol map using stdlib ast."""
     try:
@@ -366,7 +381,8 @@ def parse_python_file(file_path: Path) -> dict[str, Any]:
                 "returns": ret_type,
                 "doc": f_doc.strip().splitlines()[0] if f_doc.strip() else "",
                 "line": node.lineno,
-                "decorators": [ast.unparse(d) for d in node.decorator_list if hasattr(ast, "unparse")]
+                "decorators": [ast.unparse(d) for d in node.decorator_list if hasattr(ast, "unparse")],
+                "calls": _extract_ast_calls(node),
             })
         elif isinstance(node, ast.ClassDef):
             c_doc = ast.get_docstring(node) or ""
@@ -393,7 +409,8 @@ def parse_python_file(file_path: Path) -> dict[str, Any]:
                         "returns": m_ret,
                         "doc": m_doc.strip().splitlines()[0] if m_doc.strip() else "",
                         "line": item.lineno,
-                        "decorators": [ast.unparse(d) for d in item.decorator_list if hasattr(ast, "unparse")]
+                        "decorators": [ast.unparse(d) for d in item.decorator_list if hasattr(ast, "unparse")],
+                        "calls": _extract_ast_calls(item),
                     })
             classes.append({
                 "name": node.name,
@@ -1096,4 +1113,451 @@ def format_architecture_report(arch_data: dict[str, Any]) -> str:
             lines.extend(top_refs)
 
     return "\n".join(lines).strip()
+
+
+def build_call_graph(codemap: dict[str, Any]) -> dict[str, Any]:
+    """Extract symbol-level call graph across modules from AST codemap.
+
+    Returns a deterministic graph representation containing:
+      - nodes: dict[str, dict] with metadata (id, file, name, short_name, kind, line)
+      - edges: list[dict] with (caller, callee, line)
+      - callers: dict[str, list[str]] (callee_id -> list of caller_ids)
+      - callees: dict[str, list[str]] (caller_id -> list of callee_ids)
+    """
+    nodes: dict[str, dict[str, Any]] = {}
+    symbols_by_name: dict[str, list[str]] = {}
+    symbols_by_short: dict[str, list[str]] = {}
+    symbols_by_mod_and_name: dict[tuple[str, str], str] = {}
+    symbols_by_mod_and_short: dict[tuple[str, str], list[str]] = {}
+    stems_to_mods: dict[str, list[str]] = {}
+    modules_imports: dict[str, dict[str, str]] = {}
+
+    modules = codemap.get("modules", {})
+
+    # 1. Register all symbol nodes
+    for mod_path, mod_data in modules.items():
+        norm_path = mod_path.replace("\\", "/")
+        stem = Path(norm_path).stem
+        stems_to_mods.setdefault(stem, []).append(norm_path)
+
+        # Parse imports for this module
+        mod_imp_map: dict[str, str] = {}
+        for imp_str in mod_data.get("imports", []):
+            imp_str = imp_str.strip()
+            if imp_str.startswith("from "):
+                # e.g., from autoharness.secrets import redact_secrets, mask as m
+                parts = imp_str.split(" import ", 1)
+                if len(parts) == 2:
+                    from_mod = parts[0][5:].strip()
+                    imported_names = [n.strip() for n in parts[1].split(",")]
+                    for item in imported_names:
+                        if " as " in item:
+                            orig, alias = item.split(" as ", 1)
+                            mod_imp_map[alias.strip()] = f"{from_mod}:{orig.strip()}"
+                        else:
+                            mod_imp_map[item] = f"{from_mod}:{item}"
+            elif imp_str.startswith("import "):
+                # e.g., import autoharness.secrets as sec
+                imp_body = imp_str[7:].strip()
+                for item in imp_body.split(","):
+                    item = item.strip()
+                    if " as " in item:
+                        orig, alias = item.split(" as ", 1)
+                        mod_imp_map[alias.strip()] = orig.strip()
+                    else:
+                        mod_imp_map[item] = item
+        modules_imports[norm_path] = mod_imp_map
+
+        # Classes and methods
+        for cls in mod_data.get("classes", []):
+            cls_name = cls["name"]
+            for m in cls.get("methods", []):
+                sym_id = f"{norm_path}:{cls_name}.{m['name']}"
+                node_info = {
+                    "id": sym_id,
+                    "file": norm_path,
+                    "class": cls_name,
+                    "name": f"{cls_name}.{m['name']}",
+                    "short_name": m["name"],
+                    "kind": "method",
+                    "line": m.get("line", 0),
+                    "calls": m.get("calls", []),
+                }
+                nodes[sym_id] = node_info
+                symbols_by_name.setdefault(node_info["name"], []).append(sym_id)
+                symbols_by_short.setdefault(m["name"], []).append(sym_id)
+                symbols_by_mod_and_name[(norm_path, node_info["name"])] = sym_id
+                symbols_by_mod_and_name[(stem, node_info["name"])] = sym_id
+                symbols_by_mod_and_short.setdefault((norm_path, m["name"]), []).append(sym_id)
+                symbols_by_mod_and_short.setdefault((stem, m["name"]), []).append(sym_id)
+
+        # Standalone functions
+        for fn in mod_data.get("functions", []):
+            sym_id = f"{norm_path}:{fn['name']}"
+            node_info = {
+                "id": sym_id,
+                "file": norm_path,
+                "class": None,
+                "name": fn["name"],
+                "short_name": fn["name"],
+                "kind": "function",
+                "line": fn.get("line", 0),
+                "calls": fn.get("calls", []),
+            }
+            nodes[sym_id] = node_info
+            symbols_by_name.setdefault(fn["name"], []).append(sym_id)
+            symbols_by_short.setdefault(fn["name"], []).append(sym_id)
+            symbols_by_mod_and_name[(norm_path, fn["name"])] = sym_id
+            symbols_by_mod_and_name[(stem, fn["name"])] = sym_id
+            symbols_by_mod_and_short.setdefault((norm_path, fn["name"]), []).append(sym_id)
+            symbols_by_mod_and_short.setdefault((stem, fn["name"]), []).append(sym_id)
+
+    # 2. Resolve calls into graph edges
+    edges: list[dict[str, Any]] = []
+    seen_edges: set[tuple[str, str, int]] = set()
+
+    for caller_id, caller_node in nodes.items():
+        norm_path = caller_node["file"]
+        stem = Path(norm_path).stem
+        cls_name = caller_node.get("class")
+        mod_imp_map = modules_imports.get(norm_path, {})
+
+        for call in caller_node.get("calls", []):
+            call_raw = call.get("name", "").strip()
+            if not call_raw:
+                continue
+
+            callee_id: str | None = None
+
+            # Case A: self.method or cls.method
+            if call_raw.startswith("self.") or call_raw.startswith("cls."):
+                m_target = call_raw.split(".", 1)[1]
+                if cls_name:
+                    callee_id = symbols_by_mod_and_name.get((norm_path, f"{cls_name}.{m_target}"))
+                if not callee_id:
+                    candidates = symbols_by_short.get(m_target, [])
+                    if len(candidates) == 1:
+                        callee_id = candidates[0]
+
+            # Case B: module.attr or Class.attr or obj.method
+            elif "." in call_raw:
+                prefix, attr = call_raw.split(".", 1)
+                # Check if prefix is imported alias or target
+                if prefix in mod_imp_map:
+                    target_info = mod_imp_map[prefix]
+                    # Could be "autoharness.secrets:redact_secrets" or module "secrets"
+                    if ":" in target_info:
+                        m_mod, m_sym = target_info.split(":", 1)
+                        callee_id = symbols_by_name.get(f"{attr}", [None])[0] or symbols_by_short.get(attr, [None])[0]
+                    else:
+                        callee_mod_stem = Path(target_info).stem
+                        callee_id = symbols_by_mod_and_name.get((callee_mod_stem, attr)) or \
+                                    symbols_by_mod_and_short.get((callee_mod_stem, attr), [None])[0]
+                elif prefix in stems_to_mods:
+                    callee_id = symbols_by_mod_and_name.get((prefix, attr)) or \
+                                symbols_by_mod_and_short.get((prefix, attr), [None])[0]
+                elif (norm_path, f"{prefix}.{attr}") in symbols_by_mod_and_name:
+                    callee_id = symbols_by_mod_and_name[(norm_path, f"{prefix}.{attr}")]
+                elif f"{prefix}.{attr}" in symbols_by_name:
+                    callee_id = symbols_by_name[f"{prefix}.{attr}"][0]
+
+            # Case C: simple function name
+            else:
+                # 1. Local symbol in the same module
+                callee_id = symbols_by_mod_and_name.get((norm_path, call_raw))
+                # 2. Imported symbol
+                if not callee_id and call_raw in mod_imp_map:
+                    target_info = mod_imp_map[call_raw]
+                    if ":" in target_info:
+                        _, target_sym = target_info.split(":", 1)
+                        cands = symbols_by_name.get(target_sym, [])
+                        if cands:
+                            callee_id = cands[0]
+                    elif target_info in symbols_by_name:
+                        callee_id = symbols_by_name[target_info][0]
+                # 3. Global unique symbol
+                if not callee_id:
+                    cands = symbols_by_name.get(call_raw, [])
+                    if len(cands) == 1:
+                        callee_id = cands[0]
+
+            if callee_id and callee_id in nodes:
+                edge_key = (caller_id, callee_id, call.get("line", 0))
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    edges.append({
+                        "caller": caller_id,
+                        "callee": callee_id,
+                        "line": call.get("line", 0)
+                    })
+
+    # 3. Index callers and callees
+    callers_map: dict[str, list[str]] = {nid: [] for nid in nodes}
+    callees_map: dict[str, list[str]] = {nid: [] for nid in nodes}
+
+    for e in edges:
+        c_caller = e["caller"]
+        c_callee = e["callee"]
+        if c_callee not in callees_map[c_caller]:
+            callees_map[c_caller].append(c_callee)
+        if c_caller not in callers_map[c_callee]:
+            callers_map[c_callee].append(c_caller)
+
+    for k in callers_map:
+        callers_map[k].sort()
+    for k in callees_map:
+        callees_map[k].sort()
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "callers": callers_map,
+        "callees": callees_map,
+        "nodes_count": len(nodes),
+        "edges_count": len(edges),
+    }
+
+
+def _resolve_symbol_query(call_graph: dict[str, Any], query: str) -> list[str]:
+    """Find symbol IDs matching a search query with deterministic ranking."""
+    q = query.strip()
+    if not q:
+        return []
+    nodes = call_graph.get("nodes", {})
+    if q in nodes:
+        return [q]
+
+    exact_name: list[str] = []
+    exact_short: list[str] = []
+    suffix_match: list[str] = []
+    substr_match: list[str] = []
+
+    q_lower = q.lower()
+
+    for nid, node in nodes.items():
+        name = node.get("name", "")
+        short = node.get("short_name", "")
+        if name == q:
+            exact_name.append(nid)
+        elif short == q:
+            exact_short.append(nid)
+        elif nid.endswith(f":{q}") or nid.endswith(f".{q}"):
+            suffix_match.append(nid)
+        elif q_lower in nid.lower() or q_lower in name.lower():
+            substr_match.append(nid)
+
+    res: list[str] = []
+    for cand_group in (exact_name, exact_short, suffix_match, substr_match):
+        for cid in sorted(cand_group):
+            if cid not in res:
+                res.append(cid)
+    return res
+
+
+def find_callers(call_graph: dict[str, Any], query: str) -> list[dict[str, Any]]:
+    """Return direct callers of symbols matching query."""
+    resolved = _resolve_symbol_query(call_graph, query)
+    if not resolved:
+        return []
+    target_id = resolved[0]
+    callers = call_graph.get("callers", {}).get(target_id, [])
+    nodes = call_graph.get("nodes", {})
+
+    result: list[dict[str, Any]] = []
+    for cid in callers:
+        node = nodes.get(cid, {})
+        result.append({
+            "id": cid,
+            "name": node.get("name", cid),
+            "file": node.get("file", ""),
+            "line": node.get("line", 0),
+            "kind": node.get("kind", ""),
+        })
+    result.sort(key=lambda x: (x["file"], x["line"], x["name"]))
+    return result
+
+
+def find_callees(call_graph: dict[str, Any], query: str) -> list[dict[str, Any]]:
+    """Return direct callees called by symbols matching query."""
+    resolved = _resolve_symbol_query(call_graph, query)
+    if not resolved:
+        return []
+    target_id = resolved[0]
+    callees = call_graph.get("callees", {}).get(target_id, [])
+    nodes = call_graph.get("nodes", {})
+
+    result: list[dict[str, Any]] = []
+    for cid in callees:
+        node = nodes.get(cid, {})
+        result.append({
+            "id": cid,
+            "name": node.get("name", cid),
+            "file": node.get("file", ""),
+            "line": node.get("line", 0),
+            "kind": node.get("kind", ""),
+        })
+    result.sort(key=lambda x: (x["file"], x["line"], x["name"]))
+    return result
+
+
+def analyze_impact(
+    call_graph: dict[str, Any],
+    query: str,
+    max_depth: int = 5,
+) -> dict[str, Any]:
+    """Calculate blast radius and transitive upstream impact for a symbol without tokens."""
+    resolved = _resolve_symbol_query(call_graph, query)
+    if not resolved:
+        return {
+            "error": f"Symbol not found matching query: {query!r}",
+            "query": query,
+            "impact_radius": 0,
+            "direct_callers": [],
+            "direct_callees": [],
+            "impacted_symbols": [],
+            "impacted_tests": [],
+            "impacted_entrypoints": [],
+        }
+
+    target_id = resolved[0]
+    nodes = call_graph.get("nodes", {})
+    callers_map = call_graph.get("callers", {})
+    target_node = nodes.get(target_id, {})
+
+    # Breadth-first search along reverse caller edges
+    queue: list[tuple[str, int]] = [(target_id, 0)]
+    visited: set[str] = {target_id}
+    depth_map: dict[str, int] = {}
+
+    while queue:
+        curr, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+        for caller in callers_map.get(curr, []):
+            if caller not in visited:
+                visited.add(caller)
+                depth_map[caller] = depth + 1
+                queue.append((caller, depth + 1))
+
+    impacted_symbols: list[dict[str, Any]] = []
+    impacted_tests: list[dict[str, Any]] = []
+    impacted_entrypoints: list[dict[str, Any]] = []
+
+    sorted_callers = sorted(depth_map.keys(), key=lambda x: (depth_map[x], nodes.get(x, {}).get("file", ""), x))
+
+    for cid in sorted_callers:
+        node = nodes.get(cid, {})
+        d = depth_map[cid]
+        fpath = node.get("file", "")
+        name = node.get("name", "")
+        item = {
+            "id": cid,
+            "name": name,
+            "file": fpath,
+            "line": node.get("line", 0),
+            "kind": node.get("kind", ""),
+            "depth": d,
+        }
+        impacted_symbols.append(item)
+
+        # Classify tests
+        if "test" in fpath.lower() or name.lower().startswith("test_"):
+            impacted_tests.append(item)
+
+        # Classify entrypoints (CLI entry, main, or zero incoming non-test callers)
+        if "cli" in fpath.lower() or "__main__" in fpath.lower() or not callers_map.get(cid):
+            impacted_entrypoints.append(item)
+
+    direct_callers = find_callers(call_graph, target_id)
+    direct_callees = find_callees(call_graph, target_id)
+
+    return {
+        "target": {
+            "id": target_id,
+            "name": target_node.get("name", target_id),
+            "file": target_node.get("file", ""),
+            "line": target_node.get("line", 0),
+            "kind": target_node.get("kind", ""),
+        },
+        "impact_radius": len(impacted_symbols),
+        "max_depth": max_depth,
+        "direct_callers_count": len(direct_callers),
+        "direct_callees_count": len(direct_callees),
+        "direct_callers": direct_callers,
+        "direct_callees": direct_callees,
+        "impacted_symbols": impacted_symbols,
+        "impacted_tests": impacted_tests,
+        "impacted_entrypoints": impacted_entrypoints,
+    }
+
+
+def format_impact_report(impact: dict[str, Any]) -> str:
+    """Format symbol impact blast radius into clean, structured Markdown."""
+    if "error" in impact:
+        return f"# Symbol Impact Analysis\n\nError: {impact['error']}"
+
+    target = impact.get("target", {})
+    t_id = target.get("id", "unknown")
+    t_file = target.get("file", "")
+    t_line = target.get("line", 0)
+    radius = impact.get("impact_radius", 0)
+    direct_callers = impact.get("direct_callers", [])
+    direct_callees = impact.get("direct_callees", [])
+    tests = impact.get("impacted_tests", [])
+    entrypoints = impact.get("impacted_entrypoints", [])
+    impacted = impact.get("impacted_symbols", [])
+
+    lines = [
+        f"# Symbol Impact Analysis for `{t_id}`",
+        "",
+        "## Summary",
+        f"- Target Symbol: `{t_id}` ({t_file}:{t_line})",
+        f"- Direct Callers: {len(direct_callers)}",
+        f"- Direct Callees: {len(direct_callees)}",
+        f"- Transitive Impact Radius: {radius} symbols",
+        f"- Impacted Tests: {len(tests)}",
+        f"- Impacted Entrypoints: {len(entrypoints)}",
+        "",
+        "## Direct Callers",
+    ]
+    if not direct_callers:
+        lines.append("- None (no callers found in scanned codebase)")
+    else:
+        for c in direct_callers:
+            lines.append(f"- `{c['id']}` (line {c.get('line', 0)})")
+
+    lines.append("")
+    lines.append("## Direct Callees")
+    if not direct_callees:
+        lines.append("- None (no callees resolved in scanned codebase)")
+    else:
+        for c in direct_callees:
+            lines.append(f"- `{c['id']}` (line {c.get('line', 0)})")
+
+    lines.append("")
+    lines.append(f"## Transitive Impact (Depth <= {impact.get('max_depth', 5)})")
+    if not impacted:
+        lines.append("- No upstream symbols affected")
+    else:
+        for sym in impacted:
+            lines.append(f"- [Depth {sym['depth']}] `{sym['id']}` ({sym['file']}:{sym['line']})")
+
+    lines.append("")
+    lines.append("## Impacted Tests")
+    if not tests:
+        lines.append("- No direct or indirect tests found calling this symbol")
+    else:
+        for t in tests:
+            lines.append(f"- [Depth {t['depth']}] `{t['id']}` ({t['file']}:{t['line']})")
+
+    lines.append("")
+    lines.append("## Impacted Entrypoints")
+    if not entrypoints:
+        lines.append("- None")
+    else:
+        for ep in entrypoints:
+            lines.append(f"- [Depth {ep['depth']}] `{ep['id']}` ({ep['file']}:{ep['line']})")
+
+    return "\n".join(lines).strip()
+
 

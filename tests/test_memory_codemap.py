@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from autoharness import approvals, codemap, gateway, memory
+from autoharness import approvals, cli, codemap, gateway, memory
 from autoharness.env import Project
 
 
@@ -738,6 +738,174 @@ def test_gateway_codemap_arch(tmp_path):
         "arguments": {"arch": True, "raw_json": False}
     })
     assert "# Architecture Dependency Graph" in res_report["content"][0]["text"]
+
+
+def test_call_graph_and_impact_analysis(tmp_path):
+    repo = tmp_path / "impact_repo"
+    repo.mkdir()
+
+    (repo / "core.py").write_text(
+        "def low_level_calc():\n"
+        "    return 42\n"
+        "\n"
+        "class Engine:\n"
+        "    def _internal(self):\n"
+        "        return 1\n"
+        "    def compute(self):\n"
+        "        self._internal()\n"
+        "        return low_level_calc()\n",
+        encoding="utf-8"
+    )
+
+    (repo / "service.py").write_text(
+        "from core import low_level_calc, Engine\n"
+        "\n"
+        "def execute_job():\n"
+        "    eng = Engine()\n"
+        "    eng.compute()\n"
+        "    return low_level_calc()\n",
+        encoding="utf-8"
+    )
+
+    (repo / "test_service.py").write_text(
+        "from service import execute_job\n"
+        "\n"
+        "def test_execution():\n"
+        "    assert execute_job() == 42\n",
+        encoding="utf-8"
+    )
+
+    cmap = codemap.generate_codemap(repo)
+    cgraph = codemap.build_call_graph(cmap)
+
+    assert cgraph["nodes_count"] >= 5
+    assert cgraph["edges_count"] >= 4
+
+    # Direct callers of low_level_calc
+    callers = codemap.find_callers(cgraph, "low_level_calc")
+    caller_names = {c["name"] for c in callers}
+    assert "Engine.compute" in caller_names
+    assert "execute_job" in caller_names
+
+    # Direct callees of compute
+    callees = codemap.find_callees(cgraph, "compute")
+    callee_names = {c["name"] for c in callees}
+    assert "Engine._internal" in callee_names
+    assert "low_level_calc" in callee_names
+
+    # Impact analysis of low_level_calc
+    impact = codemap.analyze_impact(cgraph, "low_level_calc", max_depth=5)
+    assert impact["impact_radius"] >= 3
+    impacted_names = {s["name"] for s in impact["impacted_symbols"]}
+    assert "Engine.compute" in impacted_names
+    assert "execute_job" in impacted_names
+    assert "test_execution" in impacted_names
+
+    # Check impacted tests
+    test_names = {t["name"] for t in impact["impacted_tests"]}
+    assert "test_execution" in test_names
+
+    # Check format report
+    report = codemap.format_impact_report(impact)
+    assert "# Symbol Impact Analysis for" in report
+    assert "Direct Callers:" in report
+    assert "Direct Callees:" in report
+    assert "Transitive Impact Radius:" in report
+    assert "Impacted Tests" in report
+    assert "test_execution" in report
+
+
+def test_cli_codemap_impact_and_callers(tmp_path, capsys):
+    repo = tmp_path / "cli_repo"
+    repo.mkdir()
+    (repo / "calc.py").write_text(
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "def run():\n"
+        "    return add(1, 2)\n",
+        encoding="utf-8"
+    )
+
+    class FakeArgs:
+        path = "."
+        arch = False
+        query = None
+        json = False
+        impact = "add"
+        callers = None
+
+    class FakeProject:
+        root = repo
+
+    # 1. Test CLI --impact report
+    ret = cli.cmd_codemap(FakeArgs(), FakeProject(), None)
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert "# Symbol Impact Analysis for" in out
+    assert "run" in out
+
+    # 2. Test CLI --impact --json
+    FakeArgs.json = True
+    ret_json = cli.cmd_codemap(FakeArgs(), FakeProject(), None)
+    assert ret_json == 0
+    out_json = capsys.readouterr().out
+    data = json.loads(out_json)
+    assert data["status"] == "ok"
+    assert data["impact"]["impact_radius"] == 1
+
+    # 3. Test CLI --callers
+    FakeArgs.impact = None
+    FakeArgs.callers = "add"
+    FakeArgs.json = False
+    ret_callers = cli.cmd_codemap(FakeArgs(), FakeProject(), None)
+    assert ret_callers == 0
+    out_callers = capsys.readouterr().out
+    c_data = json.loads(out_callers)
+    assert c_data["status"] == "ok"
+    assert c_data["callers_count"] == 1
+    assert c_data["callers"][0]["name"] == "run"
+
+
+def test_gateway_codemap_impact_and_callers(tmp_path):
+    repo = tmp_path / "gw_impact_repo"
+    repo.mkdir()
+    (repo / "math_util.py").write_text(
+        "def square(x):\n"
+        "    return x * x\n"
+        "def sum_squares(a, b):\n"
+        "    return square(a) + square(b)\n",
+        encoding="utf-8"
+    )
+
+    gw = gateway.Gateway(repo, write=lambda s: None, log=lambda s: None)
+
+    # 1. Call gateway with impact markdown report
+    res = gw._call({
+        "name": "harness_codemap",
+        "arguments": {"impact": "square"}
+    })
+    text = res["content"][0]["text"]
+    assert "# Symbol Impact Analysis for" in text
+    assert "sum_squares" in text
+
+    # 2. Call gateway with impact raw_json
+    res_json = gw._call({
+        "name": "harness_codemap",
+        "arguments": {"impact": "square", "raw_json": True}
+    })
+    data = json.loads(res_json["content"][0]["text"])
+    assert data["impact_radius"] == 1
+    assert data["target"]["name"] == "square"
+
+    # 3. Call gateway with callers
+    res_callers = gw._call({
+        "name": "harness_codemap",
+        "arguments": {"callers": "square"}
+    })
+    c_data = json.loads(res_callers["content"][0]["text"])
+    assert c_data["callers_count"] == 1
+    assert c_data["callers"][0]["name"] == "sum_squares"
+
 
 
 

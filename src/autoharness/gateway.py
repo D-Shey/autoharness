@@ -80,6 +80,8 @@ META_TOOLS = [
          "query": {"type": "string", "description": "Optional symbol or function name search query."},
          "policy": {"type": "boolean", "description": "Check deterministic AST structural policies (dead private methods, silenced exceptions, unclosed files)."},
          "arch": {"type": "boolean", "description": "Analyze architecture dependency graph, detect cycles, and check layer boundary violations without tokens."},
+         "impact": {"type": "string", "description": "Symbol name to compute blast radius, callers, callees, and impacted tests."},
+         "callers": {"type": "string", "description": "Symbol name to find all direct callers across the codebase."},
          "raw_json": {"type": "boolean", "description": "Whether to return raw JSON instead of indented outline."}}}},
     {"name": "harness_swarm_status",
      "description": "Inspect status and progress of multi-agent swarm plans in .autoharness/swarm. Omit plan_id to inspect the most recent plan.",
@@ -525,6 +527,8 @@ class Gateway:
             raw_json = bool(args.get("raw_json"))
             check_policy = bool(args.get("policy"))
             check_arch = bool(args.get("arch"))
+            impact_sym = args.get("impact")
+            callers_sym = args.get("callers")
             root = (self.project / rel_path) if self.project else Path(rel_path)
             if check_policy:
                 violations = codemap.scan_ast_policies(root)
@@ -544,6 +548,16 @@ class Gateway:
                 if raw_json:
                     return _text(json.dumps(arch_data, ensure_ascii=False, indent=2))
                 return _text(codemap.format_architecture_report(arch_data))
+            if impact_sym:
+                call_graph = codemap.build_call_graph(cmap)
+                impact_data = codemap.analyze_impact(call_graph, impact_sym)
+                if raw_json:
+                    return _text(json.dumps(impact_data, ensure_ascii=False, indent=2))
+                return _text(codemap.format_impact_report(impact_data))
+            if callers_sym:
+                call_graph = codemap.build_call_graph(cmap)
+                callers = codemap.find_callers(call_graph, callers_sym)
+                return _text(json.dumps({"symbol": callers_sym, "callers_count": len(callers), "callers": callers}, ensure_ascii=False, indent=2))
             if query:
                 matches = codemap.search_codemap(cmap, query)
                 if not matches:
