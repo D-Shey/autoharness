@@ -284,3 +284,49 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 `autoharness status` shows the harness and log (`--full` for everything), `audit` the decisions,
 `remove`/`prune` take kept items off, `eval record|compare` measures runs with and without the
 harness.
+
+## 7. Advanced Scaffolding & Code Intelligence (Zero Token Overhead)
+
+- **8-Slot Modular Harness Scaffolding (Google Research Harness² Model)**:
+  `autoharness slot` — inspect the 8 canonical slots (system_prompt, guardrails, memory, skills, tool_guidance, scripts, subagents, middleware).
+  `autoharness slot export` — dump the live harness slots state as structured JSON.
+  `autoharness slot diff --target <file.json>` — compute structural semantic diff against another harness state.
+
+- **Propose–Probe–Compose Contrastive Loop (Without Ground Truth)**:
+  `autoharness probe -k 2` — generate K candidate harness variants, probe them in sandboxed execution, and synthesize evidence-backed improvements via behavioral contrasts (tool error/loop minimization).
+
+- **AST Symbol Call Graph & Blast Radius Impact Analysis**:
+  `autoharness codemap <path> --impact <symbol>` — analyze direct callers, callees, transitive blast radius, and impacted test suites without consuming LLM tokens.
+  `autoharness codemap <path> --callers <symbol>` — locate all direct callers across the repository.
+  `autoharness codemap <path> --arch` — detect module dependency cycles and architectural boundary violations.
+
+- **Anti-Shim & Fake Implementation AST Sentinel**:
+  `autoharness codemap <path> --check-shims` — detect fake agent shortcuts, stubs, and mock cheats (`EMPTY_STUB_BODY`, `TRIVIAL_RETURN_STUB`, `NOT_IMPLEMENTED_STUB`, `TRIVIAL_ASSERTION_CHEAT`) without LLM tokens. Integrated automatically into `autoharness evidence diff` to guard evidence against hollow agent completions.
+
+- **Consequence-Aware Approval & Blast Radius Simulation (Hugging Face arXiv:2610.40753)**:
+  `autoharness simulate <target> [--action-type <type>]` / `autoharness permissions simulate` — simulate action blast radius, reversibility tier (`IRREVERSIBLE`, `HIGH_RISK`, `REVERSIBLE`, `READ_ONLY`), risk score (0-100), and rollback guidance before human-in-the-loop approvals. Exposed to agents via `harness_simulate_action` Gateway MCP tool.
+
+- **Intelligent Cascading Output Compression (dean0x/skim Model)**:
+  `autoharness skim <file_or_command> [--kind auto|pytest|diff|traceback|compiler|generic] [--max-lines 60] [--json]` — collapse passing test progress, verbose context, and noisy compiler logs by 70-95% while isolating failure anchors and root-cause exception lines with head+tail preservation. Persists full uncompressed logs to `.autoharness/logs/` for drill-down debugging. Exposed to agents via `harness_compress_output` Gateway MCP tool.
+
+- **Self-Supervised Code Refinement & Regression Sentinel with Rollback Guard (Google Research Harness² Model)**:
+  `autoharness sentinel run [--test-command <cmd>] [--auto-rollback] [--pre-flight] [--no-shims] [--json]` — execute pre/post-flight test verification alongside AST Anti-Shim checks; automatically rolls back destructive regressions or fake stubs to verified baseline snapshots.
+  `autoharness sentinel snapshot [--label <name>]` — capture an atomic working tree fingerprint and lightweight file backup.
+  `autoharness sentinel rollback [--snapshot-id <id>]` — safely restore repository to a verified snapshot with fail-safe protection against uninitialized state and automatic untracked artifact cleanup.
+  `autoharness sentinel status` — inspect the active baseline snapshot and last verification result.
+  Exposed to agents via `harness_sentinel_verify`, `harness_sentinel_snapshot`, and `harness_sentinel_rollback` Gateway MCP tools.
+
+- **Dynamic Context Compactor & Layered Session Folding (Google Research Harness² & ACP Model)**:
+  `autoharness compact run [<transcript_path>] [--keep-last 5] [--epoch-size 10] [--json]` — multi-tiered context window compression (Tier 0 Recent verbatim, Tier 1 Distill filtered with cascading skim, Tier 2 Epoch condensation) saving 70-85% token volume while keeping full reversible logs in `.autoharness/folded/`.
+  `autoharness compact status [--json]` — inspect session compaction statistics, token reduction metrics, and active registry.
+  `autoharness compact prune [--keep-last 5] [--json]` — rotate and purge older folded transcripts to reclaim disk space with atomic state registry synchronization.
+  Exposed to agents via `harness_compact_session` and `harness_session_status` Gateway MCP tools.
+
+- **Multi-Agent Contract-First Artifact Barriers & Role Isolation for Swarms (Google Research Harness² Model)**:
+  `autoharness swarm verify [<plan_id>] [--json]` — audit DAG topology and validate declarative task artifact barriers (`expected_artifacts`, `barrier_assertions`, `allowed_paths`) and role boundaries (`researcher`, `coder`, `verifier`, `critic`). Blocks downstream branches immediately when an upstream barrier fails to prevent cascading agent hallucination.
+  Exposed to agents via `harness_swarm_verify` Gateway MCP tool.
+
+- **Dynamic Memory Drift Detection & Knowledge Reconciliation (Google Research Harness² Model)**:
+  `autoharness memory reconcile [--prune-orphans] [--kind all|ruling|lesson|review|followup] [--json]` — audit SQLite persistent memory (`.autoharness/memory.db`) against ground-truth workspace files and AST symbols. Identifies orphaned records (deleted task directories or missing code files), stale references, and conflicting prescriptive policies with multi-token domain matching. When `--prune-orphans` is specified, permanently purges broken entries within an atomic database `SAVEPOINT` transaction while protecting historical review artifacts.
+  Exposed to agents via `harness_memory_reconcile` Gateway MCP tool.
+

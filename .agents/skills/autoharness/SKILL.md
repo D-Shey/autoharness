@@ -330,9 +330,3 @@ harness.
   `autoharness memory reconcile [--prune-orphans] [--kind all|ruling|lesson|review|followup] [--json]` — audit SQLite persistent memory (`.autoharness/memory.db`) against ground-truth workspace files and AST symbols. Identifies orphaned records (deleted task directories or missing code files), stale references, and conflicting prescriptive policies with multi-token domain matching. When `--prune-orphans` is specified, permanently purges broken entries within an atomic database `SAVEPOINT` transaction while protecting historical review artifacts.
   Exposed to agents via `harness_memory_reconcile` Gateway MCP tool.
 
-
-
-
-
-
-
