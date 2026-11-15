@@ -87,6 +87,13 @@ META_TOOLS = [
      "description": "Inspect status and progress of multi-agent swarm plans in .autoharness/swarm. Omit plan_id to inspect the most recent plan.",
      "inputSchema": {"type": "object", "properties": {
          "plan_id": {"type": "string", "description": "Optional swarm plan ID or file path."}}}},
+    {"name": "harness_slots",
+     "description": "Inspect, export, diff, or probe 8-slot modular harness scaffolding (system_prompt, guardrails, memory, skills, tool_guidance, scripts, subagents, middleware) and Propose-Probe-Compose contrastive loop (Google Research Harness² model).",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["inspect", "export", "diff", "probe"], "description": "Action: inspect (default), export, diff, or probe."},
+         "target": {"type": "string", "description": "Target slots JSON file path for diff action."},
+         "k": {"type": "integer", "description": "Number of contrastive harness variants to probe (probe action, default: 2)."},
+         "raw_json": {"type": "boolean", "description": "Whether to return raw JSON instead of formatted report."}}}},
     {"name": "harness_swarm_run",
      "description": "Execute a multi-agent DAG swarm workflow with concurrent worker pool, role isolation, and hard verification gates.",
      "inputSchema": {"type": "object", "properties": {
@@ -603,6 +610,37 @@ class Gateway:
                 return _text(json.dumps(summary, ensure_ascii=False, indent=2))
             except Exception as e:
                 return _text(f"Swarm execution failed: {e}", error=True)
+        if name == "harness_slots":
+            from autoharness import slots, probe
+            action = args.get("action") or "inspect"
+            raw_json = bool(args.get("raw_json"))
+            root = self.project or Path(".")
+            if action == "probe":
+                k = int(args.get("k") or 2)
+                base_slots = slots.inspect_harness_slots(root)
+                probe_res = probe.run_propose_probe_compose(base_slots, task_prompt="Gateway MCP probe execution", k=k)
+                if raw_json:
+                    return _text(json.dumps(probe_res, ensure_ascii=False, indent=2))
+                return _text(probe.format_probe_report(probe_res))
+            if action == "export":
+                data = slots.export_harness_slots(root)
+                return _text(json.dumps(data, ensure_ascii=False, indent=2))
+            if action == "diff":
+                tgt = args.get("target")
+                if not tgt or not Path(tgt).is_file():
+                    return _text(f"Target slots file not found: {tgt}", error=True)
+                try:
+                    head_slots = json.loads(Path(tgt).read_text(encoding="utf-8"))
+                except Exception as e:
+                    return _text(f"Failed to parse target slots file: {e}", error=True)
+                base_slots = slots.inspect_harness_slots(root)
+                d_res = slots.diff_harness_slots(base_slots, head_slots)
+                return _text(json.dumps(d_res, ensure_ascii=False, indent=2))
+            # default: inspect
+            data = slots.inspect_harness_slots(root)
+            if raw_json:
+                return _text(json.dumps(data, ensure_ascii=False, indent=2))
+            return _text(slots.format_slots_report(data))
         if name == "harness_drive_status":
             from autoharness import drive
             if not self.project:

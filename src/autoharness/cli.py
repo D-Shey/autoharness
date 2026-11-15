@@ -1996,6 +1996,72 @@ def cmd_permissions(args, project, catalog) -> int:
     return 0
 
 
+def cmd_slot(args, project, catalog) -> int:
+    from autoharness import slots
+    action = getattr(args, "action", "inspect") or "inspect"
+    task_info = None
+    try:
+        t = project.task()
+        if t:
+            task_info = t.info()
+    except Exception:
+        pass
+
+    if action == "export":
+        data = slots.export_harness_slots(project.root, active_task_info=task_info)
+        out({"status": "ok", "slots": data})
+        return 0
+
+    if action == "diff":
+        target = Path(args.target) if getattr(args, "target", None) else None
+        if not target or not target.is_file():
+            out({"status": "error", "error": f"Target slots JSON file not found: {args.target}"})
+            return 1
+        try:
+            head_slots = json.loads(target.read_text(encoding="utf-8"))
+        except Exception as e:
+            out({"status": "error", "error": f"Failed to parse target slots file: {e}"})
+            return 1
+        base_slots = slots.inspect_harness_slots(project.root, active_task_info=task_info)
+        diff_res = slots.diff_harness_slots(base_slots, head_slots)
+        out({"status": "ok", "diff": diff_res})
+        return 0
+
+    # default: inspect
+    data = slots.inspect_harness_slots(project.root, active_task_info=task_info)
+    if getattr(args, "json", False):
+        out({"status": "ok", "slots": data})
+    else:
+        report = slots.format_slots_report(data)
+        print(report)
+    return 0
+
+
+def cmd_probe(args, project, catalog) -> int:
+    from autoharness import probe, slots
+    task_info = None
+    task_prompt = getattr(args, "prompt", None) or "Active task probe execution"
+    try:
+        t = project.task()
+        if t:
+            task_info = t.info()
+            task_prompt = task_info.get("prompt") or task_info.get("task") or task_prompt
+    except Exception:
+        pass
+
+    k = getattr(args, "k", 2) or 2
+    base_slots = slots.inspect_harness_slots(project.root, active_task_info=task_info)
+    probe_res = probe.run_propose_probe_compose(base_slots, task_prompt=task_prompt, k=k)
+
+    if getattr(args, "json", False):
+        out({"status": "ok", "probe": probe_res})
+    else:
+        report = probe.format_probe_report(probe_res)
+        print(report)
+    return 0
+
+
+
 def _find_local_skill(project, name: str) -> tuple[dict, "Task | None"]:
     """The lock entry for `name` from the active task, else from kept.json, and the task it belongs to."""
     active = project.task() if project.active_id() else None
@@ -3788,6 +3854,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["status", "enable", "disable"], default="status", help="action to perform")
     s = sub.add_parser("yolo", help="Alias for permissions: inspect or enable/disable agent YOLO mode")
     s.add_argument("action", nargs="?", choices=["status", "enable", "disable"], default="status", help="action to perform")
+    s = sub.add_parser("slot", help="8-Slot Modular Harness Scaffolding (Google Research Harness² model)")
+    s.add_argument("action", nargs="?", choices=["inspect", "export", "diff"], default="inspect", help="slot action")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
+    s.add_argument("--target", help="target slots JSON file for diff action")
+    s = sub.add_parser("probe", help="Propose-Probe-Compose contrastive harness loop without ground truth")
+    s.add_argument("action", nargs="?", choices=["run", "propose", "compose"], default="run", help="probe action")
+    s.add_argument("-k", type=int, default=2, help="number of contrastive candidate harness variants to probe (default: 2)")
+    s.add_argument("--prompt", help="task prompt or objective for variant generation")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     return p
 
 
@@ -3799,7 +3874,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe}
 
 
 def main(argv: list[str] | None = None) -> int:
