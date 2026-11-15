@@ -79,6 +79,7 @@ META_TOOLS = [
          "path": {"type": "string", "description": "Relative file or directory path (default: project root)."},
          "query": {"type": "string", "description": "Optional symbol or function name search query."},
          "policy": {"type": "boolean", "description": "Check deterministic AST structural policies (dead private methods, silenced exceptions, unclosed files)."},
+         "check_shims": {"type": "boolean", "description": "Detect fake agent shortcuts, stubs, and mock cheats (EMPTY_STUB_BODY, TRIVIAL_RETURN_STUB, NOT_IMPLEMENTED_STUB, TRIVIAL_ASSERTION_CHEAT)."},
          "arch": {"type": "boolean", "description": "Analyze architecture dependency graph, detect cycles, and check layer boundary violations without tokens."},
          "impact": {"type": "string", "description": "Symbol name to compute blast radius, callers, callees, and impacted tests."},
          "callers": {"type": "string", "description": "Symbol name to find all direct callers across the codebase."},
@@ -533,10 +534,17 @@ class Gateway:
             query = args.get("query")
             raw_json = bool(args.get("raw_json"))
             check_policy = bool(args.get("policy"))
+            check_shims = bool(args.get("check_shims"))
             check_arch = bool(args.get("arch"))
             impact_sym = args.get("impact")
             callers_sym = args.get("callers")
             root = (self.project / rel_path) if self.project else Path(rel_path)
+            if check_shims:
+                shims = codemap.detect_anti_shims(root) if root.is_file() else codemap.scan_ast_policies(root, include_anti_shims=True)
+                shims_only = [v for v in shims if v.get("rule") in ("EMPTY_STUB_BODY", "TRIVIAL_RETURN_STUB", "NOT_IMPLEMENTED_STUB", "TRIVIAL_ASSERTION_CHEAT")]
+                if raw_json:
+                    return _text(json.dumps({"total_shims": len(shims_only), "shims": shims_only}, ensure_ascii=False, indent=2))
+                return _text(codemap.format_anti_shim_report(shims_only))
             if check_policy:
                 violations = codemap.scan_ast_policies(root)
                 return _text(json.dumps({"total_violations": len(violations), "violations": violations}, ensure_ascii=False, indent=2))

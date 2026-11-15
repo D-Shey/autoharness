@@ -284,3 +284,23 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
 `autoharness status` shows the harness and log (`--full` for everything), `audit` the decisions,
 `remove`/`prune` take kept items off, `eval record|compare` measures runs with and without the
 harness.
+
+## 7. Advanced Scaffolding & Code Intelligence (Zero Token Overhead)
+
+- **8-Slot Modular Harness Scaffolding (Google Research Harness² Model)**:
+  `autoharness slot` — inspect the 8 canonical slots (system_prompt, guardrails, memory, skills, tool_guidance, scripts, subagents, middleware).
+  `autoharness slot export` — dump the live harness slots state as structured JSON.
+  `autoharness slot diff --target <file.json>` — compute structural semantic diff against another harness state.
+
+- **Propose–Probe–Compose Contrastive Loop (Without Ground Truth)**:
+  `autoharness probe -k 2` — generate K candidate harness variants, probe them in sandboxed execution, and synthesize evidence-backed improvements via behavioral contrasts (tool error/loop minimization).
+
+- **AST Symbol Call Graph & Blast Radius Impact Analysis**:
+  `autoharness codemap <path> --impact <symbol>` — analyze direct callers, callees, transitive blast radius, and impacted test suites without consuming LLM tokens.
+  `autoharness codemap <path> --callers <symbol>` — locate all direct callers across the repository.
+  `autoharness codemap <path> --arch` — detect module dependency cycles and architectural boundary violations.
+
+- **Anti-Shim & Fake Implementation AST Sentinel**:
+  `autoharness codemap <path> --check-shims` — detect fake agent shortcuts, stubs, and mock cheats (`EMPTY_STUB_BODY`, `TRIVIAL_RETURN_STUB`, `NOT_IMPLEMENTED_STUB`, `TRIVIAL_ASSERTION_CHEAT`) without LLM tokens. Integrated automatically into `autoharness evidence diff` to guard evidence against hollow agent completions.
+
+

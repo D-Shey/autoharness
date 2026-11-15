@@ -137,3 +137,25 @@ B1 [core.py]: HINDERS - breaks state consistency on error
     assert rev["fixable"] is True
     assert "hinders_warning" in rev
 
+
+def test_evidence_diff_detects_anti_shims(project, tmp_path):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=project.root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=project.root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=project.root, check=True)
+    (project.root / "base.py").write_text("# base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=project.root, check=True)
+    subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=project.root, check=True)
+
+    task = project.init_task("Task with anti-shim detection", "full")
+    py_file = project.root / "fake_module.py"
+    py_file.write_text("def do_work():\n    pass\n", encoding="utf-8")
+
+    diff_entry = evidence.add_diff(task, project.root)
+    assert "anti_shims" in diff_entry
+    assert len(diff_entry["anti_shims"]) == 1
+    assert diff_entry["anti_shims"][0]["rule"] == "EMPTY_STUB_BODY"
+    assert diff_entry["anti_shims"][0]["symbol"] == "do_work"
+
+
+

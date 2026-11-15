@@ -1778,6 +1778,22 @@ def cmd_codemap(args, project, catalog) -> int:
         if getattr(args, "fail_on_cycle", False) and (cycles or violations):
             return 1
         return 0
+    if getattr(args, "check_shims", False):
+        shims = []
+        if target.is_file():
+            shims = codemap.detect_anti_shims(target)
+        else:
+            for p in sorted(target.rglob("*.py")):
+                if not any(part in p.parts for part in codemap.DEFAULT_EXCLUDES):
+                    shims.extend(codemap.detect_anti_shims(p))
+        if getattr(args, "json", False):
+            out({"status": "warning" if shims else "ok", "total_shims": len(shims), "shims": shims})
+        else:
+            report = codemap.format_anti_shim_report(shims)
+            print(report)
+        if getattr(args, "fail_on_cycle", False) and shims:
+            return 1
+        return 0
     if getattr(args, "impact", None):
         call_graph = codemap.build_call_graph(cmap)
         impact_data = codemap.analyze_impact(call_graph, args.impact)
@@ -3833,6 +3849,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fail-on-cycle", action="store_true", help="exit with code 1 if cycles or boundary violations exist")
     s.add_argument("--impact", help="analyze blast radius and callers impact for a symbol")
     s.add_argument("--callers", help="find direct callers for a symbol")
+    s.add_argument("--check-shims", action="store_true", help="scan for fake implementation stubs and mock cheats (Anti-Shim Sentinel)")
     s = sub.add_parser("swarm", help="Multi-agent DAG swarm workflow coordinator and runner")
     s.add_argument("action", choices=["init", "run", "status", "list"], help="swarm action")
     s.add_argument("plan_id", nargs="?", help="plan ID or JSON plan path")

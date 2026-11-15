@@ -322,9 +322,33 @@ def add_diff(task: Task, root: Path, base: str = "HEAD", note: str = "") -> dict
     src.write_bytes(patch)
     note = note or f"git diff {base} + {len(untracked)} untracked file(s)"
     base_sha = _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").decode().strip()
-    item = add(task, src, "result", note, {"untracked": untracked, "base": base, "base_sha": base_sha,
-                                          "tree_state": tree_state(root, base_sha)}
-               | ({"skipped_nested": nested} if nested else {}))
+    
+    # Scan for anti-shims in changed python files
+    from autoharness import codemap
+    shims: list[dict] = []
+    own = ":(exclude).autoharness"
+    diff_paths = set(p for p in _git(root, "diff", "--relative", "--name-only", "-z", base_sha, "--", ".", own)
+                    .decode("utf-8", "replace").split("\0") if p)
+    diff_paths |= set(untracked)
+    for p_str in diff_paths:
+        if p_str.endswith(".py"):
+            f_abs = root / p_str
+            if f_abs.is_file():
+                shims.extend(codemap.detect_anti_shims(f_abs))
+
+    extra_data = {
+        "untracked": untracked,
+        "base": base,
+        "base_sha": base_sha,
+        "tree_state": tree_state(root, base_sha),
+    }
+    if shims:
+        extra_data["anti_shims"] = shims
+        extra_data["anti_shims_count"] = len(shims)
+    if nested:
+        extra_data["skipped_nested"] = nested
+
+    item = add(task, src, "result", note, extra_data)
     src.unlink()
     return item
 

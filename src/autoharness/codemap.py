@@ -711,10 +711,180 @@ def check_ast_policies(
     return violations
 
 
+def detect_anti_shims(
+    source_or_path: str | Path,
+    filename: str = "<unknown>",
+) -> list[dict[str, Any]]:
+    """Deterministic Anti-Shim & Fake Implementation Sentinel (inspired by mgantlett/nomos and xenups/Asha).
+
+    Detects fake agent shortcuts, stubs, and mock cheats:
+      - EMPTY_STUB_BODY: functions/methods consisting only of pass, ellipsis, or docstring without logic.
+      - TRIVIAL_RETURN_STUB: non-predicate functions returning hardcoded constants (True, False, None, "") without computation.
+      - NOT_IMPLEMENTED_STUB: functions raising NotImplementedError or Exception("TODO").
+      - TRIVIAL_ASSERTION_CHEAT: test functions with trivial tautological assertions (assert True, assert 1 == 1).
+    """
+    if isinstance(source_or_path, Path):
+        file_path = source_or_path
+        filename = str(file_path).replace("\\", "/")
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return [{"rule": "READ_ERROR", "severity": "blocker", "file": filename, "line": 0, "symbol": "", "message": str(e)}]
+    elif isinstance(source_or_path, str):
+        content = source_or_path
+        p = Path(source_or_path)
+        if len(source_or_path) < 1024 and "\n" not in source_or_path and p.is_file():
+            filename = str(p).replace("\\", "/")
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return [{"rule": "READ_ERROR", "severity": "blocker", "file": filename, "line": 0, "symbol": "", "message": str(e)}]
+    else:
+        return []
+
+    try:
+        tree = ast.parse(content, filename=filename)
+    except SyntaxError:
+        return []
+
+    violations: list[dict[str, Any]] = []
+    is_test_file = "test" in filename.lower()
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn_name = node.name
+            decs = {ast.unparse(d) if hasattr(ast, "unparse") else "" for d in node.decorator_list}
+            if any("abstractmethod" in d or "overload" in d for d in decs):
+                continue
+
+            # Filter docstring
+            body_stmts = [
+                s for s in node.body
+                if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
+            ]
+
+            # 1. EMPTY_STUB_BODY: only pass or ellipsis
+            if not body_stmts:
+                violations.append({
+                    "rule": "EMPTY_STUB_BODY",
+                    "severity": "major",
+                    "file": filename,
+                    "line": node.lineno,
+                    "symbol": fn_name,
+                    "message": f"Function '{fn_name}' has an empty body without implementation.",
+                })
+            elif len(body_stmts) == 1:
+                stmt = body_stmts[0]
+                if isinstance(stmt, ast.Pass):
+                    violations.append({
+                        "rule": "EMPTY_STUB_BODY",
+                        "severity": "major",
+                        "file": filename,
+                        "line": node.lineno,
+                        "symbol": fn_name,
+                        "message": f"Function '{fn_name}' consists solely of a 'pass' stub.",
+                    })
+                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and stmt.value.value is Ellipsis:
+                    violations.append({
+                        "rule": "EMPTY_STUB_BODY",
+                        "severity": "major",
+                        "file": filename,
+                        "line": node.lineno,
+                        "symbol": fn_name,
+                        "message": f"Function '{fn_name}' consists solely of an Ellipsis (...) stub.",
+                    })
+
+                # 2. NOT_IMPLEMENTED_STUB
+                elif isinstance(stmt, ast.Raise):
+                    exc_name = ""
+                    if isinstance(stmt.exc, ast.Name):
+                        exc_name = stmt.exc.id
+                    elif isinstance(stmt.exc, ast.Call) and isinstance(stmt.exc.func, ast.Name):
+                        exc_name = stmt.exc.func.id
+                    if exc_name in ("NotImplementedError", "NotImplemented"):
+                        violations.append({
+                            "rule": "NOT_IMPLEMENTED_STUB",
+                            "severity": "major",
+                            "file": filename,
+                            "line": node.lineno,
+                            "symbol": fn_name,
+                            "message": f"Function '{fn_name}' raises NotImplementedError stub.",
+                        })
+
+                # 3. TRIVIAL_RETURN_STUB
+                elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Constant):
+                    # Exclude boolean predicates and dunder methods
+                    is_predicate = any(fn_name.startswith(pfx) for pfx in ("is_", "has_", "can_", "supports_"))
+                    if not is_predicate and not fn_name.startswith("__") and not fn_name.startswith("test_"):
+                        val_repr = repr(stmt.value.value)
+                        violations.append({
+                            "rule": "TRIVIAL_RETURN_STUB",
+                            "severity": "major",
+                            "file": filename,
+                            "line": node.lineno,
+                            "symbol": fn_name,
+                            "message": f"Function '{fn_name}' trivially returns constant {val_repr} without logic.",
+                        })
+
+            # 4. TRIVIAL_ASSERTION_CHEAT (in tests)
+            if is_test_file or fn_name.startswith("test_"):
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Assert):
+                        if isinstance(child.test, ast.Constant) and child.test.value is True:
+                            violations.append({
+                                "rule": "TRIVIAL_ASSERTION_CHEAT",
+                                "severity": "blocker",
+                                "file": filename,
+                                "line": child.lineno,
+                                "symbol": f"{fn_name}:assert True",
+                                "message": f"Test '{fn_name}' contains tautological 'assert True' cheat.",
+                            })
+                        elif (
+                            isinstance(child.test, ast.Compare)
+                            and len(child.test.ops) == 1
+                            and isinstance(child.test.ops[0], ast.Eq)
+                            and hasattr(ast, "unparse")
+                            and ast.unparse(child.test.left) == ast.unparse(child.test.comparators[0])
+                        ):
+                            expr_repr = ast.unparse(child.test.left)
+                            violations.append({
+                                "rule": "TRIVIAL_ASSERTION_CHEAT",
+                                "severity": "blocker",
+                                "file": filename,
+                                "line": child.lineno,
+                                "symbol": f"{fn_name}:assert {expr_repr} == {expr_repr}",
+                                "message": f"Test '{fn_name}' contains tautological equality assertion cheat.",
+                            })
+
+    violations.sort(key=lambda x: (x.get("line", 0), x.get("rule", "")))
+    return violations
+
+
+def format_anti_shim_report(violations: list[dict[str, Any]]) -> str:
+    """Format detected anti-shim stub violations into clean Markdown."""
+    lines = [
+        f"# Anti-Shim Sentinel Report ({len(violations)} issues found)",
+        "",
+        "## Summary",
+        f"- Total Stub Invariants Checked: {len(violations)}",
+        f"- Status: {'CLEAN (No shims detected)' if not violations else 'VIOLATIONS DETECTED'}",
+        "",
+    ]
+    if not violations:
+        lines.append("- No stub functions, trivial return values, or mock cheats detected.")
+    else:
+        lines.append("## Detected Shims & Stubs")
+        for idx, v in enumerate(violations, 1):
+            lines.append(f"{idx}. [{v.get('severity', 'major').upper()}] `{v.get('symbol')}` ({v.get('file')}:{v.get('line')})")
+            lines.append(f"   *Rule:* `{v.get('rule')}` — {v.get('message')}")
+    return "\n".join(lines).strip()
+
+
 def scan_ast_policies(
     root_path: Path,
     max_depth: int = 5,
-    exclude_dirs: set[str] | None = None
+    exclude_dirs: set[str] | None = None,
+    include_anti_shims: bool = False,
 ) -> list[dict[str, Any]]:
     """Scan all Python modules under root_path for AST policy violations."""
     excludes = DEFAULT_EXCLUDES | (exclude_dirs or set())
@@ -723,7 +893,10 @@ def scan_ast_policies(
 
     if root.is_file():
         if root.suffix == ".py":
-            return check_ast_policies(root)
+            res = check_ast_policies(root)
+            if include_anti_shims:
+                res.extend(detect_anti_shims(root))
+            return res
         return []
 
     for path in sorted(root.rglob("*.py")):
@@ -733,6 +906,8 @@ def scan_ast_policies(
         if len(path.relative_to(root).parts) > max_depth:
             continue
         all_violations.extend(check_ast_policies(path))
+        if include_anti_shims:
+            all_violations.extend(detect_anti_shims(path))
 
     return all_violations
 

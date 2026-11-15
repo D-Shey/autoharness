@@ -907,5 +907,119 @@ def test_gateway_codemap_impact_and_callers(tmp_path):
     assert c_data["callers"][0]["name"] == "sum_squares"
 
 
+def test_detect_anti_shims_types(tmp_path):
+    repo = tmp_path / "shim_repo"
+    repo.mkdir()
+    sample = repo / "sample_shims.py"
+    sample.write_text(
+        "import abc\n\n"
+        "def empty_func():\n"
+        "    pass\n\n"
+        "def ellipsis_func():\n"
+        "    '''Just a docstring'''\n"
+        "    ...\n\n"
+        "def not_impl():\n"
+        "    raise NotImplementedError('TODO: implement')\n\n"
+        "def fake_result():\n"
+        "    return True\n\n"
+        "def legit_calc(x):\n"
+        "    val = x * 2\n"
+        "    return val > 10\n\n"
+        "class Base(abc.ABC):\n"
+        "    @abc.abstractmethod\n"
+        "    def abstract_meth(self):\n"
+        "        pass\n\n"
+        "def test_cheat_one():\n"
+        "    assert True\n\n"
+        "def test_cheat_tautology():\n"
+        "    x = 42\n"
+        "    assert x == x\n\n"
+        "def test_legit():\n"
+        "    x = 40 + 2\n"
+        "    assert x == 42\n",
+        encoding="utf-8"
+    )
+
+    shims = codemap.detect_anti_shims(sample)
+    rules = [s["rule"] for s in shims]
+
+    assert "EMPTY_STUB_BODY" in rules
+    assert "NOT_IMPLEMENTED_STUB" in rules
+    assert "TRIVIAL_RETURN_STUB" in rules
+    assert "TRIVIAL_ASSERTION_CHEAT" in rules
+
+    # Verify abstract methods and legitimate calculations are not flagged as shims
+    symbols_flagged = [s["symbol"] for s in shims]
+    assert "legit_calc" not in symbols_flagged
+    assert "abstract_meth" not in symbols_flagged
+    assert "test_legit" not in symbols_flagged
+
+    report = codemap.format_anti_shim_report(shims)
+    assert "# Anti-Shim Sentinel Report" in report
+    assert "EMPTY_STUB_BODY" in report
+
+
+def test_cli_codemap_check_shims(tmp_path, capsys):
+    repo = tmp_path / "cli_shim_repo"
+    repo.mkdir()
+    (repo / "shim.py").write_text("def cheat():\n    return False\n", encoding="utf-8")
+
+    class FakeArgs:
+        path = "."
+        query = None
+        json = True
+        raw_json = True
+        policy = False
+        check_shims = True
+        arch = False
+        impact = None
+        callers = None
+        fail_on_cycle = True
+
+    class FakeProject:
+        root = repo
+
+    ret = cli.cmd_codemap(FakeArgs(), FakeProject(), None)
+    assert ret == 1  # non-zero because shims detected
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["status"] == "warning"
+    assert data["total_shims"] == 1
+    assert data["shims"][0]["rule"] == "TRIVIAL_RETURN_STUB"
+
+
+def test_gateway_codemap_check_shims(tmp_path):
+    repo = tmp_path / "gw_shim_repo"
+    repo.mkdir()
+    (repo / "fake.py").write_text(
+        "def stub():\n"
+        "    ...\n\n"
+        "def test_fake():\n"
+        "    assert 1 == 1\n",
+        encoding="utf-8"
+    )
+
+    gw = gateway.Gateway(repo, write=lambda s: None, log=lambda s: None)
+
+    # 1. Markdown report
+    res = gw._call({
+        "name": "harness_codemap",
+        "arguments": {"check_shims": True}
+    })
+    text = res["content"][0]["text"]
+    assert "# Anti-Shim Sentinel Report" in text
+    assert "EMPTY_STUB_BODY" in text
+    assert "TRIVIAL_ASSERTION_CHEAT" in text
+
+    # 2. Raw JSON
+    res_json = gw._call({
+        "name": "harness_codemap",
+        "arguments": {"check_shims": True, "raw_json": True}
+    })
+    data = json.loads(res_json["content"][0]["text"])
+    assert data["total_shims"] == 2
+
+
+
 
 
