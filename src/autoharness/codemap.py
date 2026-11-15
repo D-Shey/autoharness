@@ -8,7 +8,9 @@ Reduces token overhead by 80-90% compared to reading full raw source files.
 from __future__ import annotations
 
 import ast
+import collections
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -716,3 +718,382 @@ def scan_ast_policies(
         all_violations.extend(check_ast_policies(path))
 
     return all_violations
+
+
+DEFAULT_BOUNDARY_RULES: list[dict[str, Any]] = [
+    {
+        "name": "CORE_CANNOT_IMPORT_PRESENTATION",
+        "description": "Core engines and domain logic must not import CLI/presentation modules",
+        "source_regex": r"(^|/)(evidence|runs|env|memory|vector|codemap|answers|audit|sandbox|codegen)\.py$",
+        "forbidden_regex": r"(^|/)(cli|gateway|server)\.py$",
+        "severity": "major",
+    },
+    {
+        "name": "PROD_CANNOT_IMPORT_TESTS",
+        "description": "Production modules must not import test files",
+        "source_regex": r"^src/",
+        "forbidden_regex": r"^tests/",
+        "severity": "blocker",
+    },
+]
+
+_FROM_IMPORT_RE = re.compile(r"^from\s+([.\w]+)\s+import\s+(.+)$")
+_IMPORT_RE = re.compile(r"^import\s+([.\w\s,]+)$")
+_JS_IMPORT_RE = re.compile(r"""(?:import|from|require\s*\()\s*['"]([.][^'"]+)['"]""")
+
+
+def build_dependency_graph(codemap: dict[str, Any]) -> dict[str, Any]:
+    """Build directed module dependency graph from codemap symbol definitions (zero tokens)."""
+    modules = codemap.get("modules", {})
+    all_modules = sorted(modules.keys())
+
+    # Build multi-resolution module lookup table
+    module_lookup: dict[str, str] = {}
+    stem_counts: dict[str, int] = collections.defaultdict(int)
+    stem_to_mod: dict[str, str] = {}
+
+    for m_path in all_modules:
+        norm_path = m_path.replace("\\", "/")
+        module_lookup[norm_path] = norm_path
+        p = Path(norm_path)
+        no_ext = str(p.with_suffix("")).replace("\\", "/")
+        module_lookup[no_ext] = norm_path
+
+        # Stem lookup if unique
+        stem = p.stem
+        stem_counts[stem] += 1
+        stem_to_mod[stem] = norm_path
+
+        # Python dotted path resolution
+        parts = list(p.parts)
+        if parts and parts[-1].endswith(p.suffix) and p.suffix:
+            parts[-1] = p.stem
+        if parts and parts[-1] == "__init__":
+            parts.pop()
+
+        if parts:
+            dotted_full = ".".join(parts)
+            module_lookup[dotted_full] = norm_path
+            # If path starts with src/ or lib/, also index package root directly
+            if len(parts) > 1 and parts[0] in ("src", "lib"):
+                dotted_sub = ".".join(parts[1:])
+                module_lookup[dotted_sub] = norm_path
+
+    # Only map unique stems to prevent ambiguous collisions
+    for stem, count in stem_counts.items():
+        if count == 1:
+            module_lookup[stem] = stem_to_mod[stem]
+
+    def _resolve_candidate(cand: str) -> str | None:
+        if cand in module_lookup:
+            return module_lookup[cand]
+        if "." in cand:
+            parts = cand.split(".")
+            for k in range(len(parts), 0, -1):
+                sub_slash = "/".join(parts[-k:])
+                if sub_slash in module_lookup:
+                    return module_lookup[sub_slash]
+            last = parts[-1]
+            if last in stem_to_mod:
+                return stem_to_mod[last]
+        if cand in stem_to_mod:
+            return stem_to_mod[cand]
+        return None
+
+    adjacency: dict[str, set[str]] = {m: set() for m in all_modules}
+    reverse_adj: dict[str, set[str]] = {m: set() for m in all_modules}
+    external_imports: dict[str, set[str]] = {m: set() for m in all_modules}
+
+    for src_mod, mod_data in modules.items():
+        norm_src = src_mod.replace("\\", "/")
+        src_dir = Path(norm_src).parent
+        imports = mod_data.get("imports", [])
+
+        for imp in imports:
+            raw_imp = imp.strip()
+            matched = False
+
+            # 1. Python "from <module> import <names>"
+            m_from = _FROM_IMPORT_RE.match(raw_imp)
+            if m_from:
+                mod_name, names_str = m_from.group(1), m_from.group(2)
+                if mod_name.startswith("."):
+                    dot_count = len(mod_name) - len(mod_name.lstrip("."))
+                    remainder = mod_name.lstrip(".")
+                    target_dir = src_dir
+                    for _ in range(dot_count - 1):
+                        target_dir = target_dir.parent
+
+                    if remainder:
+                        cand1 = str(target_dir / f"{remainder}.py").replace("\\", "/")
+                        cand2 = str(target_dir / remainder / "__init__.py").replace("\\", "/")
+                        if cand1 in modules:
+                            adjacency[norm_src].add(cand1)
+                            matched = True
+                        elif cand2 in modules:
+                            adjacency[norm_src].add(cand2)
+                            matched = True
+                    else:
+                        names = [n.strip().split()[0] for n in names_str.split(",") if n.strip()]
+                        for n in names:
+                            cand1 = str(target_dir / f"{n}.py").replace("\\", "/")
+                            cand2 = str(target_dir / n / "__init__.py").replace("\\", "/")
+                            if cand1 in modules:
+                                adjacency[norm_src].add(cand1)
+                                matched = True
+                            elif cand2 in modules:
+                                adjacency[norm_src].add(cand2)
+                                matched = True
+                else:
+                    direct_target = _resolve_candidate(mod_name)
+                    if direct_target:
+                        adjacency[norm_src].add(direct_target)
+                        matched = True
+
+                    names = [n.strip().split()[0] for n in names_str.split(",") if n.strip()]
+                    for n in names:
+                        combined = f"{mod_name}.{n}"
+                        sub_target = _resolve_candidate(combined)
+                        if sub_target:
+                            adjacency[norm_src].add(sub_target)
+                            matched = True
+                        elif n in stem_to_mod and stem_counts[n] == 1:
+                            adjacency[norm_src].add(stem_to_mod[n])
+                            matched = True
+
+                if not matched and not mod_name.startswith("."):
+                    external_imports[norm_src].add(mod_name.split(".")[0])
+                continue
+
+            # 2. Python "import <modules>"
+            m_imp = _IMPORT_RE.match(raw_imp)
+            if m_imp:
+                items = [x.strip().split()[0] for x in m_imp.group(1).split(",") if x.strip()]
+                for item in items:
+                    target = _resolve_candidate(item)
+                    if target:
+                        adjacency[norm_src].add(target)
+                        matched = True
+                    else:
+                        external_imports[norm_src].add(item.split(".")[0])
+                continue
+
+            # 3. JS/TS relative imports
+            m_js = _JS_IMPORT_RE.search(raw_imp)
+            if m_js:
+                rel_cand = m_js.group(1)
+                base = (src_dir / rel_cand).as_posix()
+                for ext in ("", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.js"):
+                    attempt = base + ext
+                    if attempt in modules:
+                        adjacency[norm_src].add(attempt)
+                        matched = True
+                        break
+                continue
+
+            # 4. Bare Python module name from ast.Import (e.g. "beta" or "beta as b" or "os")
+            mod_item = raw_imp.split()[0]
+            if not mod_item.startswith((".", "'", '"', "/", "\\")):
+                target = _resolve_candidate(mod_item)
+                if target:
+                    adjacency[norm_src].add(target)
+                    matched = True
+                else:
+                    external_imports[norm_src].add(mod_item.split(".")[0])
+
+        # Remove self-loops
+        adjacency[norm_src].discard(norm_src)
+
+    # Populate reverse adjacency
+    for src, tgts in adjacency.items():
+        for tgt in tgts:
+            if tgt in reverse_adj:
+                reverse_adj[tgt].add(src)
+
+    edges = [
+        {"source": src, "target": tgt}
+        for src in all_modules
+        for tgt in sorted(adjacency[src])
+    ]
+
+    return {
+        "modules": all_modules,
+        "edges": edges,
+        "adjacency": {m: sorted(adjacency[m]) for m in all_modules},
+        "reverse_adjacency": {m: sorted(reverse_adj[m]) for m in all_modules},
+        "in_degree": {m: len(reverse_adj[m]) for m in all_modules},
+        "out_degree": {m: len(adjacency[m]) for m in all_modules},
+        "external_imports": {m: sorted(external_imports[m]) for m in all_modules},
+    }
+
+
+def detect_architecture_cycles(
+    dep_graph: dict[str, Any] | dict[str, list[str]],
+    max_cycles: int = 200,
+) -> list[list[str]]:
+    """Detect all elementary directed cycles in the dependency graph using ordered Tiernan search."""
+    if isinstance(dep_graph, dict) and "adjacency" in dep_graph:
+        adj: dict[str, list[str]] = dep_graph["adjacency"]
+    elif isinstance(dep_graph, dict):
+        adj = dep_graph
+    else:
+        return []
+
+    cycles: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    nodes = sorted(adj.keys())
+
+    def dfs(start: str, curr: str, path: list[str]) -> None:
+        if len(cycles) >= max_cycles:
+            return
+        for nxt in sorted(adj.get(curr, [])):
+            if nxt == start and len(path) > 1:
+                min_elem = min(path)
+                min_idx = path.index(min_elem)
+                can = tuple(path[min_idx:] + path[:min_idx])
+                if can not in seen:
+                    seen.add(can)
+                    cycles.append(list(can))
+            elif nxt > start and nxt not in path:
+                dfs(start, nxt, path + [nxt])
+
+    for n in nodes:
+        dfs(n, n, [n])
+
+    return sorted(cycles, key=lambda c: (len(c), c))
+
+
+def detect_boundary_violations(
+    dep_graph: dict[str, Any] | dict[str, list[str]],
+    rules: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Detect architectural boundary and layer isolation violations across module dependencies."""
+    if isinstance(dep_graph, dict) and "edges" in dep_graph:
+        edges = dep_graph["edges"]
+    elif isinstance(dep_graph, dict) and "adjacency" in dep_graph:
+        edges = [{"source": s, "target": t} for s, targets in dep_graph["adjacency"].items() for t in targets]
+    elif isinstance(dep_graph, dict):
+        edges = [{"source": s, "target": t} for s, targets in dep_graph.items() for t in targets]
+    else:
+        edges = []
+
+    active_rules = rules if rules is not None else DEFAULT_BOUNDARY_RULES
+    compiled = []
+    for r in active_rules:
+        compiled.append((
+            r,
+            re.compile(r["source_regex"], re.IGNORECASE),
+            re.compile(r["forbidden_regex"], re.IGNORECASE),
+        ))
+
+    violations: list[dict[str, Any]] = []
+    for edge in edges:
+        src = edge.get("source", "").replace("\\", "/")
+        tgt = edge.get("target", "").replace("\\", "/")
+        for rule_meta, s_pat, f_pat in compiled:
+            if s_pat.search(src) and f_pat.search(tgt):
+                violations.append({
+                    "rule": rule_meta["name"],
+                    "severity": rule_meta.get("severity", "major"),
+                    "source": src,
+                    "target": tgt,
+                    "message": f"Boundary violation: '{src}' imports '{tgt}'. {rule_meta.get('description', '')}",
+                })
+
+    violations.sort(key=lambda x: (x.get("severity") != "blocker", x.get("source", ""), x.get("target", "")))
+    return violations
+
+
+def architecture_diff(
+    base_graph: dict[str, Any],
+    head_graph: dict[str, Any],
+    rules: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Calculate deterministic architectural diff between base and head dependency graphs without tokens."""
+    base_mods = set(base_graph.get("modules", []))
+    head_mods = set(head_graph.get("modules", []))
+
+    base_edges = {(e["source"], e["target"]) for e in base_graph.get("edges", [])}
+    head_edges = {(e["source"], e["target"]) for e in head_graph.get("edges", [])}
+
+    base_cycles = [tuple(c) for c in detect_architecture_cycles(base_graph)]
+    head_cycles = [tuple(c) for c in detect_architecture_cycles(head_graph)]
+
+    base_violations = detect_boundary_violations(base_graph, rules)
+    head_violations = detect_boundary_violations(head_graph, rules)
+
+    new_cycles = [list(c) for c in sorted(set(head_cycles) - set(base_cycles))]
+    resolved_cycles = [list(c) for c in sorted(set(base_cycles) - set(head_cycles))]
+
+    base_violation_keys = {(v["rule"], v["source"], v["target"]) for v in base_violations}
+    new_violations = [v for v in head_violations if (v["rule"], v["source"], v["target"]) not in base_violation_keys]
+    head_violation_keys = {(v["rule"], v["source"], v["target"]) for v in head_violations}
+    resolved_violations = [v for v in base_violations if (v["rule"], v["source"], v["target"]) not in head_violation_keys]
+
+    added_edges = sorted([{"source": s, "target": t} for s, t in (head_edges - base_edges)], key=lambda x: (x["source"], x["target"]))
+    removed_edges = sorted([{"source": s, "target": t} for s, t in (base_edges - head_edges)], key=lambda x: (x["source"], x["target"]))
+
+    has_regressions = bool(new_cycles or new_violations)
+    verdict = "violation" if has_regressions else "clean"
+
+    return {
+        "verdict": verdict,
+        "added_modules": sorted(list(head_mods - base_mods)),
+        "removed_modules": sorted(list(base_mods - head_mods)),
+        "added_edges": added_edges,
+        "removed_edges": removed_edges,
+        "new_cycles": new_cycles,
+        "resolved_cycles": resolved_cycles,
+        "new_violations": new_violations,
+        "resolved_violations": resolved_violations,
+        "total_head_cycles": len(head_cycles),
+        "total_head_violations": len(head_violations),
+    }
+
+
+def format_architecture_report(arch_data: dict[str, Any]) -> str:
+    """Format architecture dependency analysis into clean, structured Markdown."""
+    dep_graph = arch_data.get("dep_graph", {})
+    modules = dep_graph.get("modules", [])
+    edges = dep_graph.get("edges", [])
+    cycles = arch_data.get("cycles", [])
+    violations = arch_data.get("violations", [])
+
+    lines: list[str] = [
+        f"# Architecture Dependency Graph ({len(modules)} modules, {len(edges)} dependencies)",
+        "",
+        "## Summary",
+        f"- Modules: {len(modules)}",
+        f"- Internal Dependencies: {len(edges)}",
+        f"- Cycles Detected: {len(cycles)}",
+        f"- Boundary Violations: {len(violations)}",
+        "",
+        "## Cycles",
+    ]
+
+    if not cycles:
+        lines.append("- None detected (graph is a directed acyclic component)")
+    else:
+        for idx, cycle in enumerate(cycles, 1):
+            cycle_str = " -> ".join(cycle) + f" -> {cycle[0]}"
+            lines.append(f"{idx}. {cycle_str}")
+
+    lines.append("")
+    lines.append("## Boundary Violations")
+    if not violations:
+        lines.append("- None detected (all layer isolation invariants satisfied)")
+    else:
+        for idx, v in enumerate(violations, 1):
+            lines.append(f"{idx}. [{v.get('severity', 'major').upper()}] {v.get('source')} -> {v.get('target')}: {v.get('message')}")
+
+    in_degrees = dep_graph.get("in_degree", {})
+    if in_degrees:
+        sorted_central = sorted(in_degrees.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        top_refs = [f"- `{mod}`: {cnt} incoming references" for mod, cnt in sorted_central if cnt > 0]
+        if top_refs:
+            lines.append("")
+            lines.append("## Most Referenced Modules")
+            lines.extend(top_refs)
+
+    return "\n".join(lines).strip()
+

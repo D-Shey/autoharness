@@ -582,3 +582,162 @@ def test_codemap_polyglot_repository_scan_and_tree(tmp_path):
     assert any(m["name"] == "TsClient" and m["file"].endswith("client.ts") for m in matches_ts)
 
 
+def test_arch_dependency_graph_and_cycles(tmp_path):
+    repo = tmp_path / "cyclic_repo"
+    repo.mkdir()
+    (repo / "alpha.py").write_text("import beta\nclass Alpha: pass\n", encoding="utf-8")
+    (repo / "beta.py").write_text("import gamma\nclass Beta: pass\n", encoding="utf-8")
+    (repo / "gamma.py").write_text("import alpha\nclass Gamma: pass\n", encoding="utf-8")
+    (repo / "independent.py").write_text("x = 42\n", encoding="utf-8")
+
+    cmap = codemap.generate_codemap(repo)
+    dep_graph = codemap.build_dependency_graph(cmap)
+
+    assert len(dep_graph["modules"]) == 4
+    assert len(dep_graph["edges"]) == 3
+    assert "alpha.py" in dep_graph["adjacency"]
+
+    cycles = codemap.detect_architecture_cycles(dep_graph)
+    assert len(cycles) == 1
+    cycle = cycles[0]
+    assert sorted(cycle) == ["alpha.py", "beta.py", "gamma.py"]
+
+
+def test_arch_boundary_violations():
+    fake_graph = {
+        "modules": ["src/autoharness/evidence.py", "src/autoharness/cli.py", "src/autoharness/core.py", "tests/test_cli.py"],
+        "edges": [
+            {"source": "src/autoharness/evidence.py", "target": "src/autoharness/cli.py"},
+            {"source": "src/autoharness/core.py", "target": "tests/test_cli.py"},
+        ],
+        "adjacency": {
+            "src/autoharness/evidence.py": ["src/autoharness/cli.py"],
+            "src/autoharness/core.py": ["tests/test_cli.py"],
+        }
+    }
+    violations = codemap.detect_boundary_violations(fake_graph)
+    assert len(violations) == 2
+    rules = {v["rule"] for v in violations}
+    assert "CORE_CANNOT_IMPORT_PRESENTATION" in rules
+    assert "PROD_CANNOT_IMPORT_TESTS" in rules
+
+
+def test_arch_diff_calculation():
+    base_graph = {
+        "modules": ["a.py", "b.py"],
+        "edges": [{"source": "a.py", "target": "b.py"}],
+        "adjacency": {"a.py": ["b.py"], "b.py": []}
+    }
+    head_graph = {
+        "modules": ["a.py", "b.py", "c.py"],
+        "edges": [
+            {"source": "a.py", "target": "b.py"},
+            {"source": "b.py", "target": "a.py"},
+            {"source": "b.py", "target": "c.py"},
+        ],
+        "adjacency": {
+            "a.py": ["b.py"],
+            "b.py": ["a.py", "c.py"],
+            "c.py": []
+        }
+    }
+
+    diff = codemap.architecture_diff(base_graph, head_graph)
+    assert diff["verdict"] == "violation"
+    assert diff["added_modules"] == ["c.py"]
+    assert len(diff["new_cycles"]) == 1
+    assert sorted(diff["new_cycles"][0]) == ["a.py", "b.py"]
+
+    # Now verify clean diff when cycle is removed
+    clean_head = {
+        "modules": ["a.py", "b.py", "c.py"],
+        "edges": [
+            {"source": "a.py", "target": "b.py"},
+            {"source": "b.py", "target": "c.py"},
+        ],
+        "adjacency": {
+            "a.py": ["b.py"],
+            "b.py": ["c.py"],
+            "c.py": []
+        }
+    }
+    clean_diff = codemap.architecture_diff(base_graph, clean_head)
+    assert clean_diff["verdict"] == "clean"
+    assert clean_diff["new_cycles"] == []
+    assert clean_diff["new_violations"] == []
+
+
+def test_arch_report_formatting():
+    arch_data = {
+        "modules_count": 2,
+        "edges_count": 1,
+        "cycles": [],
+        "violations": [],
+        "dep_graph": {
+            "modules": ["mod_a.py", "mod_b.py"],
+            "edges": [{"source": "mod_a.py", "target": "mod_b.py"}],
+            "in_degree": {"mod_b.py": 1, "mod_a.py": 0}
+        }
+    }
+    report = codemap.format_architecture_report(arch_data)
+    assert "# Architecture Dependency Graph (2 modules, 1 dependencies)" in report
+    assert "Cycles Detected: 0" in report
+    assert "None detected" in report
+    assert "`mod_b.py`: 1 incoming references" in report
+
+
+def test_cli_codemap_arch(tmp_path, capsys):
+    from autoharness import cli
+    repo = tmp_path / "cli_arch_repo"
+    repo.mkdir()
+    (repo / "m1.py").write_text("import m2\n", encoding="utf-8")
+    (repo / "m2.py").write_text("import m1\n", encoding="utf-8")
+
+    class FakeArgs:
+        path = str(repo)
+        arch = True
+        json = False
+        fail_on_cycle = False
+        query = None
+
+    class FakeProject:
+        root = Path(tmp_path)
+
+    # 1. Run without fail_on_cycle (should return 0)
+    ret = cli.cmd_codemap(FakeArgs(), FakeProject(), None)
+    assert ret == 0
+    captured = capsys.readouterr().out
+    assert "# Architecture Dependency Graph" in captured
+    assert "Cycles Detected: 1" in captured
+
+    # 2. Run with fail_on_cycle (should return 1 due to m1 <-> m2 cycle)
+    FakeArgs.fail_on_cycle = True
+    ret_fail = cli.cmd_codemap(FakeArgs(), FakeProject(), None)
+    assert ret_fail == 1
+
+
+def test_gateway_codemap_arch(tmp_path):
+    repo = tmp_path / "gw_repo"
+    repo.mkdir()
+    (repo / "worker.py").write_text("x = 1\n", encoding="utf-8")
+
+    gw = gateway.Gateway(repo, write=lambda s: None, log=lambda s: None)
+    # Test JSON output
+    res_json = gw._call({
+        "name": "harness_codemap",
+        "arguments": {"arch": True, "raw_json": True}
+    })
+    data = json.loads(res_json["content"][0]["text"])
+    assert data["modules_count"] == 1
+    assert data["cycles"] == []
+    assert data["violations"] == []
+
+    # Test report text output
+    res_report = gw._call({
+        "name": "harness_codemap",
+        "arguments": {"arch": True, "raw_json": False}
+    })
+    assert "# Architecture Dependency Graph" in res_report["content"][0]["text"]
+
+
+

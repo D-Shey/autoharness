@@ -1759,6 +1759,25 @@ def cmd_codemap(args, project, catalog) -> int:
     from autoharness import codemap
     target = (project.root / args.path) if args.path else project.root
     cmap = codemap.generate_codemap(target)
+    if getattr(args, "arch", False):
+        dep_graph = codemap.build_dependency_graph(cmap)
+        cycles = codemap.detect_architecture_cycles(dep_graph)
+        violations = codemap.detect_boundary_violations(dep_graph)
+        arch_data = {
+            "modules_count": len(dep_graph["modules"]),
+            "edges_count": len(dep_graph["edges"]),
+            "cycles": cycles,
+            "violations": violations,
+            "dep_graph": dep_graph,
+        }
+        if args.json:
+            out({"status": "ok", "arch": arch_data})
+        else:
+            report = codemap.format_architecture_report(arch_data)
+            print(report)
+        if getattr(args, "fail_on_cycle", False) and (cycles or violations):
+            return 1
+        return 0
     if args.query:
         matches = codemap.search_codemap(cmap, args.query)
         out({"status": "ok", "query": args.query, "matches_count": len(matches), "matches": matches})
@@ -3728,6 +3747,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path", nargs="?", default=".", help="file or directory path")
     s.add_argument("--query", "-q", help="search for class, method, or function symbols")
     s.add_argument("--json", action="store_true", help="output full structured JSON")
+    s.add_argument("--arch", action="store_true", help="analyze architecture dependency graph, cycles, and boundary violations")
+    s.add_argument("--fail-on-cycle", action="store_true", help="exit with code 1 if cycles or boundary violations exist")
     s = sub.add_parser("swarm", help="Multi-agent DAG swarm workflow coordinator and runner")
     s.add_argument("action", choices=["init", "run", "status", "list"], help="swarm action")
     s.add_argument("plan_id", nargs="?", help="plan ID or JSON plan path")

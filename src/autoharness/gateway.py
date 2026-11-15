@@ -79,6 +79,7 @@ META_TOOLS = [
          "path": {"type": "string", "description": "Relative file or directory path (default: project root)."},
          "query": {"type": "string", "description": "Optional symbol or function name search query."},
          "policy": {"type": "boolean", "description": "Check deterministic AST structural policies (dead private methods, silenced exceptions, unclosed files)."},
+         "arch": {"type": "boolean", "description": "Analyze architecture dependency graph, detect cycles, and check layer boundary violations without tokens."},
          "raw_json": {"type": "boolean", "description": "Whether to return raw JSON instead of indented outline."}}}},
     {"name": "harness_swarm_status",
      "description": "Inspect status and progress of multi-agent swarm plans in .autoharness/swarm. Omit plan_id to inspect the most recent plan.",
@@ -523,11 +524,26 @@ class Gateway:
             query = args.get("query")
             raw_json = bool(args.get("raw_json"))
             check_policy = bool(args.get("policy"))
+            check_arch = bool(args.get("arch"))
             root = (self.project / rel_path) if self.project else Path(rel_path)
             if check_policy:
                 violations = codemap.scan_ast_policies(root)
                 return _text(json.dumps({"total_violations": len(violations), "violations": violations}, ensure_ascii=False, indent=2))
             cmap = codemap.generate_codemap(root)
+            if check_arch:
+                dep_graph = codemap.build_dependency_graph(cmap)
+                cycles = codemap.detect_architecture_cycles(dep_graph)
+                violations = codemap.detect_boundary_violations(dep_graph)
+                arch_data = {
+                    "modules_count": len(dep_graph["modules"]),
+                    "edges_count": len(dep_graph["edges"]),
+                    "cycles": cycles,
+                    "violations": violations,
+                    "dep_graph": dep_graph,
+                }
+                if raw_json:
+                    return _text(json.dumps(arch_data, ensure_ascii=False, indent=2))
+                return _text(codemap.format_architecture_report(arch_data))
             if query:
                 matches = codemap.search_codemap(cmap, query)
                 if not matches:
