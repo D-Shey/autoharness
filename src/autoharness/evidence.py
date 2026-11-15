@@ -505,6 +505,44 @@ def pending_arbiter(task: Task) -> str | None:
     return last["needs_arbiter"]
 
 
+ACTION_LINE = re.compile(
+    r"^\s*([BCPE]\d+)\s*(?:\[([^\]]+)\])?\s*:\s*(HELPS?|HINDERS?|NOISE)\s*[-—–]\s*(.+)$",
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def parse_action_attribution(text: str) -> dict | None:
+    """Extract action-level credit assignment from a critic review.
+    Returns {"helps": int, "hinders": int, "noise": int, "items": list[dict]} or None if not found."""
+    found = []
+    for m in ACTION_LINE.finditer(text):
+        item_id, target, verdict, evidence_text = m.groups()
+        verdict = verdict.upper()
+        if verdict.startswith("HELP"):
+            v = "helps"
+        elif verdict.startswith("HINDER"):
+            v = "hinders"
+        else:
+            v = "noise"
+        found.append({
+            "item": item_id.upper(),
+            "target": (target or "").strip(),
+            "verdict": v,
+            "evidence": evidence_text.strip()
+        })
+    if not found:
+        return None
+    counts = {"helps": 0, "hinders": 0, "noise": 0}
+    for item in found:
+        counts[item["verdict"]] += 1
+    return {
+        "helps": counts["helps"],
+        "hinders": counts["hinders"],
+        "noise": counts["noise"],
+        "items": found
+    }
+
+
 def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None = None,
            extra: dict | None = None) -> dict:
     if worst not in SEVERITIES:
@@ -517,6 +555,14 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
     item = {"round": len(reviews) + 1, "by": by, "result": judged["n"], "diff": diff, "worst": worst,
             "fixable": worst in BLOCKING, "top": top_issue(diff), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
     item |= extra or {}
+    actions = parse_action_attribution(diff)
+    if actions:
+        item["actions"] = actions
+        if actions["hinders"] > 0 and worst in ("minor", "none"):
+            item["worst"] = "major"
+            item["fixable"] = True
+            item["worst_given"] = worst
+            item["hinders_warning"] = f"{actions['hinders']} change(s) tagged HINDERS: cannot be minor or none"
     if by == "critic":
         item["whole"] = round_results(task)[0]["n"]
         cmp = item.get("compared")
@@ -1158,6 +1204,17 @@ missing, partial or contradicted is also a difference in your list, with the sev
 Then under the heading "Unrequested", list as "- " bullets what the result adds or changes that
 neither the task nor the brief asked for, or write "none".
 """
+    action_attribution = "" if not brief_items else f"""
+Action-Level Credit Assignment:
+Under the heading "Action Attribution", evaluate each changed file, hunk or component against what the brief asked for:
+For each change, give one line in this form:
+`<item_id> [<file_or_component>]: HELPS | HINDERS | NOISE - <evidence>`
+Where:
+- HELPS: directly advances the item without side effects or regressions;
+- HINDERS: introduces bugs, regresses existing behavior (P items), breaks constraints, or creates fragile assumptions;
+- NOISE: unrelated churn, speculative code, or unrequested refactoring.
+Any change tagged HINDERS must also appear as a blocking or major difference in your numbered list above.
+"""
     prompt = f"""You are an independent critic. You did not make this work and owe its author nothing.
 
 Task given to the author:
@@ -1200,7 +1257,7 @@ Tag each one:
 {see}
 Give each difference the severity it has, without praise: the task may end once the worst fixable one is
 minor. Do not suggest changing the constraints.
-{coverage}{previous}{comparison}{ACCEPT_ASK}
+{coverage}{action_attribution}{previous}{comparison}{ACCEPT_ASK}
 End with exactly one line naming the worst severity among the FIXABLE differences:
 VERDICT: blocker | major | minor | none"""
     return {"prompt": prompt, "result": result["file"], "results": [e["file"] for e in results],

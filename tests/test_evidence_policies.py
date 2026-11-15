@@ -56,3 +56,84 @@ def test_sanitize_author_note():
     # Normal objective labels remain unchanged
     assert evidence.sanitize_author_note("webhook handler implementation") == "webhook handler implementation"
     assert evidence.sanitize_author_note("initial block-in draft") == "initial block-in draft"
+
+
+def test_action_level_credit_assignment_in_critic_prompt(project, tmp_path):
+    task = project.init_task("Build webhook", "full")
+    task.record_brief({
+        "goal": "1 Parse webhook; 2 Verify signature",
+        "domains": "none",
+        "method": "searched: payments",
+        "inputs": "none",
+        "constraints": "none",
+        "expects": "none: ok",
+        "verify": "pytest",
+        "candidates": "none",
+        "gaps": "none: ok"
+    })
+    dummy = tmp_path / "result.txt"
+    dummy.write_text("code", encoding="utf-8")
+    evidence.add(task, dummy, "result")
+
+    prompt = evidence.critic_prompt(Catalog.load(), task)["prompt"]
+    assert "Action-Level Credit Assignment:" in prompt
+    assert "Action Attribution" in prompt
+    assert "HELPS | HINDERS | NOISE" in prompt
+
+
+def test_parse_action_attribution():
+    text = """
+Differences:
+1. Some minor formatting
+
+Action Attribution:
+B1 [webhook.py]: HELPS - implemented payload parser cleanly
+B2 [auth.py]: HINDERS - bypassed signature validation when header is missing
+C1 [utils.py]: NOISE - added unneeded helper function
+
+VERDICT: minor
+"""
+    parsed = evidence.parse_action_attribution(text)
+    assert parsed is not None
+    assert parsed["helps"] == 1
+    assert parsed["hinders"] == 1
+    assert parsed["noise"] == 1
+    assert len(parsed["items"]) == 3
+    assert parsed["items"][0] == {
+        "item": "B1",
+        "target": "webhook.py",
+        "verdict": "helps",
+        "evidence": "implemented payload parser cleanly"
+    }
+    assert parsed["items"][1] == {
+        "item": "B2",
+        "target": "auth.py",
+        "verdict": "hinders",
+        "evidence": "bypassed signature validation when header is missing"
+    }
+    assert parsed["items"][2] == {
+        "item": "C1",
+        "target": "utils.py",
+        "verdict": "noise",
+        "evidence": "added unneeded helper function"
+    }
+
+
+def test_review_elevates_severity_on_hinders(project, tmp_path):
+    task = project.init_task("Task with credit attribution", "full")
+    dummy = tmp_path / "result.txt"
+    dummy.write_text("code", encoding="utf-8")
+    evidence.add(task, dummy, "result")
+
+    review_text = """
+1. Minor style issue: [minor]
+
+Action Attribution:
+B1 [core.py]: HINDERS - breaks state consistency on error
+"""
+    rev = evidence.review(task, diff=review_text, worst="minor", by="critic")
+    assert rev["actions"]["hinders"] == 1
+    assert rev["worst"] == "major"
+    assert rev["fixable"] is True
+    assert "hinders_warning" in rev
+
