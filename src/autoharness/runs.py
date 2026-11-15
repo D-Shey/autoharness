@@ -12,6 +12,7 @@ does not pass for a check of the code at teardown. What the agent only reports (
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import re
 import subprocess
@@ -48,6 +49,119 @@ def is_trivial(command: str) -> bool:
     if "|" in command.replace("||", ""):
         return False   # piped into something: that something may check
     return all(_TRIVIAL_PART.fullmatch(part) for part in _SEPARATORS.split(command))
+
+
+def _is_shallow_expression(node: ast.expr) -> bool:
+    """Classify if an expression inside `assert <expr>` is superficial (checks only existence/truthiness rather than properties)."""
+    if isinstance(node, ast.Constant):
+        return True  # assert True, assert 1
+    if isinstance(node, ast.Name):
+        return True  # assert x (just truthy)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return True  # assert not x
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in ("exists", "is_file", "isfile", "isdir"):
+            return True
+    if isinstance(node, ast.Compare):
+        # assert x is not None
+        if len(node.ops) == 1 and isinstance(node.ops[0], ast.IsNot):
+            if isinstance(node.comparators[0], ast.Constant) and node.comparators[0].value is None:
+                return True
+        # assert len(x) > 0 or >= 1
+        if isinstance(node.left, ast.Call) and isinstance(node.left.func, ast.Name) and node.left.func.id == "len":
+            if len(node.comparators) == 1 and isinstance(node.comparators[0], ast.Constant):
+                val = node.comparators[0].value
+                if val in (0, 1) and isinstance(node.ops[0], (ast.Gt, ast.GtE, ast.NotEq)):
+                    return True
+        # assert "key" in container or assert "foo" not in text (pure token/key presence check without property/value assertions)
+        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn)):
+            if isinstance(node.left, ast.Constant):
+                return True
+            if isinstance(node.left, ast.Name) and any(k in node.left.id.lower() for k in ("id", "key", "tag", "token", "name", "field")):
+                return True
+        # assert x != "" or assert x != [] (mere non-emptiness check)
+        if len(node.ops) == 1 and isinstance(node.ops[0], ast.NotEq):
+            if isinstance(node.comparators[0], (ast.Constant, ast.List, ast.Dict, ast.Set)):
+                comp = node.comparators[0]
+                if (isinstance(comp, ast.Constant) and comp.value in ("", b"")) or \
+                   (isinstance(comp, (ast.List, ast.Dict, ast.Set)) and len(getattr(comp, 'elts', getattr(comp, 'keys', []))) == 0):
+                    return True
+    return False
+
+
+def _evaluate_ast_substance(tree: ast.AST, label: str) -> tuple[bool, str]:
+    """Inspect AST to determine if tests contain real structural assertions."""
+    assert_nodes = []
+    test_call_nodes = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            assert_nodes.append(node)
+        elif isinstance(node, ast.Call):
+            func_name = ""
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_name = node.func.attr
+            if func_name.startswith("assert") or func_name in ("raises", "fail"):
+                test_call_nodes.append(node)
+
+    total_checks = len(assert_nodes) + len(test_call_nodes)
+    if total_checks == 0:
+        return True, f"{label} contains no assertions or check statements"
+
+    shallow_count = sum(1 for n in assert_nodes if _is_shallow_expression(n.test))
+    if shallow_count == len(assert_nodes) and len(test_call_nodes) == 0:
+        return True, f"{label} contains only shallow checks (file existence, token/key presence, or non-emptiness) without verifying structural invariants or properties"
+
+    return False, ""
+
+
+def detect_hollow_check(command: str, root: Path | None = None) -> tuple[bool, str]:
+    """Detect if a verification command/script performs only hollow, non-verifying checks."""
+    cmd = command.strip()
+    if is_trivial(cmd):
+        return True, "command is trivial (cannot fail)"
+
+    first_word = cmd.split()[0].lower() if cmd.split() else ""
+    first_base = Path(first_word).stem.lower()
+    if first_base in ("pytest", "cargo", "npm", "mvn", "gradle", "go", "ctest"):
+        return False, ""
+
+    py_match = re.search(r"\b(?:python3?|py)(?:\.exe)?[\"']?\s+", cmd, re.I)
+    if not py_match:
+        return False, ""
+
+    rest = cmd[py_match.end():].strip()
+    c_match = re.search(r"-c\s+(['\"])(.*?)\1", rest, re.DOTALL)
+    if c_match:
+        code_str = c_match.group(2)
+        try:
+            tree = ast.parse(code_str)
+            return _evaluate_ast_substance(tree, "inline code")
+        except SyntaxError:
+            return False, ""
+
+    tokens = [t.strip("\"'") for t in rest.split() if not t.startswith("-")]
+    if not tokens:
+        return False, ""
+    script_token = tokens[0]
+    if not script_token.endswith(".py"):
+        return False, ""
+
+    script_path = Path(script_token)
+    if not script_path.is_absolute() and root:
+        script_path = root / script_path
+
+    if not script_path.is_file():
+        return False, ""
+
+    try:
+        source = script_path.read_text("utf-8", errors="replace")
+        tree = ast.parse(source)
+        return _evaluate_ast_substance(tree, f"script `{script_token}`")
+    except (OSError, SyntaxError):
+        return False, ""
 
 
 NOT_A_CHECK = ("`{command}` exits 0 whatever the code does, so it checks nothing and does not count as a check: "
@@ -266,14 +380,17 @@ def _record(task: Task, items: list, n: int, command: str, name: str, purpose: s
                    "utf-8")
     # taken after the run: a check that writes tracked files (formatters, snapshots) is judged on what it left
     skimmed = skim_output(output, exit_code=code, budget_chars=2500, max_lines=40)
+    hollow, hollow_reason = detect_hollow_check(command, root=root)
     item = {"n": n, "name": name, "command": command, "for": purpose, "exit": code, "passed": code == 0,
             "seconds": seconds, "log": str(log), "fingerprint": fingerprint(root),
             "skim": skimmed,
             "time": time.strftime("%Y-%m-%dT%H:%M:%S")} | ({"timed_out": True} if timed_out else {}) \
-           | ({"trivial": True} if is_trivial(command) else {})
+           | ({"trivial": True} if is_trivial(command) else {}) \
+           | ({"hollow_check": True, "hollow_reason": hollow_reason} if hollow else {})
     task._update_info(runs=items + [item])
     task.log(f"run #{n} `{command}`" + (f" for {purpose}" if purpose else "")
-             + f": {'passed' if item['passed'] else 'failed'} (exit {code})")
+             + f": {'passed' if item['passed'] else 'failed'} (exit {code})"
+             + (f" [HOLLOW CHECK: {hollow_reason}]" if hollow else ""))
     return item | {"tail": skimmed}
 
 
@@ -364,10 +481,13 @@ def summary(task: Task) -> dict:
     for r in info.get("runs", []):
         fresh = is_fresh(r, root)
         empty = judged.get(str(r["n"])) == "does not check"
+        critic_approved = judged.get(str(r["n"])) == "checks"
+        hollow = bool(r.get("hollow_check")) and not critic_approved
         ran.append({"n": r["n"], "command": r["command"], "for": r.get("for", ""),
                     "passed": r["passed"], "code": {True: "current", False: "stale", None: "unknown"}[fresh]}
                    | ({"not_a_check": True} if r.get("trivial") or empty else {})
-                   | ({"critic": "does not check"} if empty else {})
+                   | ({"hollow_check": True, "hollow_reason": r.get("hollow_reason", "")} if hollow else {})
+                   | ({"critic": "does not check" if empty else "checks" if critic_approved else ""} if (empty or critic_approved) else {})
                    | ({"check_changed": changed[r["n"]]} if r["n"] in changed else {})
                    | ({"skim": r["skim"]} if r.get("skim") else {}))
     critics = [{"round": r["round"], "worst": r["worst"],
@@ -392,7 +512,7 @@ def summary(task: Task) -> dict:
     items = []
     for item in brief_items(info.get("brief", {})):
         runs = [r for r in ran if r["for"] in (item["id"], PRESERVE if item["id"].startswith("P") else None)]
-        good = [r for r in runs if r["passed"] and r["code"] != "stale" and not r.get("not_a_check")]
+        good = [r for r in runs if r["passed"] and r["code"] != "stale" and not r.get("not_a_check") and not r.get("hollow_check")]
         items.append({"id": item["id"], "text": item["text"],
                       "run": f"run #{good[-1]['n']} passed" if good else
                              f"run #{runs[-1]['n']} {_why_not(runs[-1])}" if runs else "",
@@ -405,4 +525,8 @@ def summary(task: Task) -> dict:
 
 
 def _why_not(r: dict) -> str:
-    return ("not a check, says the critic" if r.get("critic") else "not a check") if r.get("not_a_check") else "failed" if not r["passed"] else "stale"
+    if r.get("not_a_check"):
+        return "not a check, says the critic" if r.get("critic") == "does not check" else "not a check"
+    if r.get("hollow_check"):
+        return f"hollow check: {r.get('hollow_reason', 'superficial')}"
+    return "failed" if not r["passed"] else "stale"

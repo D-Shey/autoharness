@@ -114,6 +114,7 @@ autoharness brief --goal "<quality bar>" --inputs "<missing inputs, how you get 
   --components "<name>: <what it does / how to verify alone>; ..."   # decompose into 2-4 isolated subcomponents (or none)
   # --fidelity "<level to judge at>" (required for work judged by eye: "stylised poster, not photographic")
   # optional: --review critic|pair (pair: + a code-quality reviewer)
+  #           --techniques "<technique: principle; ...>" (domain-level professional craftsmanship techniques)
   #           --preserve "<existing behaviour that must keep working>"
 ```
 
@@ -217,16 +218,19 @@ close one a task settles with `autoharness followup done <id> --note "..."`.
    autoharness critic --run cursor|agy|claude|codex|kimi                 # or: autoharness starts a read-only critic itself
    ```
 
-   A check must be able to fail when its item is not met: one that only finds a name or a string in
-   a file checks nothing, the critic says so and it stops counting for the item.
+   A check must be able to fail when its item is not met. AutoHarness runs an AST Anti-Hollow Test
+   Sentinel: checks that only verify superficial conditions (such as `os.path.exists`, `root.tag == 'svg'`,
+   `len(...) > 0`, substring matching in file content, or lack of assertions) are marked as `hollow_check: true`.
+   Hollow checks do not count towards satisfying brief items, and block `review --by self --worst none`.
+   Artifacts are similarly inspected for structural complexity: an SVG with <20 elements, <4 paths, or
+   missing gradients/composition, or stub code, is flagged as hollow and blocks `teardown`.
    A check that is a command goes through `verify run`, never "I ran it and it passed": the run is
    tied to the code it saw and goes stale when the code changes, so run it again after your last
    edit. With `--preserve` in the brief, teardown needs a passing `--for preserve` run. A command
    that cannot fail (`true`, `echo ok`, `python -c "pass"`) is not a check and does not count.
    When a check fails, fix the code, not the check. If the check itself was wrong, teardown shows
-   that it changed after it failed, so tell the user why. A command
-   with quotes (PowerShell mangles them) goes in a JSON file: `{"command": "..."}`, then
-   `autoharness verify run --args-file <file> --for B1`. No subagents at hand (or the critic must
+   that it changed after it failed, so tell the user why. Command arguments and trailing flags (e.g. `--for B1`)
+   are safely handled on all platforms. No subagents at hand (or the critic must
    be another model)? `critic --run <agent>` starts the reviewer itself.
 
    After a critic finds blocking problems, do not fix from memory what your skills do not teach:

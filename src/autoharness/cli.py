@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import threading
@@ -575,6 +576,9 @@ def cmd_evidence(args, project, catalog):
                "missing, find a reference that shows it and add it as well. " + nxt)
     warnings = ([f"this file is byte for byte the same as evidence #{item['same_as']}: a result must be what "
                  "you produced, not the reference itself; the critic is told"] if item.get("same_as") else [])
+    if item.get("hollow"):
+        why_h = (item.get("hollow_details") or {}).get("reason", "artifact lacks minimal substance")
+        warnings.append(f"result #{item['n']} is hollow/primitive ({why_h}): substantive detail and structure are required")
     if small := evidence.small_reference(task):
         ref, whole = small
         nxt = (f"The best reference (#{ref['n']}, {ref['size'][0]}x{ref['size'][1]} px) is far smaller than the "
@@ -662,6 +666,17 @@ def cmd_review(args, project, catalog):
             raise HarnessError("record a review with --diff and --worst, or a critic's answer with "
                                "--by critic --answer-file <file>")
         diff, worst = args.diff, args.worst or ("major" if args.fixable == "yes" else "none")
+        if args.by == "self" and worst == "none":
+            last_res = evidence.latest(task, "result")
+            if last_res and last_res.get("hollow"):
+                why_h = (last_res.get("hollow_details") or {}).get("reason", "artifact is primitive/hollow")
+                raise HarnessError(f"cannot record self-review with --worst none: result #{last_res['n']} is hollow ({why_h}). Substantive work is required before declaring the result finished.")
+            hollow_runs = [r for r in task.info().get("runs", []) if r.get("hollow_check")]
+            if hollow_runs:
+                last_h = hollow_runs[-1]
+                raise HarnessError(f"cannot record self-review with --worst none: run #{last_h['n']} for {last_h.get('for', '?')} is a hollow check ({last_h.get('hollow_reason')}). Write substantive tests before claiming zero defects.")
+            if task.info().get("profile") == "reviewed" or task.info().get("mode") == "reviewed":
+                raise HarnessError("in reviewed mode you cannot self-certify with --worst none: an independent critic must evaluate the result (`autoharness critic`)")
         if args.by == "critic":
             warnings.append(RETOLD)
         elif evidence.code_changed(task) and not re.search(r"\bR[1-8]\b", diff):
@@ -1004,8 +1019,11 @@ def _unresearched_review(task) -> str | None:
     if not reviews or reviews[-1]["worst"] not in evidence.BLOCKING:
         return None
     last = reviews[-1]
-    if any(e["kind"] == "result" and e["n"] > (last.get("result") or 0) for e in info.get("evidence", [])):
+    max_reviewed_res = max(last.get("round_results", [last.get("result", 0) or 0]))
+    if any(e["kind"] == "result" and e["n"] > max_reviewed_res for e in info.get("evidence", [])):
         return None  # the round after this review already has its result
+    if not task.skills_lock():
+        return None  # task does not lock skills: research guard applies when skills are in use
     owed = []
     has_new_sources = bool(_skill_sources(task) - set(last.get("skill_sources", [])))
     skills_edited = any(
@@ -1013,7 +1031,7 @@ def _unresearched_review(task) -> str | None:
         hashlib.sha256((task.skills_dir / name / "SKILL.md").read_bytes()).hexdigest() != task.skills_lock().get(name, {}).get("sha256")
         for name in task.skills_lock()
     )
-    if task.skills_lock() and "skill_sources" in last and not (has_new_sources or skills_edited):
+    if "skill_sources" in last and not (has_new_sources or skills_edited):
         owed.append(
             "find out how each point is done well before fixing it. For every point your skills do not already teach "
             "(how to build that part, the technique, the known pitfalls), search for it (the web, docs, worked "
@@ -1023,13 +1041,17 @@ def _unresearched_review(task) -> str | None:
             "restated as rules are not research: a skill counts as changed when it cites a new source or adds concrete technique instructions "
             "since the review")
     refs = [e["n"] for e in info.get("evidence", []) if e["kind"] == "reference"]
-    if refs and not any(e["kind"] == "facts" and e["n"] > (last.get("result") or 0)
-                        for e in info.get("evidence", [])):
+    has_prior_facts = any(e["kind"] == "facts" for e in info.get("evidence", []))
+    has_subsequent_facts = any(e["kind"] == "facts" and e["n"] > max_reviewed_res for e in info.get("evidence", []))
+    if refs and has_prior_facts and not has_subsequent_facts:
         owed.append(
             "take the parts the critic names from the reference itself before you rebuild them: for each, measure "
             "it with a tool (crop it, lay a grid over it, read off the coordinates of its outline and key points, "
             "its proportions; for data or code, the exact values and output), save that to a file and `autoharness "
             "evidence add <file> --kind facts`, then build the part through those points, not by eye")
+    if not owed:
+        return None
+    return "the critic found blocking problems. Before the next result: " + "; and ".join(owed) + "."
     if not owed:
         return None
     return "the critic found blocking problems. Before the next result: " + "; and ".join(owed) + "."
@@ -1057,6 +1079,35 @@ def _plain(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip(" .,;:!?")
 
 
+CONTRACTIONS = {
+    "don't": "do not", "doesn't": "does not", "didn't": "did not",
+    "won't": "will not", "can't": "cannot", "couldn't": "could not",
+    "shouldn't": "should not", "isn't": "is not", "aren't": "are not",
+    "wasn't": "was not", "weren't": "were not",
+}
+
+
+def _normalize_constraint_tokens(s: str) -> list[str]:
+    s_low = s.lower()
+    for k, v in CONTRACTIONS.items():
+        s_low = s_low.replace(k, v)
+    words = re.findall(r"\b[a-z0-9_-]+\b", s_low)
+    stopwords = {"the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with", "at", "by", "from", "using", "use", "into", "this", "each"}
+    return [w for w in words if len(w) >= 3 and w not in stopwords]
+
+
+def _constraint_matches(piece: str, said: str) -> bool:
+    if _plain(piece) in said:
+        return True
+    p_tokens = _normalize_constraint_tokens(piece)
+    if not p_tokens:
+        return True
+    said_tokens = set(_normalize_constraint_tokens(said))
+    matched = sum(1 for t in p_tokens if t in said_tokens)
+    ratio = matched / len(p_tokens)
+    return ratio >= 0.75
+
+
 def _check_constraints(text: str, task) -> None:
     """The brief's constraints are the user's own words: each, between `;`, is quoted from the task or from what
     the user wrote since, or the whole is `none`. Candidates are vetted against them, so a constraint the agent
@@ -1066,7 +1117,7 @@ def _check_constraints(text: str, task) -> None:
     said = _plain(" \n ".join([str(task.info().get("task", "")), str(task.info().get("prompt", ""))]
                               + [m.get("text", "") for m in lessons.user_messages(task)]))
     for piece in (p for p in text.split(";") if _plain(p)):
-        if _plain(piece) not in said:
+        if not _constraint_matches(piece, said):
             raise HarnessError(
                 f"--constraints are the user's own words, quoted: `{piece.strip()}` is not in the task or in what "
                 "the user wrote. Quote each constraint as the user put it, separated by `;`, or `none` if they set "
@@ -1215,6 +1266,7 @@ def cmd_brief(args, project, catalog):
                       | ({"review": args.review} if args.review else {})
                       | ({"fidelity": args.fidelity} if args.fidelity else {})
                       | ({"components": args.components} if getattr(args, "components", None) else {})
+                      | ({"techniques": args.techniques.strip()} if getattr(args, "techniques", None) and args.techniques.strip() else {})
                       | ({runs.PRESERVE: args.preserve} if args.preserve else {}))
     task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
@@ -2240,6 +2292,64 @@ def cmd_compact(args, project, catalog) -> int:
     else:
         print(context_pruning.format_compaction_report(res))
     return 0 if res.get("status") == "ok" else 1
+
+
+def cmd_stencil(args, project, catalog) -> int:
+    from autoharness import evidence, stencil
+    action = getattr(args, "action", "extract") or "extract"
+    task = project.task() if project and project.active_id() else None
+
+    if action == "extract":
+        src_str = getattr(args, "source", "") or ""
+        if not src_str:
+            out({"status": "error", "error": "Source file required for extraction"})
+            return 1
+        src = Path(src_str)
+        if not src.is_absolute() and project:
+            src = project.root / src
+        out_str = getattr(args, "output", "") or ""
+        out_path = Path(out_str) if out_str else None
+        if out_path and not out_path.is_absolute() and project:
+            out_path = project.root / out_path
+        mode = getattr(args, "mode", "auto") or "auto"
+        res = stencil.extract_stencil(src, out_path, mode=mode)
+        out(res)
+        return 0 if res.get("status") == "ok" else 1
+
+    elif action == "check":
+        s_str = getattr(args, "source", "") or ""
+        t_str = getattr(args, "target", "") or ""
+        if not s_str or not t_str:
+            out({"status": "error", "error": "Both stencil source and target files are required for check"})
+            return 1
+        s_path = Path(s_str)
+        t_path = Path(t_str)
+        if not s_path.is_absolute() and project:
+            s_path = project.root / s_path
+        if not t_path.is_absolute() and project:
+            t_path = project.root / t_path
+        res = stencil.check_stencil(s_path, t_path)
+        out(res)
+        return 0 if res.get("conforms") else 1
+
+    elif action == "add":
+        if not task:
+            out({"status": "error", "error": "no active task"})
+            return 1
+        file_str = getattr(args, "source", "") or ""
+        if not file_str:
+            out({"status": "error", "error": "file required to add stencil evidence"})
+            return 1
+        p = Path(file_str)
+        if not p.is_absolute():
+            p = project.root / p
+        note = getattr(args, "note", "") or ""
+        item = evidence.add(task, p, "stencil", note=note)
+        out({"status": "ok", "evidence": item})
+        return 0
+
+    out({"status": "error", "error": f"Unknown action: {action}"})
+    return 1
 
 
 def cmd_slot(args, project, catalog) -> int:
@@ -3734,7 +3844,7 @@ def cmd_verify(args, project, catalog):
     if args.action == "run":
         if len(args.kind) > 1 or (args.kind and args.command):
             raise HarnessError(f"verify run got the command in pieces ({args.kind!r}): the shell split it at its "
-                               "quotes. Put it in a JSON file, {\"command\": \"<the command>\"}, and pass "
+                               "quotes. Put it in a JSON file, {{\"command\": \"<the command>\"}}, and pass "
                                "`autoharness verify run --args-file <file>`")
         command = args.command or (args.kind[0] if args.kind else "")
         task = project.task()
@@ -3763,14 +3873,22 @@ def cmd_verify(args, project, catalog):
         comp_hint = ""
         if item["passed"] and purpose and purpose.startswith("C"):
             comp_hint = f" Component {purpose} verified (exit 0): record with `autoharness evidence add <file> --kind component --for {purpose}`."
-        out({"status": "passed" if item["passed"] else "failed", "run": item,
-             "next": (f"The check {changed}: teardown shows this; tell the user why the check changed. "
-                      if changed and item["passed"] else "")
-                     + comp_hint
-                     + (" Recorded as checked on the current code. An edit to the code makes this run stale: run it "
-                        "again after your last change." if item["passed"] else
-                        f"The check failed (exit {item['exit']}); the whole output is in {item['log']}. Fix the "
-                        "cause and run it again.")})
+        warnings = []
+        if item.get("hollow_check"):
+            warnings.append(f"hollow check: {item.get('hollow_reason')}")
+        hollow_hint = (f" Warning: run #{item['n']} is a hollow check ({item.get('hollow_reason')}); rigorous assertions are required before self-review."
+                       if item.get("hollow_check") else "")
+        res_data = {"status": "passed" if item["passed"] else "failed", "run": item,
+                    "next": (f"The check {changed}: teardown shows this; tell the user why the check changed. "
+                             if changed and item["passed"] else "")
+                            + comp_hint + hollow_hint
+                            + (" Recorded as checked on the current code. An edit to the code makes this run stale: run it "
+                               "again after your last change." if item["passed"] else
+                               f"The check failed (exit {item['exit']}); the whole output is in {item['log']}. Fix the "
+                               "cause and run it again.")}
+        if warnings:
+            res_data["warnings"] = warnings
+        out(res_data)
         return 0 if item["passed"] else 1
     if args.command or len(args.kind) != 1 or args.kind[0] not in VERIFY_KINDS:
         raise HarnessError(f"verify {args.action} takes one kind: {', '.join(VERIFY_KINDS)}")
@@ -4047,6 +4165,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fidelity", help="the level to judge the result at, e.g. `stylised poster, not photographic`")
     s.add_argument("--components", default="",
                    help="decompose into 2-4 primary isolated components: `<name>: <what it does / how to verify alone>; ...` or `none: <why>`")
+    s.add_argument("--techniques", default="",
+                   help="formal implementation & quality techniques required for this domain (e.g. `[clean-arch, idempotency]` or `technique-name: <rule>; ...`)")
     s.add_argument("--review", choices=list(evidence.REVIEWS),
                    help="require an independent critic for this task even if its capabilities do not; pair: "
                         "each round also a code-quality reviewer, both run again after every fix")
@@ -4141,6 +4261,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--keep-last", type=int, default=5, help="number of recent steps to keep verbatim (default: 5)")
     s.add_argument("--epoch-size", type=int, default=10, help="step batch size for milestone epoch condensation (default: 10)")
     s.add_argument("--json", action="store_true", help="output structured JSON")
+    s = sub.add_parser("stencil", help="Structural scanner and stencil/scaffold blueprint manager (extract schemas, AST stubs, spatial wireframes)")
+    s.add_argument("action", nargs="?", choices=["extract", "check", "add"], default="extract", help="stencil action")
+    s.add_argument("source", nargs="?", default="", help="source reference file or stencil file")
+    s.add_argument("--output", "-o", default="", help="output destination file for extracted stencil")
+    s.add_argument("--mode", "-m", choices=["auto", "schema", "ast", "wireframe", "contour", "outline", "text"], default="auto", help="extraction mode")
+    s.add_argument("--target", "-t", default="", help="target file to check against stencil")
+    s.add_argument("--note", default="", help="note when registering stencil as task evidence")
     return p
 
 
@@ -4152,7 +4279,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel, "compact": cmd_compact}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel, "compact": cmd_compact, "stencil": cmd_stencil}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4166,7 +4293,35 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args, extra = parser.parse_known_args(argv)
     if extra and args.cmd == "verify" and args.action == "run":
-        args.kind += extra   # a command the shell split at its quotes: verify run explains instead of argparse
+        cleaned_extra = []
+        i = 0
+        while i < len(extra):
+            token = extra[i]
+            if token == "--for" and i + 1 < len(extra):
+                args.purpose = extra[i + 1]
+                i += 2
+            elif token.startswith("--for="):
+                args.purpose = token.split("=", 1)[1]
+                i += 1
+            elif token == "--name" and i + 1 < len(extra):
+                args.name = extra[i + 1]
+                i += 2
+            elif token.startswith("--name="):
+                args.name = token.split("=", 1)[1]
+                i += 1
+            elif token == "--timeout" and i + 1 < len(extra):
+                args.timeout = float(extra[i + 1])
+                i += 2
+            elif token.startswith("--timeout="):
+                args.timeout = float(token.split("=", 1)[1])
+                i += 1
+            elif token == "--no-redact":
+                args.no_redact = True
+                i += 1
+            else:
+                cleaned_extra.append(token)
+                i += 1
+        args.kind += cleaned_extra
     elif extra and args.cmd == "eval" and args.action == "batch":
         args.command += extra   # Python 3.11 argparse leaves what follows `--` unparsed here
     elif extra:

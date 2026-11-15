@@ -17,13 +17,16 @@ critic` for any task. `media: image` limits the counted evidence to image files.
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import json
 import re
 import secrets
 import shutil
 import struct
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from autoharness import reviewers, rulings, text
@@ -31,7 +34,8 @@ from autoharness.env import HarnessError, Task
 
 # facts: what the result must match, taken from a reference with a tool (measured, cropped, extracted, quoted),
 # written down before the first result so the work is built from them, not from memory
-KINDS = ("reference", "facts", "component", "result")
+# stencil: structural wireframe, schema, AST skeleton, or spatial blueprint extracted from a reference
+KINDS = ("reference", "facts", "stencil", "component", "result")
 # worst difference still fixable in a review; the task may stop once it is at most "minor"
 SEVERITIES = ("none", "minor", "major", "blocker")
 BLOCKING = ("major", "blocker")
@@ -147,6 +151,97 @@ def media_of(path: str) -> str | None:
     return next((m for m, suffixes in MEDIA.items() if suffix in suffixes), None)
 
 
+def inspect_artifact_complexity(path: Path) -> dict:
+    """Analyze an artifact for basic integrity and substance across any domain.
+
+    Catches empty (0-byte), whitespace-only, or syntactically broken stubs
+    without enforcing task-specific or domain-specific thresholds.
+    """
+    if not path.is_file():
+        return {"is_hollow": False}
+
+    size = path.stat().st_size
+    if size == 0:
+        return {"is_hollow": True, "reason": "artifact file is empty (0 bytes)", "size_bytes": 0}
+
+    suffix = path.suffix.lower()
+
+    # Check text-based artifacts for whitespace-only stubs or malformed syntax
+    try:
+        content = path.read_text("utf-8", errors="replace").strip()
+    except Exception:
+        return {"is_hollow": False}
+
+    if not content:
+        return {"is_hollow": True, "reason": "artifact file contains only whitespace", "size_bytes": size}
+
+    # Generic XML/SVG structural well-formedness check
+    if suffix in (".svg", ".xml", ".html", ".xhtml"):
+        try:
+            root = ET.fromstring(content)
+            # Check if root element is totally vacant (e.g. <svg></svg> or <root/> with no children and no text)
+            has_content = len(list(root.iter())) > 1 or bool((root.text or "").strip())
+            if not has_content:
+                return {
+                    "is_hollow": True,
+                    "type": "xml",
+                    "reason": f"{suffix.upper()} file has an empty root element with no content or children",
+                    "size_bytes": size,
+                }
+        except Exception as err:
+            return {
+                "is_hollow": True,
+                "type": "xml",
+                "reason": f"{suffix.upper()} file is malformed or unparseable: {err}",
+                "size_bytes": size,
+            }
+
+    # Generic JSON integrity check
+    elif suffix == ".json":
+        try:
+            parsed = json.loads(content)
+            if parsed in ({}, []):
+                return {
+                    "is_hollow": True,
+                    "type": "json",
+                    "reason": "JSON artifact is an empty container ({}/[])",
+                    "size_bytes": size,
+                }
+        except Exception as err:
+            return {
+                "is_hollow": True,
+                "type": "json",
+                "reason": f"JSON artifact is malformed: {err}",
+                "size_bytes": size,
+            }
+
+    # Generic Code file integrity check
+    elif suffix in CODE_SUFFIXES:
+        lines = [l.strip() for l in content.splitlines()
+                 if l.strip() and not l.strip().startswith(("#", "//", "/*", "*"))]
+        if not lines:
+            return {
+                "is_hollow": True,
+                "type": "code",
+                "reason": "code artifact contains only comments or blank lines with no executable statements",
+                "size_bytes": size,
+            }
+        if suffix == ".py":
+            try:
+                ast.parse(content)
+            except SyntaxError as err:
+                return {
+                    "is_hollow": True,
+                    "type": "code",
+                    "reason": f"Python code artifact has syntax error: {err}",
+                    "size_bytes": size,
+                }
+
+    return {"is_hollow": False, "size_bytes": size}
+
+    return {"is_hollow": False}
+
+
 def image_size(path: Path) -> tuple[int, int] | None:
     """Width and height from a PNG, GIF, BMP or JPEG header; None for anything else."""
     try:
@@ -251,6 +346,11 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
     size = image_size(dest) if media == "image" else None
     if size:
         item["size"] = list(size)
+    if kind in ("result", "component") and not closeup and not item.get("proof"):
+        complexity = inspect_artifact_complexity(dest)
+        if complexity.get("is_hollow"):
+            item["hollow"] = True
+            item["hollow_details"] = complexity
     # a round is one whole result and its close-ups or parts; with images the author may not say which is which
     if kind in ("result", "component") and (closeup or (not item.get("proof") and _is_closeup(size, whole))):
         item["closeup"] = whole["n"]
@@ -575,9 +675,12 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
     if not result:
         raise HarnessError("no result yet: `autoharness evidence add <file> --kind result` first")
     reviews = task.info().get("reviews", [])
-    judged = round_results(task)[0] if by == "critic" else result
+    round_res = round_results(task) if by == "critic" else [result]
+    judged = round_res[0] if by == "critic" else result
+    round_res_ns = [e["n"] for e in round_res]
     item = {"round": len(reviews) + 1, "by": by, "result": judged["n"], "diff": diff, "worst": worst,
-            "fixable": worst in BLOCKING, "top": top_issue(diff), "time": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            "fixable": worst in BLOCKING, "top": top_issue(diff), "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "round_results": round_res_ns}
     item |= extra or {}
     actions = parse_action_attribution(diff)
     if actions:
@@ -588,7 +691,7 @@ def review(task: Task, diff: str, worst: str, by: str, settled: list[str] | None
             item["worst_given"] = worst
             item["hinders_warning"] = f"{actions['hinders']} change(s) tagged HINDERS: cannot be minor or none"
     if by == "critic":
-        item["whole"] = round_results(task)[0]["n"]
+        item["whole"] = round_res[0]["n"]
         cmp = item.get("compared")
         # the best result so far: the one a blind comparison found closer, else the one just judged
         task._update_info(best_result=cmp["earlier"] if cmp and cmp["closer"] == "earlier" else item["whole"])
@@ -683,8 +786,8 @@ def listing(items: list[dict]) -> str:
 # the fidelity": one question about the whole, apart from the list, catches work no one would hand over
 ACCEPT_ASK = """
 Last, judge the work as a whole, apart from your list: would a skilled practitioner working at the
-target fidelity hand it to the user as finished? The bar is not the reference's level of detail but
-competent, finished work at that fidelity; crude or broken work is "no" however short your list is.
+target fidelity hand it to the user as a finished commercial deliverable? The bar is not the reference's level of detail but
+competent, production-grade work at that fidelity; amateur shortcuts, crude mockups, or unrequested gimmicks mean "no" however short your list is.
 Give one line: `ACCEPT: yes` or `ACCEPT: no - <what keeps it from being finished>`.
 """
 
@@ -972,7 +1075,7 @@ def round_results(task: Task) -> list[dict]:
     """Results added since the last critic review: the whole result plus any close-ups of this round."""
     info = task.info()
     critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
-    after = critics[-1]["result"] if critics else 0
+    after = max(critics[-1].get("round_results", [critics[-1]["result"]])) if critics else 0
     results = [e for e in info.get("evidence", []) if e["kind"] == "result"]
     fresh = [e for e in results if e["n"] > after]
     return _one_view(results, fresh) if fresh else [latest(task, "result")]
@@ -1071,11 +1174,19 @@ def critic_prompt(catalog, task: Task, dispute: str = "") -> dict:
     ref_lines = listing(refs) or "- none: judge against the task and the quality bar only"
     method_text = "" if not brief.get("method") else (
         "Method the author found for this kind of work (how it is done well): " + brief["method"] + "\n"
-        "Where the result does not follow it and that shows in the result, that is a difference.")
+        "Where the result does not follow it and that shows in the result, that is a difference.\n")
+    techniques_text = "" if not brief.get("techniques") else (
+        "Declared professional implementation techniques: " + brief["techniques"] + "\n"
+        "The deliverable must strictly adhere to these professional techniques. Deviations, amateur shortcuts, or superficial mockups are major differences.\n")
     facts = [e for e in info.get("evidence", []) if e["kind"] == "facts"]
     facts_text = "" if not facts else (
         "Facts the author took from the reference (check a few of them against the reference yourself: a wrong "
         "fact is a difference of its own). Check the result against each fact:\n" + listing(facts) + "\n")
+    stencils = [e for e in info.get("evidence", []) if e["kind"] == "stencil"]
+    stencils_text = "" if not stencils else (
+        "Structural stencil / skeleton extracted from reference (the architectural blueprint, schema, AST stub, "
+        "or contour framework the result must structurally conform to). Check the result against each stencil:\n"
+        + listing(stencils) + "\n")
     components = [e for e in info.get("evidence", []) if e["kind"] == "component"]
     components_text = "" if not components else (
         "Components built and verified in isolation before assembly:\n" + listing(components) + "\n")
@@ -1107,6 +1218,12 @@ versions equally good as a whole. Then one sentence why.
 """
     beyond = ("for example photographic detail in a stylised drawing" if visual else
               "for example polish or cases the quality bar does not ask for")
+    visual_rule = """
+MANDATORY VISUAL INSPECTION:
+You MUST open and visually inspect the reference image and result image files directly with your file reading tool.
+Do NOT evaluate visual images by writing Python scripts, computing pixel averages (NumPy), sampling RGB channels, or parsing SVG/XML code. A visual result is judged by what human eyes perceive when looking at the image: composition, silhouette, anatomical likeness, lighting harmony, and depth.
+Do NOT treat this as a mechanical checklist of past diffs: if the work as a whole looks crude, amateurish, distorted, cartoonish, or unconvincing compared to the authentic reference, you MUST answer `ACCEPT: no - <what is crude/broken>` and `VERDICT: major`. Stylization is an artistic treatment, NEVER an excuse for broken anatomy, crude shapes, or deformed proportions.
+""" if visual else ""
     # a lower fidelity owes less, not worse work: without this a critic files a broken part under "beyond the bar"
     broken = (("broken structure or proportions, parts that do not read as what they are, misaligned or inverted elements"
                if first_round else
@@ -1116,11 +1233,15 @@ versions equally good as a whole. Then one sentence why.
               "passes without checking anything, output that is wrong or unreadable where it is used")
     block_in_note = ("For an early block-in, lack of polish or missing fine detail is not major this round; "
                      "only a broken foundation is major. " if first_round else "")
-    craft = f"""
+    craft = f"""{visual_rule}
 The target fidelity lowers how much is owed, not how well it is made. At any fidelity, what a skilled
 maker working at that level would not let through is major: {broken}. A simpler level or a smaller scope
 is never a reason to rate those minor. {block_in_note}Judge the result as a piece of work, part by part, not only
 against the reference and the brief.
+
+Commercial production standard & zero-tolerance for amateur shortcuts (calligraphy principle):
+Evaluate the work as a commercial deliverable. If the solution is an amateur toy, superficial proof-of-concept, or crude placeholder rather than a production-grade deliverable adhering to professional techniques, you MUST rate it as major.
+Never accept duct-taping or patching over broken foundational architecture or distorted fundamentals: if a core component is structurally defective, it must be rebuilt cleanly rather than masked with superficial workarounds.
 """
     whole = " (the whole result, then any close-ups of it)" if visual else ""
     see = ("Describe what you see, not what you expect; if a close-up contradicts the whole view, trust the close-up."
@@ -1245,15 +1366,14 @@ Task given to the author:
 {info.get("task", "")}
 
 Quality bar: {brief.get("goal", "(not recorded)")}
-{method_text}
-The user's constraints: {brief.get("constraints", "(not recorded)")}
+{method_text}{techniques_text}The user's constraints: {brief.get("constraints", "(not recorded)")}
 
 Target fidelity: {fidelity}. Judge at that level: detail beyond it ({beyond}) is at most minor.
 {craft}
 Open and study these files yourself:
 Reference:
 {ref_lines}
-{facts_text}First check the reference itself: is it the original the task names (as published, or as it really is),
+{facts_text}{stencils_text}First check the reference itself: is it the original the task names (as published, or as it really is),
 or someone's version of it (fan art, a remake, a mockup, an example), or a different subject? A page that only
 shows it among other things (search results, a gallery, a collage, thumbnails, a snippet) is not the original
 either: the thing itself is open, whole and at its own size. If it is not
@@ -1309,6 +1429,10 @@ def problems(catalog, task: Task) -> list[str]:
                    + (f"; a result that is not a {media} file needs a {media} of it: a capability to find, "
                       "`autoharness need <capability>`" if media else "")
                    + ")")
+    last_res = latest(task, "result")
+    if last_res and last_res.get("hollow"):
+        why_hollow = (last_res.get("hollow_details") or {}).get("reason", "artifact is primitive/hollow")
+        out.append(f"the latest result (#{last_res['n']}) is hollow/primitive ({why_hollow}): produce a substantive result before teardown")
     if need.get("critic", 0):
         critics = [r for r in info.get("reviews", []) if r["by"] == "critic"]
         last = latest(task, "result")
@@ -1316,7 +1440,7 @@ def problems(catalog, task: Task) -> list[str]:
             out.append("no independent review: run `autoharness critic`, give its prompt to a fresh subagent that "
                        "did not make the work, and record the answer with `autoharness review --by critic ...`; "
                        f"without subagents, `autoharness critic --run {reviewers.available_run_hint()}` starts one and records it")
-        elif last and critics[-1]["result"] != last["n"]:
+        elif last and last["n"] not in critics[-1].get("round_results", [critics[-1]["result"]]):
             out.append(f"the latest result (#{last['n']}) was not reviewed by the critic: run `autoharness critic` "
                        "(or `critic --run <agent>`) again")
         elif pair_review(task) and not any(r.get("quality") for r in critics if r["result"] == critics[-1]["result"]):
