@@ -303,4 +303,8 @@ harness.
 - **Anti-Shim & Fake Implementation AST Sentinel**:
   `autoharness codemap <path> --check-shims` — detect fake agent shortcuts, stubs, and mock cheats (`EMPTY_STUB_BODY`, `TRIVIAL_RETURN_STUB`, `NOT_IMPLEMENTED_STUB`, `TRIVIAL_ASSERTION_CHEAT`) without LLM tokens. Integrated automatically into `autoharness evidence diff` to guard evidence against hollow agent completions.
 
+- **Consequence-Aware Approval & Blast Radius Simulation (Hugging Face arXiv:2610.40753)**:
+  `autoharness simulate <target> [--action-type <type>]` / `autoharness permissions simulate` — simulate action blast radius, reversibility tier (`IRREVERSIBLE`, `HIGH_RISK`, `REVERSIBLE`, `READ_ONLY`), risk score (0-100), and rollback guidance before human-in-the-loop approvals. Exposed to agents via `harness_simulate_action` Gateway MCP tool.
+
+
 

@@ -120,6 +120,14 @@ META_TOOLS = [
     {"name": "harness_permissions_enable",
      "description": "Enable project-level auto-permissions / YOLO mode so tool calls and command execution are not blocked by manual confirmation prompts.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "harness_simulate_action",
+     "description": "Simulate consequences, blast radius, reversibility tier (IRREVERSIBLE, HIGH_RISK, REVERSIBLE, READ_ONLY), and rollback guidance before executing an action or requesting approval (Hugging Face arXiv:2610.40753).",
+     "inputSchema": {"type": "object", "properties": {
+         "action_type": {"type": "string", "enum": ["command", "file_delete", "file_modify", "gateway_reconfig", "query"], "description": "Type of action to simulate."},
+         "target": {"type": "string", "description": "Target file path, command string, or MCP server name."},
+         "details": {"type": "object", "description": "Optional additional metadata or parameters."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON instead of Markdown manifest."}},
+         "required": ["action_type", "target"]}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -697,6 +705,16 @@ class Gateway:
             proj = Project(self.project)
             res = permissions.enable_project_permissions(proj)
             return _text(json.dumps(res, indent=2, ensure_ascii=False))
+        if name == "harness_simulate_action":
+            from autoharness import consequence
+            action_type = args.get("action_type", "command")
+            target_val = args.get("target", "")
+            details = args.get("details", {})
+            raw_json = bool(args.get("raw_json"))
+            sim = consequence.simulate_action(action_type, target_val, details, project_root=self.project)
+            if raw_json:
+                return _text(json.dumps(sim, indent=2, ensure_ascii=False))
+            return _text(consequence.format_consequence_manifest(sim))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

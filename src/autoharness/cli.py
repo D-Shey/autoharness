@@ -2007,8 +2007,32 @@ def cmd_permissions(args, project, catalog) -> int:
         res = permissions.disable_project_permissions(project)
         out(res)
         return 0
+    if action == "simulate":
+        from autoharness import consequence
+        action_type = getattr(args, "action_type", "command") or "command"
+        target = getattr(args, "target", "") or "unknown"
+        sim = consequence.simulate_action(action_type, target, project_root=project.root if project else None)
+        if getattr(args, "json", False):
+            out(sim)
+        else:
+            print(consequence.format_consequence_manifest(sim))
+        return 0
     res = permissions.check_agent_permissions(project)
     out(res)
+    return 0
+
+
+def cmd_simulate(args, project, catalog) -> int:
+    from autoharness import consequence
+    action_type = getattr(args, "action_type", "command") or "command"
+    target = getattr(args, "target", "") or ""
+    proj_root = project.root if project else None
+    sim = consequence.simulate_action(action_type, target, project_root=proj_root)
+    if getattr(args, "json", False):
+        out(sim)
+    else:
+        manifest = consequence.format_consequence_manifest(sim)
+        print(manifest)
     return 0
 
 
@@ -3868,9 +3892,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="force reinstall even if already on latest version")
     s.add_argument("--yes", "-y", action="store_true", help="skip confirmation prompt")
     s = sub.add_parser("permissions", help="Inspect and configure agent YOLO / auto-approval permissions")
-    s.add_argument("action", nargs="?", choices=["status", "enable", "disable"], default="status", help="action to perform")
+    s.add_argument("action", nargs="?", choices=["status", "enable", "disable", "simulate"], default="status", help="action to perform")
+    s.add_argument("--action-type", default="command", choices=["command", "file_delete", "file_modify", "gateway_reconfig", "query"], help="action type for simulation")
+    s.add_argument("--target", help="target file path, command string, or MCP server name for simulation")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     s = sub.add_parser("yolo", help="Alias for permissions: inspect or enable/disable agent YOLO mode")
     s.add_argument("action", nargs="?", choices=["status", "enable", "disable"], default="status", help="action to perform")
+    s = sub.add_parser("simulate", help="Consequence-Aware Approval & Blast Radius Simulation (Hugging Face arXiv:2610.40753)")
+    s.add_argument("target", help="target file path, command string, or server name to simulate")
+    s.add_argument("--action-type", default="command", choices=["command", "file_delete", "file_modify", "gateway_reconfig", "query"], help="action type")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     s = sub.add_parser("slot", help="8-Slot Modular Harness Scaffolding (Google Research Harness² model)")
     s.add_argument("action", nargs="?", choices=["inspect", "export", "diff"], default="inspect", help="slot action")
     s.add_argument("--json", action="store_true", help="output structured JSON")
@@ -3891,7 +3922,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate}
 
 
 def main(argv: list[str] | None = None) -> int:

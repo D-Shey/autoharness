@@ -1461,7 +1461,8 @@ def test_gateway_serve_end_to_end(project):
             "harness_tools", "harness_call", "harness_search", "harness_execute",
             "harness_history_search", "harness_memory_search", "harness_codemap",
             "harness_swarm_status", "harness_slots", "harness_swarm_run", "harness_drive_status", "harness_drive_run",
-            "harness_update_check", "harness_permissions_status", "harness_permissions_enable"
+            "harness_update_check", "harness_permissions_status", "harness_permissions_enable",
+            "harness_simulate_action"
         ]
 
         approved_servers(project, {"fake": FAKE_CFG})
