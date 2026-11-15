@@ -3424,7 +3424,8 @@ def cmd_verify(args, project, catalog):
         if purpose and items and purpose not in items + [runs.PRESERVE]:
             raise HarnessError(f"--for {purpose!r} is not a brief item: use one of {', '.join(items)} "
                                f"or {runs.PRESERVE}")
-        item = runs.run(task, command, args.name or "", purpose, args.timeout)
+        item = runs.run(task, command, args.name or "", purpose, args.timeout,
+                        redact=not getattr(args, "no_redact", False))
         with write_lock(project):
             audit.append(task, "run", **{k: item[k] for k in ("n", "command", "for", "exit", "passed")})
         if item.get("trivial"):
@@ -3575,6 +3576,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--for", dest="purpose", metavar="ITEM",
                    help=f"for run: the brief item it checks (B1, P1, ...) or `{runs.PRESERVE}` for the regression check")
     s.add_argument("--timeout", type=float, default=runs.DEFAULT_TIMEOUT, help="for run: seconds allowed")
+    s.add_argument("--no-redact", action="store_true", help="do not redact sensitive tokens and credentials from run logs")
     s = sub.add_parser("need", help="record a capability gap and get curated candidates")
     s.add_argument("capability")
     s.add_argument("--reason")

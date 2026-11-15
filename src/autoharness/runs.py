@@ -228,7 +228,8 @@ def skim_output(output: str, exit_code: int | None = 0, budget_chars: int = 2500
     return res
 
 
-def run(task: Task, command: str, name: str = "", purpose: str = "", timeout: float = DEFAULT_TIMEOUT) -> dict:
+def run(task: Task, command: str, name: str = "", purpose: str = "", timeout: float = DEFAULT_TIMEOUT,
+        redact: bool = True) -> dict:
     """Run `command` in the project root through the shell and record it. Passed means exit code 0."""
     if not command.strip():
         raise HarnessError("give the command to run, e.g. `autoharness verify run \"pytest -q\"`")
@@ -244,10 +245,15 @@ def run(task: Task, command: str, name: str = "", purpose: str = "", timeout: fl
         code, raw, timed_out = None, (e.stdout or b"") + (e.stderr or b""), True
     seconds = round(time.monotonic() - started, 2)
     output = raw.decode("utf-8", "replace")
+    safe_command = command
+    if redact:
+        from autoharness import secrets
+        output = secrets.redact_secrets(output)
+        safe_command = secrets.redact_secrets(command)
     with transactions.locked(root):
         items = task.info().get("runs", [])
         n = len(items) + 1
-        return _record(task, items, n, command, name, purpose, code, timed_out, seconds, output)
+        return _record(task, items, n, safe_command, name, purpose, code, timed_out, seconds, output)
 
 
 def _record(task: Task, items: list, n: int, command: str, name: str, purpose: str, code: int | None,
