@@ -1222,7 +1222,7 @@ versions equally good as a whole. Then one sentence why.
 MANDATORY VISUAL INSPECTION:
 You MUST open and visually inspect the reference image and result image files directly with your file reading tool.
 Do NOT evaluate visual images by writing Python scripts, computing pixel averages (NumPy), sampling RGB channels, or parsing SVG/XML code. A visual result is judged by what human eyes perceive when looking at the image: composition, silhouette, anatomical likeness, lighting harmony, and depth.
-Do NOT treat this as a mechanical checklist of past diffs: if the work as a whole looks crude, amateurish, distorted, cartoonish, or unconvincing compared to the authentic reference, you MUST answer `ACCEPT: no - <what is crude/broken>` and `VERDICT: major`. Stylization is an artistic treatment, NEVER an excuse for broken anatomy, crude shapes, or deformed proportions.
+Do NOT treat this as a mechanical checklist of past diffs: if the work as a whole looks crude, amateurish, distorted, cartoonish, or unconvincing compared to the authentic reference, you MUST answer `ACCEPT: no - <what is crude/broken>` and `VERDICT: major`. Stylization is an artistic treatment, NEVER an excuse for broken structure, crude shapes, or deformed proportions.
 """ if visual else ""
     # a lower fidelity owes less, not worse work: without this a critic files a broken part under "beyond the bar"
     broken = (("broken structure or proportions, parts that do not read as what they are, misaligned or inverted elements"
