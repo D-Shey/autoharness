@@ -137,6 +137,24 @@ META_TOOLS = [
          "save_raw": {"type": "boolean", "description": "Persist full uncompressed log to disk (.autoharness/logs/) for cascading retrieval (default: true)."},
          "raw_json": {"type": "boolean", "description": "Return structured JSON with statistics instead of formatted Markdown outline."}},
          "required": ["text"]}},
+    {"name": "harness_sentinel_verify",
+     "description": "Pre-flight and post-flight regression verification with automated rollback guard and AST Anti-Shim detection (Harness² model).",
+     "inputSchema": {"type": "object", "properties": {
+         "test_command": {"type": "string", "description": "Test command to execute (default: 'pytest')."},
+         "auto_rollback": {"type": "boolean", "description": "Automatically revert working directory to baseline snapshot if tests or anti-shims fail (default: false)."},
+         "check_shims": {"type": "boolean", "description": "Check for fake implementations, empty stubs, and mock cheats (default: true)."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON instead of formatted Markdown report."}},
+         "required": []}},
+    {"name": "harness_sentinel_snapshot",
+     "description": "Capture repository baseline snapshot before executing risky changes for subsequent atomic rollback.",
+     "inputSchema": {"type": "object", "properties": {
+         "label": {"type": "string", "description": "Label for the snapshot checkpoint (e.g. 'pre-refactor')."}},
+         "required": []}},
+    {"name": "harness_sentinel_rollback",
+     "description": "Rollback repository to the active or specified baseline snapshot, restoring tracked changes and cleaning untracked files.",
+     "inputSchema": {"type": "object", "properties": {
+         "snapshot_id": {"type": "string", "description": "Optional snapshot ID to roll back to (defaults to latest active snapshot)."}},
+         "required": []}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -742,6 +760,37 @@ class Gateway:
             if raw_json:
                 return _text(json.dumps(res, indent=2, ensure_ascii=False))
             return _text(compression.format_compressed_report(res))
+        if name == "harness_sentinel_verify":
+            from autoharness import sentinel
+            if not self.project:
+                return _text("No project root configured for sentinel verification.", error=True)
+            test_cmd = args.get("test_command", "pytest")
+            auto_rollback = bool(args.get("auto_rollback", False))
+            check_shims = bool(args.get("check_shims", True))
+            raw_json = bool(args.get("raw_json", False))
+            res = sentinel.run_sentinel_verification(
+                self.project,
+                test_command=test_cmd,
+                auto_rollback=auto_rollback,
+                check_shims=check_shims
+            )
+            if raw_json:
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            return _text(sentinel.format_sentinel_report(res))
+        if name == "harness_sentinel_snapshot":
+            from autoharness import sentinel
+            if not self.project:
+                return _text("No project root configured for sentinel snapshot.", error=True)
+            label = args.get("label", "checkpoint")
+            snap = sentinel.capture_snapshot(self.project, label=label)
+            return _text(json.dumps(snap, indent=2, ensure_ascii=False))
+        if name == "harness_sentinel_rollback":
+            from autoharness import sentinel
+            if not self.project:
+                return _text("No project root configured for sentinel rollback.", error=True)
+            snap_id = args.get("snapshot_id")
+            res = sentinel.rollback_to_snapshot(self.project, snapshot_id=snap_id)
+            return _text(json.dumps(res, indent=2, ensure_ascii=False))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

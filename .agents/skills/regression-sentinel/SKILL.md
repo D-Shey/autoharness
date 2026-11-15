@@ -3,7 +3,7 @@ name: regression-sentinel
 description: Pre-flight and post-flight test suite baseline verification with automatic rollback on test failures
 ---
 
-# regression-sentinel
+# Regression Sentinel
 
 ## When to use
 Use during autonomous or batch task execution loops to protect codebase integrity by catching test regressions immediately and reverting destructive modifications.
@@ -11,15 +11,16 @@ Use during autonomous or batch task execution loops to protect codebase integrit
 ## Steps
 1. Capture pre-flight baseline:
    - Check clean git working tree state or save SHA/stash.
-   - Run baseline test suite command (or fast smoke test).
+   - Run baseline test suite command via `autoharness sentinel run --pre-flight` (or fast smoke test).
 2. During task execution:
    - Allow modifications within task workspace boundary.
+   - Use `autoharness sentinel snapshot` to checkpoint clean states.
 3. Post-flight verification:
-   - Run full regression test suite.
-   - Compare exit code and failure logs.
+   - Run full regression test suite via `autoharness sentinel run`.
+   - Verify AST anti-shim checks and test pass rate.
 4. If regression is detected:
-   - Perform atomic rollback (`git restore` or tree restoration).
-   - Log the failure reason into `.autoharness/drive_state.json`.
+   - Perform atomic rollback via `autoharness sentinel rollback` (`git restore` and clean untracked files).
+   - Log the failure reason into `.autoharness/sentinel.json` and `.autoharness/drive_state.json`.
    - Prevent downstream corrupted state from propagating.
 5. If verification succeeds:
    - Approve state for commit and milestone completion.
@@ -30,3 +31,4 @@ Use during autonomous or batch task execution loops to protect codebase integrit
 
 ## Facts found here
 - Automated safety rollbacks eliminate the need for manual intervention during autonomous overnight runs.
+- Running AST Anti-Shim detection alongside test execution prevents fake "passing" suites caused by empty mocks.

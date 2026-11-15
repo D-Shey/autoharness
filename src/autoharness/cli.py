@@ -2086,6 +2086,65 @@ def cmd_skim(args, project, catalog) -> int:
     return exit_code
 
 
+def cmd_sentinel(args, project, catalog) -> int:
+    from autoharness import sentinel
+    if not project or not project.root:
+        out({"status": "error", "error": "No project root found for sentinel operation."})
+        return 1
+
+    action = getattr(args, "action", "status") or "status"
+    raw_json = getattr(args, "json", False)
+
+    if action == "snapshot":
+        label = getattr(args, "label", "") or "checkpoint"
+        snap = sentinel.capture_snapshot(project.root, label=label)
+        if raw_json:
+            out({"status": "ok", "snapshot": snap})
+        else:
+            print(f"Captured snapshot {snap.get('id')} ({snap.get('label')}) at tree state {snap.get('tree_state')[:12]}")
+        return 0
+
+    if action == "rollback":
+        snap_id = getattr(args, "snapshot_id", None)
+        res = sentinel.rollback_to_snapshot(project.root, snapshot_id=snap_id)
+        if raw_json:
+            out(res)
+        else:
+            print(f"Rollback complete: {len(res.get('restored_files', []))} tracked restored, {len(res.get('removed_files', []))} untracked removed.")
+        return 0
+
+    if action == "run":
+        pre_flight = getattr(args, "pre_flight", False)
+        if pre_flight:
+            sentinel.capture_snapshot(project.root, label="pre-flight")
+        test_cmd = getattr(args, "test_command", "pytest") or "pytest"
+        auto_rollback = getattr(args, "auto_rollback", False) and not pre_flight
+        check_shims = not getattr(args, "no_shims", False)
+        res = sentinel.run_sentinel_verification(
+            project.root,
+            test_command=test_cmd,
+            auto_rollback=auto_rollback,
+            check_shims=check_shims
+        )
+        if raw_json:
+            out(res)
+        else:
+            print(sentinel.format_sentinel_report(res))
+        return 0 if res.get("status") == "passed" else 1
+
+    # default: status
+    stat = sentinel.get_sentinel_status(project.root)
+    if raw_json:
+        out(stat)
+    else:
+        active = stat.get("active_snapshot")
+        if active:
+            print(f"Active Baseline Snapshot: {active.get('id')} ({active.get('label')}) from {active.get('timestamp')}")
+        else:
+            print("Sentinel status: idle (no active baseline snapshot).")
+    return 0
+
+
 def cmd_slot(args, project, catalog) -> int:
     from autoharness import slots
     action = getattr(args, "action", "inspect") or "inspect"
@@ -3967,6 +4026,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-lines", type=int, default=60, help="maximum lines for compressed output (default: 60)")
     s.add_argument("--no-save", action="store_true", help="do not persist full uncompressed output to disk")
     s.add_argument("--json", action="store_true", help="output structured JSON")
+    s = sub.add_parser("sentinel", help="Self-Supervised Code Refinement & Regression Sentinel with Rollback Guard (Google Research Harness² model)")
+    s.add_argument("action", nargs="?", choices=["run", "snapshot", "rollback", "status"], default="status", help="sentinel action")
+    s.add_argument("--test-command", "-c", default="pytest", help="test suite command to execute (default: pytest)")
+    s.add_argument("--auto-rollback", action="store_true", help="automatically rollback on test or anti-shim verification failure")
+    s.add_argument("--pre-flight", action="store_true", help="run baseline pre-flight checks and capture baseline snapshot")
+    s.add_argument("--no-shims", action="store_true", help="skip AST anti-shim check during verification")
+    s.add_argument("--snapshot-id", help="target snapshot ID for rollback")
+    s.add_argument("--label", default="checkpoint", help="label for newly created snapshot")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     return p
 
 
@@ -3978,7 +4046,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel}
 
 
 def main(argv: list[str] | None = None) -> int:

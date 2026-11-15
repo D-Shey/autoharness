@@ -309,5 +309,13 @@ harness.
 - **Intelligent Cascading Output Compression (dean0x/skim Model)**:
   `autoharness skim <file_or_command> [--kind auto|pytest|diff|traceback|compiler|generic] [--max-lines 60] [--json]` — collapse passing test progress, verbose context, and noisy compiler logs by 70-95% while isolating failure anchors and root-cause exception lines with head+tail preservation. Persists full uncompressed logs to `.autoharness/logs/` for drill-down debugging. Exposed to agents via `harness_compress_output` Gateway MCP tool.
 
+- **Self-Supervised Code Refinement & Regression Sentinel with Rollback Guard (Google Research Harness² Model)**:
+  `autoharness sentinel run [--test-command <cmd>] [--auto-rollback] [--pre-flight] [--no-shims] [--json]` — execute pre/post-flight test verification alongside AST Anti-Shim checks; automatically rolls back destructive regressions or fake stubs to verified baseline snapshots.
+  `autoharness sentinel snapshot [--label <name>]` — capture an atomic working tree fingerprint and lightweight file backup.
+  `autoharness sentinel rollback [--snapshot-id <id>]` — safely restore repository to a verified snapshot with fail-safe protection against uninitialized state and automatic untracked artifact cleanup.
+  `autoharness sentinel status` — inspect the active baseline snapshot and last verification result.
+  Exposed to agents via `harness_sentinel_verify`, `harness_sentinel_snapshot`, and `harness_sentinel_rollback` Gateway MCP tools.
+
+
 
 
