@@ -128,6 +128,15 @@ META_TOOLS = [
          "details": {"type": "object", "description": "Optional additional metadata or parameters."},
          "raw_json": {"type": "boolean", "description": "Return structured JSON instead of Markdown manifest."}},
          "required": ["action_type", "target"]}},
+    {"name": "harness_compress_output",
+     "description": "Intelligently compress verbose command, test, build, diff, or traceback logs by 70-95% using log skeleton folding and error extraction (dean0x/skim model).",
+     "inputSchema": {"type": "object", "properties": {
+         "text": {"type": "string", "description": "Raw uncompressed log, traceback, or command output stream."},
+         "kind": {"type": "string", "enum": ["auto", "pytest", "diff", "traceback", "compiler", "generic"], "description": "Log format kind (default: 'auto')."},
+         "max_lines": {"type": "integer", "description": "Maximum number of lines in compressed output (default: 60)."},
+         "save_raw": {"type": "boolean", "description": "Persist full uncompressed log to disk (.autoharness/logs/) for cascading retrieval (default: true)."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON with statistics instead of formatted Markdown outline."}},
+         "required": ["text"]}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -715,6 +724,24 @@ class Gateway:
             if raw_json:
                 return _text(json.dumps(sim, indent=2, ensure_ascii=False))
             return _text(consequence.format_consequence_manifest(sim))
+        if name == "harness_compress_output":
+            from autoharness import compression
+            raw_text = args.get("text", "")
+            kind = args.get("kind", "auto")
+            max_lines = args.get("max_lines", 60)
+            save_raw = bool(args.get("save_raw", True))
+            raw_json = bool(args.get("raw_json"))
+            save_dir = str(self.project) if self.project else None
+            res = compression.compress_output(
+                raw_text,
+                kind=kind,
+                max_lines=max_lines,
+                save_raw=save_raw,
+                save_dir=save_dir
+            )
+            if raw_json:
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            return _text(compression.format_compressed_report(res))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

@@ -306,5 +306,8 @@ harness.
 - **Consequence-Aware Approval & Blast Radius Simulation (Hugging Face arXiv:2610.40753)**:
   `autoharness simulate <target> [--action-type <type>]` / `autoharness permissions simulate` — simulate action blast radius, reversibility tier (`IRREVERSIBLE`, `HIGH_RISK`, `REVERSIBLE`, `READ_ONLY`), risk score (0-100), and rollback guidance before human-in-the-loop approvals. Exposed to agents via `harness_simulate_action` Gateway MCP tool.
 
+- **Intelligent Cascading Output Compression (dean0x/skim Model)**:
+  `autoharness skim <file_or_command> [--kind auto|pytest|diff|traceback|compiler|generic] [--max-lines 60] [--json]` — collapse passing test progress, verbose context, and noisy compiler logs by 70-95% while isolating failure anchors and root-cause exception lines with head+tail preservation. Persists full uncompressed logs to `.autoharness/logs/` for drill-down debugging. Exposed to agents via `harness_compress_output` Gateway MCP tool.
+
 
 

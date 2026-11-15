@@ -2036,6 +2036,56 @@ def cmd_simulate(args, project, catalog) -> int:
     return 0
 
 
+def cmd_skim(args, project, catalog) -> int:
+    import subprocess
+    from autoharness import compression
+    target = getattr(args, "target", "") or ""
+    kind = getattr(args, "kind", "auto") or "auto"
+    max_lines = getattr(args, "max_lines", 60) or 60
+    no_save = getattr(args, "no_save", False)
+    save_raw = not no_save
+
+    content = ""
+    exit_code = 0
+    target_path = Path(target)
+    if target_path.is_file():
+        try:
+            content = target_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            out({"status": "error", "error": f"Failed to read file {target}: {e}"})
+            return 1
+    else:
+        try:
+            proc = subprocess.run(
+                target,
+                shell=True,
+                cwd=project.root if project else None,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False
+            )
+            content = proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
+            exit_code = proc.returncode
+        except (OSError, subprocess.SubprocessError) as e:
+            out({"status": "error", "error": f"Failed to execute command {target}: {e}"})
+            return 1
+
+    proj_root = str(project.root) if project else None
+    res = compression.compress_output(
+        content,
+        kind=kind,
+        max_lines=max_lines,
+        save_raw=save_raw,
+        save_dir=proj_root
+    )
+    if getattr(args, "json", False):
+        out({"status": "ok", "exit_code": exit_code, **res})
+    else:
+        print(compression.format_compressed_report(res))
+    return exit_code
+
+
 def cmd_slot(args, project, catalog) -> int:
     from autoharness import slots
     action = getattr(args, "action", "inspect") or "inspect"
@@ -3911,6 +3961,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-k", type=int, default=2, help="number of contrastive candidate harness variants to probe (default: 2)")
     s.add_argument("--prompt", help="task prompt or objective for variant generation")
     s.add_argument("--json", action="store_true", help="output structured JSON")
+    s = sub.add_parser("skim", help="Intelligent cascading output compression for test, build, and diff logs (dean0x/skim model)")
+    s.add_argument("target", help="path to log file or command string to execute and compress")
+    s.add_argument("--kind", choices=["auto", "pytest", "diff", "traceback", "compiler", "generic"], default="auto", help="output format kind")
+    s.add_argument("--max-lines", type=int, default=60, help="maximum lines for compressed output (default: 60)")
+    s.add_argument("--no-save", action="store_true", help="do not persist full uncompressed output to disk")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     return p
 
 
@@ -3922,7 +3978,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim}
 
 
 def main(argv: list[str] | None = None) -> int:
