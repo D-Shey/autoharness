@@ -304,9 +304,16 @@ of meta-tools:
 - **`harness_history_search(query, kind)` (Active Context Pruning)**: queries task execution logs (`runs`),
   reviewer answers (`reviews`), and events on disk on demand without loading raw logs into model context.
 - **`harness_memory_search(query, kind, mode)`**: Level 2 hybrid search combining SQLite FTS5 BM25 and LEANN-style selective recomputation vector index (`.autoharness/memory.db`) via Reciprocal Rank Fusion (RRF), achieving semantic concept matching with 97% storage savings and zero runtime dependencies.
-- **`harness_codemap(path, query)`**: compact Python AST Symbol Map and structural symbol index, extracting classes, methods, parameters, return types, and docstrings without reading full files (80-90% token reduction).
-- **`harness_swarm_status` and `harness_swarm_run`**: multi-agent Directed Acyclic Graph (DAG) task scheduling, parallel worker pool execution with barrier synchronization, role separation (Researcher, Coder, Verifier, Critic), and hard verification gates.
+- **`harness_memory_reconcile(prune_orphans, kind)`**: reconciles persistent memory against ground-truth AST symbols and files, detecting orphaned and contradictory records.
+- **`harness_codemap(path, query)`**: compact AST Symbol Map, symbol call graphs, impact analysis, dependency cycle detection, and Anti-Shim sentinel checks without LLM tokens.
+- **`harness_slots(action, target)`**: inspects, exports, and diffs the 8 canonical harness slots (`system_prompt`, `guardrails`, `memory`, `skills`, `tool_guidance`, `scripts`, `subagents`, `middleware`).
+- **`harness_simulate_action(action_type, target, command)`**: dry-run consequence simulation calculating reversibility tier, blast radius, risk score, and rollback guidance.
+- **`harness_compress_output(file_path, command, kind, max_lines)`**: intelligent cascading output compression (`skim`), isolating failure anchors and tracebacks while pruning passing noise.
+- **`harness_sentinel_verify(test_command, auto_rollback, pre_flight)`**, **`harness_sentinel_snapshot`**, and **`harness_sentinel_rollback`**: self-supervised regression sentinel and rollback guard restoring clean baseline snapshots on test or shim regression.
+- **`harness_compact_session(transcript_path, keep_last, epoch_size)`** and **`harness_session_status`**: dynamic multi-tiered context window compaction (Tier 0/1/2) with full reversible logging.
+- **`harness_swarm_status`**, **`harness_swarm_run`**, and **`harness_swarm_verify`**: multi-agent DAG task scheduling with declarative artifact barriers and strict role isolation.
 - **`harness_drive_status` and `harness_drive_run`**: continuous autonomy self-driving loop for automatic backlog resolution (`followups.json`), safety iteration budgets, and automated regression sentinel rollbacks.
+- **`harness_permissions_status` and `harness_permissions_enable`**: consequence-aware permissions management.
 - **`harness_tools` and `harness_call(server, tool, arguments)`**: direct schema inspection and classical
   single-tool execution.
 
@@ -314,6 +321,85 @@ It also publishes native `<server>__<tool>` tools with `tools/list_changed`. In 
 without a restart; in Codex and Gemini CLI the meta-tools are the reliable path. A server that arrived in
 `gateway.json` through `git pull` does not start without approval on this machine
 (`autoharness gateway approve`).
+
+## Advanced Scaffolding & Code Intelligence (Google Research Harness² & SOTA)
+
+AutoHarness integrates key architectural innovations from Google Research's **Harness²** ([arXiv:2610.14224](https://arxiv.org/abs/2610.14224)), **Nomos**, **Skim**, and Consequence-Aware Approval ([arXiv:2610.40753](https://arxiv.org/abs/2610.40753)):
+
+### 1. 8-Slot Modular Harness Scaffolding & Propose–Probe–Compose Loop
+- **Canonical Slots**: Formalizes agent scaffolding into 8 editable, version-controlled slots (`system_prompt`, `guardrails`, `memory`, `skills`, `tool_guidance`, `scripts`, `subagents`, `middleware`).
+  ```bash
+  autoharness slot                      # inspect active slot configuration
+  autoharness slot export               # dump structured JSON representation
+  autoharness slot diff --target <file> # semantic diff between two harness states
+  ```
+- **Propose–Probe–Compose (`probe -k`)**: Evaluates $K$ alternative harness configurations in parallel sandboxes and synthesizes evidence-backed refinements via contrastive execution analysis without ground truth.
+  ```bash
+  autoharness probe -k 2                # probe candidate harness variants
+  ```
+
+### 2. AST Anti-Shim & Fake Implementation Sentinel
+- **Zero-Token AST Inspection**: Automatically inspects modified code for deceptive agent shortcuts:
+  - `EMPTY_STUB_BODY` (`pass`, `...`)
+  - `TRIVIAL_RETURN_STUB` (`return True`, `return None` without logic)
+  - `NOT_IMPLEMENTED_STUB` (`raise NotImplementedError`, `TODO`, `FIXME`)
+  - `TRIVIAL_ASSERTION_CHEAT` (`assert True`, empty tests)
+- **Automatic Evidence Guard**: `autoharness evidence diff` blocks recording evidence if stubs are detected.
+  ```bash
+  autoharness codemap <path> --check-shims
+  ```
+
+### 3. Symbol Call Graph & Blast Radius Impact Analysis
+- **Token-Free Code Intelligence**: Fast Python and Tree-sitter AST parser mapping caller/callee relationships, detecting dependency cycles, and tracing transitive blast radius of symbol modifications.
+  ```bash
+  autoharness codemap <path> --impact <symbol>   # impacted callers, callees, and test files
+  autoharness codemap <path> --callers <symbol>  # direct call sites
+  autoharness codemap <path> --arch              # cycle detection and architecture validation
+  ```
+
+### 4. Consequence-Aware Approval & Blast Radius Simulation
+- **Pre-Execution Simulation**: Before human-in-the-loop approvals, AutoHarness simulates command effects, assigning a risk score (0-100) and reversibility tier (`READ_ONLY`, `REVERSIBLE`, `HIGH_RISK`, `IRREVERSIBLE`) alongside rollback guidance and affected file lists.
+  ```bash
+  autoharness simulate <target> [--action-type <type>]
+  ```
+
+### 5. Intelligent Cascading Output Compression (`skim`)
+- **Token Budget Cascading**: Compresses verbose test suites, compiler outputs, and diff streams by 70–95%, isolating failing assertions, stack traces, and test counts while pruning passing noise. Preserves uncompressed logs in `.autoharness/logs/`.
+  ```bash
+  autoharness skim <file_or_command> [--kind auto|pytest|diff|traceback|compiler]
+  ```
+
+### 6. Regression Sentinel with Rollback Guard
+- **Self-Supervised Code Refinement**: Automatically snapshots verified baseline working trees and rolls back destructive regressions or fake stubs if post-flight tests fail.
+  ```bash
+  autoharness sentinel run [--auto-rollback] [--test-command <cmd>]
+  autoharness sentinel snapshot [--label <name>]
+  autoharness sentinel rollback [--snapshot-id <id>]
+  autoharness sentinel status
+  ```
+
+### 7. Dynamic Context Compactor & Layered Session Folding
+- **Three-Tier Compression**: Prevents context exhaustion in long sessions by compressing history into Tier 0 (recent verbatim), Tier 1 (distilled with cascading skim), and Tier 2 (condensed epochs), achieving 70–85% token reduction with reversible logs in `.autoharness/folded/`.
+  ```bash
+  autoharness compact run [<transcript_path>] [--keep-last 5] [--epoch-size 10]
+  autoharness compact status
+  autoharness compact prune
+  ```
+
+### 8. Multi-Agent Contract-First Artifact Barriers
+- **Swarm DAG Safety**: Enforces declarative artifact requirements (`expected_artifacts`, `barrier_assertions`, `allowed_paths`) and strict role isolation (`researcher`, `coder`, `verifier`, `critic`) across multi-agent workflows, blocking downstream hallucinations before they cascade.
+  ```bash
+  autoharness swarm verify [<plan_id>]
+  ```
+
+### 9. Dynamic Memory Drift Detection & Knowledge Reconciliation
+- **Persistent Memory Auditing**: Reconciles `.autoharness/memory.db` against ground-truth workspace files and AST symbols. Identifies orphaned entries, stale references, and conflicting prescriptive rules (`--prune-orphans` cleans up broken records within an atomic database `SAVEPOINT`).
+  ```bash
+  autoharness memory reconcile [--prune-orphans] [--kind all|ruling|lesson|review]
+  ```
+
+### 10. Dynamic Secret Redaction & Credential Shield
+- **Built-in Sanitization**: Automatically intercepts and redacts API keys (OpenAI, Anthropic, GitHub, AWS, Slack, JWT, database connection strings) in all execution outputs, logs, and evidence before LLM processing.
 
 ## Security in short
 
