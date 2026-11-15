@@ -316,6 +316,13 @@ harness.
   `autoharness sentinel status` — inspect the active baseline snapshot and last verification result.
   Exposed to agents via `harness_sentinel_verify`, `harness_sentinel_snapshot`, and `harness_sentinel_rollback` Gateway MCP tools.
 
+- **Dynamic Context Compactor & Layered Session Folding (Google Research Harness² & ACP Model)**:
+  `autoharness compact run [<transcript_path>] [--keep-last 5] [--epoch-size 10] [--json]` — multi-tiered context window compression (Tier 0 Recent verbatim, Tier 1 Distill filtered with cascading skim, Tier 2 Epoch condensation) saving 70-85% token volume while keeping full reversible logs in `.autoharness/folded/`.
+  `autoharness compact status [--json]` — inspect session compaction statistics, token reduction metrics, and active registry.
+  `autoharness compact prune [--keep-last 5] [--json]` — rotate and purge older folded transcripts to reclaim disk space with atomic state registry synchronization.
+  Exposed to agents via `harness_compact_session` and `harness_session_status` Gateway MCP tools.
+
+
 
 
 

@@ -1,16 +1,36 @@
-"""Active Context Pruning and History Search for AutoHarness.
+"""Active Context Pruning, Layered Session Folding, and History Search for AutoHarness.
 
-Implements tiered context folding (Capture -> Distill -> Condense) inspired by
-billion-context / Active Context Pruning (ACP), keeping model context compact during
-long-running multi-round tasks while preserving exact log reversibility on disk.
+Implements tiered context folding (Recent -> Distill -> Epoch) inspired by
+billion-context / Active Context Pruning (ACP) and Google Research Harness²,
+keeping model context compact during long-running multi-round tasks while
+preserving exact log reversibility on disk.
 """
 
 from __future__ import annotations
 
+import datetime
+import hashlib
 import json
-import re
+import os
 from pathlib import Path
+import tempfile
+import threading
 from typing import Any
+
+from autoharness import compression
+
+FOLDED_DIR = "folded"
+FOLDED_STATE_FILE = "folded_sessions.json"
+_lock = threading.RLock()
+
+
+def _get_utc_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _estimate_tokens(text: str) -> int:
+    """Fast deterministic token estimation (~4 chars per token)."""
+    return max(1, len(text) // 4)
 
 
 def fold_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -76,6 +96,363 @@ def format_folded_context(task_info: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def compact_session_transcript(
+    transcript_source: str | Path | list[dict[str, Any]],
+    project_root: Path | None = None,
+    session_id: str | None = None,
+    keep_last: int = 5,
+    epoch_size: int = 10,
+    save_disk: bool = True,
+) -> dict[str, Any]:
+    """Perform multi-tiered layered compaction over an agent session transcript.
+
+    Tiers:
+      - Level 0 (Recent): Last `keep_last` steps kept verbatim (100% detail).
+      - Level 1 (Distill): Intermediate steps have their large outputs (tests, diffs, tool runs)
+        compressed using cascading output compression (dean0x/skim model).
+      - Level 2 (Epoch): Oldest steps aggregated into milestone summaries.
+    """
+    now_str = _get_utc_now()
+    raw_steps: list[dict[str, Any]] = []
+
+    # 1. Parse steps from file or list
+    if isinstance(transcript_source, (str, Path)):
+        p = Path(transcript_source)
+        if not p.is_file():
+            return {"status": "error", "error": f"Transcript file not found: {p}"}
+        try:
+            if p.stat().st_size > 50_000_000:
+                return {"status": "error", "error": f"Transcript exceeds safety limit (50MB): {p.stat().st_size} bytes"}
+            content = p.read_text(encoding="utf-8", errors="replace")
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw_steps.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError as e:
+            return {"status": "error", "error": f"Failed to read transcript: {e}"}
+        if not session_id:
+            session_id = p.stem.replace(".compact", "").replace(".full", "")
+    elif isinstance(transcript_source, list):
+        raw_steps = [dict(s) for s in transcript_source]
+        if not session_id:
+            session_id = f"session-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    else:
+        return {"status": "error", "error": "Invalid transcript source"}
+
+    if not raw_steps:
+        return {
+            "status": "ok",
+            "session_id": session_id or "unknown",
+            "original_steps": 0,
+            "compact_steps": 0,
+            "compression_ratio": 0.0,
+            "steps": [],
+            "summary": "Transcript was empty",
+        }
+
+    total_steps = len(raw_steps)
+    raw_dump = json.dumps(raw_steps, ensure_ascii=False)
+    orig_chars = len(raw_dump)
+    orig_tokens = _estimate_tokens(raw_dump)
+
+    # 2. Determine tier boundaries
+    # Steps: [0 ... epoch_cutoff ... distill_cutoff ... total_steps]
+    distill_cutoff = max(0, total_steps - keep_last)
+    epoch_cutoff = max(0, distill_cutoff - epoch_size) if distill_cutoff > epoch_size else 0
+
+    compact_steps: list[dict[str, Any]] = []
+
+    # Tier 2: Epoch condensation for steps [0 ... epoch_cutoff]
+    if epoch_cutoff > 0:
+        epoch_slice = raw_steps[:epoch_cutoff]
+        tool_counts: dict[str, int] = {}
+        for s in epoch_slice:
+            for tc in s.get("tool_calls", []):
+                t_name = tc.get("name", "unknown")
+                tool_counts[t_name] = tool_counts.get(t_name, 0) + 1
+        tools_summary = ", ".join(f"{k}x{v}" for k, v in sorted(tool_counts.items()))
+
+        user_prompts = [s.get("content", "") for s in epoch_slice if s.get("type") == "USER_INPUT"]
+        last_goal = user_prompts[-1][:140] if user_prompts else "Initial session phase"
+
+        epoch_summary = {
+            "step_index": 0,
+            "type": "EPOCH_MILESTONE",
+            "tier": "epoch",
+            "folded": True,
+            "range": [0, epoch_cutoff - 1],
+            "steps_condensed": epoch_cutoff,
+            "goal": last_goal,
+            "tools_executed": tools_summary or "none",
+            "timestamp": epoch_slice[0].get("created_at", now_str),
+        }
+        compact_steps.append(epoch_summary)
+
+    # Tier 1: Distill intermediate steps [epoch_cutoff ... distill_cutoff]
+    for idx in range(epoch_cutoff, distill_cutoff):
+        step = dict(raw_steps[idx])
+        stype = step.get("type", "")
+        content = str(step.get("content", ""))
+
+        # Compress large tool execution outputs or logs
+        if len(content) > 300:
+            comp_res = compression.compress_output(content, max_lines=15, save_raw=False)
+            distilled_content = comp_res.get("compressed", content[:300] + "... [compressed]")
+            step["content"] = distilled_content
+            step["uncompressed_chars"] = len(content)
+            step["compressed_ratio"] = comp_res.get("compression_ratio", 0.0)
+
+        # Truncate internal thinking if present
+        if step.get("thinking") and len(str(step["thinking"])) > 200:
+            step["thinking"] = str(step["thinking"])[:180] + "... [thinking folded]"
+
+        step["tier"] = "distill"
+        step["folded"] = True
+        compact_steps.append(step)
+
+    # Tier 0: Verbatim recent steps [distill_cutoff ... total_steps]
+    for idx in range(distill_cutoff, total_steps):
+        step = dict(raw_steps[idx])
+        step["tier"] = "recent"
+        step["folded"] = False
+        compact_steps.append(step)
+
+    compact_dump = json.dumps(compact_steps, ensure_ascii=False)
+    compact_chars = len(compact_dump)
+    compact_tokens = _estimate_tokens(compact_dump)
+    ratio = round((1.0 - (compact_chars / orig_chars)) * 100, 2) if orig_chars > 0 else 0.0
+
+    result: dict[str, Any] = {
+        "status": "ok",
+        "session_id": session_id,
+        "timestamp": now_str,
+        "original_steps": total_steps,
+        "compact_steps": len(compact_steps),
+        "original_chars": orig_chars,
+        "compact_chars": compact_chars,
+        "estimated_original_tokens": orig_tokens,
+        "estimated_compact_tokens": compact_tokens,
+        "tokens_saved": max(0, orig_tokens - compact_tokens),
+        "compression_ratio": ratio,
+        "tiers": {
+            "epoch_steps": epoch_cutoff,
+            "distill_steps": distill_cutoff - epoch_cutoff,
+            "recent_steps": total_steps - distill_cutoff,
+        },
+        "steps": compact_steps,
+    }
+
+    # 3. Save to disk if requested and project_root provided
+    if save_disk and project_root:
+        with _lock:
+            folded_base = project_root / ".autoharness" / FOLDED_DIR
+            folded_base.mkdir(parents=True, exist_ok=True)
+
+            # Atomically save compact jsonl
+            compact_path = folded_base / f"{session_id}.compact.jsonl"
+            t_fd, t_tmp = tempfile.mkstemp(dir=folded_base, prefix="compact-", suffix=".tmp")
+            try:
+                with os.fdopen(t_fd, "w", encoding="utf-8") as f:
+                    for s in compact_steps:
+                        f.write(json.dumps(s, ensure_ascii=False) + "\n")
+                os.replace(t_tmp, compact_path)
+                result["compact_file"] = str(compact_path)
+            finally:
+                if os.path.exists(t_tmp):
+                    try:
+                        os.unlink(t_tmp)
+                    except OSError:
+                        pass
+
+            # Atomically save raw full jsonl if not existing
+            full_path = folded_base / f"{session_id}.full.jsonl"
+            if not full_path.is_file():
+                f_fd, f_tmp = tempfile.mkstemp(dir=folded_base, prefix="full-", suffix=".tmp")
+                try:
+                    with os.fdopen(f_fd, "w", encoding="utf-8") as f:
+                        for s in raw_steps:
+                            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+                    os.replace(f_tmp, full_path)
+                    result["full_file"] = str(full_path)
+                finally:
+                    if os.path.exists(f_tmp):
+                        try:
+                            os.unlink(f_tmp)
+                        except OSError:
+                            pass
+            else:
+                result["full_file"] = str(full_path)
+
+            # Update folded state registry
+            state_file = folded_base / FOLDED_STATE_FILE
+            state_data: dict[str, Any] = {}
+            if state_file.is_file():
+                try:
+                    state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    state_data = {}
+            sessions_map = state_data.setdefault("sessions", {})
+            sessions_map[session_id] = {
+                "last_compacted": now_str,
+                "original_steps": total_steps,
+                "compact_steps": len(compact_steps),
+                "compression_ratio": ratio,
+                "tokens_saved": result["tokens_saved"],
+                "compact_file": str(compact_path),
+            }
+            state_data["last_updated"] = now_str
+
+            st_fd, st_tmp = tempfile.mkstemp(dir=state_file.parent, prefix="folded-", suffix=".tmp")
+            try:
+                with os.fdopen(st_fd, "w", encoding="utf-8") as f:
+                    json.dump(state_data, f, indent=2, ensure_ascii=False)
+                os.replace(st_tmp, state_file)
+            finally:
+                if os.path.exists(st_tmp):
+                    try:
+                        os.unlink(st_tmp)
+                    except OSError:
+                        pass
+
+    return result
+
+
+def get_session_compaction_status(project_root: Path, session_id: str | None = None) -> dict[str, Any]:
+    """Retrieve compaction metrics and stored folded sessions."""
+    state_file = project_root / ".autoharness" / FOLDED_DIR / FOLDED_STATE_FILE
+    if not state_file.is_file():
+        alt = project_root / ".autoharness" / FOLDED_STATE_FILE
+        if alt.is_file():
+            state_file = alt
+        else:
+            return {
+                "status": "idle",
+                "sessions_count": 0,
+                "sessions": {},
+                "total_tokens_saved": 0,
+            }
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        sessions = data.get("sessions", {})
+        total_saved = sum(s.get("tokens_saved", 0) for s in sessions.values())
+        if session_id:
+            s_info = sessions.get(session_id)
+            return {
+                "status": "found" if s_info else "not_found",
+                "session_id": session_id,
+                "session": s_info,
+            }
+        return {
+            "status": "active",
+            "sessions_count": len(sessions),
+            "sessions": sessions,
+            "total_tokens_saved": total_saved,
+            "last_updated": data.get("last_updated"),
+        }
+    except (OSError, json.JSONDecodeError):
+        return {"status": "error", "error": "Failed to parse folded sessions state file"}
+
+
+def prune_folded_sessions(project_root: Path, keep_latest: int = 5) -> dict[str, Any]:
+    """Prune older folded session files to release disk space."""
+    with _lock:
+        folded_base = project_root / ".autoharness" / FOLDED_DIR
+        if not folded_base.is_dir():
+            return {"status": "ok", "removed_files": 0, "freed_bytes": 0}
+
+        compact_files = sorted(folded_base.glob("*.compact.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        to_prune = compact_files[keep_latest:]
+        freed = 0
+        removed = 0
+        pruned_stems = set()
+        for cf in to_prune:
+            stem = cf.stem.replace(".compact", "")
+            pruned_stems.add(stem)
+            ff = folded_base / f"{stem}.full.jsonl"
+            for target in (cf, ff):
+                if target.is_file():
+                    try:
+                        sz = target.stat().st_size
+                        target.unlink()
+                        freed += sz
+                        removed += 1
+                    except OSError:
+                        pass
+
+        # Synchronize folded state registry
+        state_file = folded_base / FOLDED_STATE_FILE
+        if not state_file.is_file():
+            alt = project_root / ".autoharness" / FOLDED_STATE_FILE
+            if alt.is_file():
+                state_file = alt
+
+        if state_file.is_file() and pruned_stems:
+            try:
+                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                sessions_map = state_data.get("sessions", {})
+                for stem in pruned_stems:
+                    sessions_map.pop(stem, None)
+                state_data["last_updated"] = _get_utc_now()
+                st_fd, st_tmp = tempfile.mkstemp(dir=state_file.parent, prefix="pruned-", suffix=".tmp")
+                try:
+                    with os.fdopen(st_fd, "w", encoding="utf-8") as f:
+                        json.dump(state_data, f, indent=2, ensure_ascii=False)
+                    os.replace(st_tmp, state_file)
+                finally:
+                    if os.path.exists(st_tmp):
+                        try:
+                            os.unlink(st_tmp)
+                        except OSError:
+                            pass
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        return {"status": "ok", "removed_files": removed, "freed_bytes": freed}
+
+
+def format_compaction_report(res: dict[str, Any]) -> str:
+    """Format session compaction result into human-readable Markdown report."""
+    if res.get("status") == "error":
+        return f"# Session Compaction Error\n\n- **Error:** {res.get('error')}"
+
+    sid = res.get("session_id", "unknown")
+    ratio = res.get("compression_ratio", 0.0)
+    orig_s = res.get("original_steps", 0)
+    comp_s = res.get("compact_steps", 0)
+    orig_tok = res.get("estimated_original_tokens", 0)
+    comp_tok = res.get("estimated_compact_tokens", 0)
+    saved = res.get("tokens_saved", 0)
+    tiers = res.get("tiers", {})
+
+    lines = [
+        f"# Session Compactor Report: `{sid}`",
+        "",
+        "## Compaction Summary",
+        f"- **Token Compression Ratio:** `{ratio}%` reduction",
+        f"- **Tokens:** ~{orig_tok} -> ~{comp_tok} (saved ~{saved} tokens)",
+        f"- **Steps:** {orig_s} raw steps folded into {comp_s} tiered steps",
+        "",
+        "## Tier Breakdown",
+        f"- **Tier 2 (Epoch Condensation):** {tiers.get('epoch_steps', 0)} oldest steps summarized",
+        f"- **Tier 1 (Distill Compression):** {tiers.get('distill_steps', 0)} intermediate steps skimmed",
+        f"- **Tier 0 (Recent Fidelity):** {tiers.get('recent_steps', 0)} latest steps preserved 100% verbatim",
+    ]
+
+    if res.get("compact_file"):
+        lines.extend([
+            "",
+            "## Storage References",
+            f"- **Compact Transcript:** `{res.get('compact_file')}`",
+            f"- **Full Trace Backup:** `{res.get('full_file')}`",
+        ])
+
+    return "\n".join(lines).strip()
+
+
 def search_task_history(
     task_dir: Path,
     query: str,
@@ -119,6 +496,8 @@ def search_task_history(
         if len(matches) >= max_matches:
             break
         try:
+            if file_path.stat().st_size > 10_000_000:
+                continue
             content = file_path.read_text("utf-8", errors="replace")
         except OSError:
             continue

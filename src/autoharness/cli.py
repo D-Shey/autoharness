@@ -2145,6 +2145,74 @@ def cmd_sentinel(args, project, catalog) -> int:
     return 0
 
 
+def cmd_compact(args, project, catalog) -> int:
+    from autoharness import context_pruning
+    action = getattr(args, "action", "run") or "run"
+    raw_json = getattr(args, "json", False)
+    proj_root = project.root if project else None
+
+    if action == "status":
+        if not proj_root:
+            out({"status": "error", "error": "No project root found."})
+            return 1
+        sid = getattr(args, "target", None) or None
+        stat = context_pruning.get_session_compaction_status(proj_root, session_id=sid)
+        if raw_json:
+            out(stat)
+        else:
+            print(f"Folded sessions: {stat.get('sessions_count', 0)}, Tokens saved: ~{stat.get('total_tokens_saved', 0)}")
+        return 0
+
+    if action == "prune":
+        if not proj_root:
+            out({"status": "error", "error": "No project root found."})
+            return 1
+        kl = getattr(args, "keep_last", None)
+        keep = 5 if kl is None else int(kl)
+        res = context_pruning.prune_folded_sessions(proj_root, keep_latest=keep)
+        if raw_json:
+            out(res)
+        else:
+            print(f"Pruned {res.get('removed_files', 0)} files, freed {res.get('freed_bytes', 0)} bytes.")
+        return 0
+
+    # run compaction
+    target = getattr(args, "target", "") or ""
+    target_path = Path(target) if target else None
+
+    if not target_path or not target_path.is_file():
+        if proj_root:
+            folded_base = proj_root / ".autoharness" / "folded"
+            potential = list(folded_base.glob("*.full.jsonl")) if folded_base.is_dir() else []
+            if potential:
+                target_path = potential[0]
+
+    if not target_path or not target_path.is_file():
+        res = {"status": "error", "error": f"Target transcript file not found: {target or '<none>'}"}
+        if raw_json:
+            out(res)
+        else:
+            print(f"Error: {res['error']}")
+        return 1
+
+    kl = getattr(args, "keep_last", None)
+    keep_last = 5 if kl is None else int(kl)
+    es = getattr(args, "epoch_size", None)
+    epoch_size = 10 if es is None else int(es)
+    res = context_pruning.compact_session_transcript(
+        target_path,
+        project_root=proj_root,
+        keep_last=keep_last,
+        epoch_size=epoch_size,
+        save_disk=True,
+    )
+    if raw_json:
+        out(res)
+    else:
+        print(context_pruning.format_compaction_report(res))
+    return 0 if res.get("status") == "ok" else 1
+
+
 def cmd_slot(args, project, catalog) -> int:
     from autoharness import slots
     action = getattr(args, "action", "inspect") or "inspect"
@@ -4035,6 +4103,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--snapshot-id", help="target snapshot ID for rollback")
     s.add_argument("--label", default="checkpoint", help="label for newly created snapshot")
     s.add_argument("--json", action="store_true", help="output structured JSON")
+    s = sub.add_parser("compact", help="Dynamic Context Compactor & Layered Session Folding (Google Research Harness² & ACP model)")
+    s.add_argument("action", nargs="?", choices=["run", "status", "prune"], default="run", help="compact action")
+    s.add_argument("target", nargs="?", default="", help="path to transcript file or session id")
+    s.add_argument("--keep-last", type=int, default=5, help="number of recent steps to keep verbatim (default: 5)")
+    s.add_argument("--epoch-size", type=int, default=10, help="step batch size for milestone epoch condensation (default: 10)")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     return p
 
 
@@ -4046,7 +4120,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel, "compact": cmd_compact}
 
 
 def main(argv: list[str] | None = None) -> int:

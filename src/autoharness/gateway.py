@@ -155,6 +155,23 @@ META_TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "snapshot_id": {"type": "string", "description": "Optional snapshot ID to roll back to (defaults to latest active snapshot)."}},
          "required": []}},
+    {"name": "harness_compact_session",
+     "description": "Dynamically compact and fold session transcript using 3-tier windowing (Recent verbatim, Distill filtered, Epoch condensed) with cascading raw log disk persistence (Harness² model).",
+     "inputSchema": {"type": "object", "properties": {
+         "transcript_path": {"type": "string", "description": "Optional path to .jsonl session transcript file."},
+         "steps": {"type": "array", "description": "Optional list of transcript step objects to compact directly in memory."},
+         "session_id": {"type": "string", "description": "Optional session ID for indexing and storage."},
+         "keep_last": {"type": "integer", "description": "Number of recent steps to keep 100% verbatim (default: 5)."},
+         "epoch_size": {"type": "integer", "description": "Number of steps per epoch condensation bucket (default: 10)."},
+         "save_disk": {"type": "boolean", "description": "Persist full and compact transcripts to .autoharness/folded/ (default: true)."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON with statistics instead of formatted Markdown outline."}},
+         "required": []}},
+    {"name": "harness_session_status",
+     "description": "Inspect session transcript compaction status, token reduction metrics, and folded transcript archives.",
+     "inputSchema": {"type": "object", "properties": {
+         "session_id": {"type": "string", "description": "Optional session ID to inspect metrics for."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON with statistics instead of formatted report."}},
+         "required": []}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -791,6 +808,65 @@ class Gateway:
             snap_id = args.get("snapshot_id")
             res = sentinel.rollback_to_snapshot(self.project, snapshot_id=snap_id)
             return _text(json.dumps(res, indent=2, ensure_ascii=False))
+        if name == "harness_compact_session":
+            from autoharness import context_pruning
+            steps = args.get("steps")
+            transcript_path = args.get("transcript_path")
+            session_id = args.get("session_id")
+            keep_last = int(args.get("keep_last") or 5)
+            epoch_size = int(args.get("epoch_size") or 10)
+            save_disk = bool(args.get("save_disk", True))
+            raw_json = bool(args.get("raw_json", False))
+
+            transcript_source = None
+            if steps is not None:
+                transcript_source = steps
+            elif transcript_path:
+                transcript_source = (self.project / transcript_path) if (self.project and not Path(transcript_path).is_absolute()) else Path(transcript_path)
+            elif self.project:
+                folded_base = self.project / ".autoharness" / "folded"
+                potential = list(folded_base.glob("*.full.jsonl")) if folded_base.is_dir() else []
+                if potential:
+                    transcript_source = potential[0]
+
+            if transcript_source is None:
+                return _text("No transcript path or steps provided for session compaction.", error=True)
+
+            res = context_pruning.compact_session_transcript(
+                transcript_source,
+                project_root=self.project,
+                session_id=session_id,
+                keep_last=keep_last,
+                epoch_size=epoch_size,
+                save_disk=save_disk
+            )
+            if raw_json:
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            return _text(context_pruning.format_compaction_report(res))
+        if name == "harness_session_status":
+            from autoharness import context_pruning
+            session_id = args.get("session_id")
+            raw_json = bool(args.get("raw_json", False))
+            if not self.project:
+                return _text("No project root configured for session compaction status.", error=True)
+            res = context_pruning.get_session_compaction_status(
+                self.project,
+                session_id=session_id
+            )
+            if raw_json:
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            lines = [f"## Compaction Status for Session: {res.get('session_id') or 'all'}"]
+            lines.append(f"- **Total Folded Sessions:** {res.get('sessions_count', 0)}")
+            lines.append(f"- **Total Tokens Saved:** ~{res.get('total_tokens_saved', 0):,}")
+            if res.get("session"):
+                s = res["session"]
+                lines.append(f"- **Original Steps:** {s.get('original_steps', 0)}")
+                lines.append(f"- **Compacted Steps:** {s.get('compact_steps', 0)}")
+                lines.append(f"- **Est. Original Tokens:** {s.get('estimated_original_tokens', 0):,}")
+                lines.append(f"- **Est. Compacted Tokens:** {s.get('estimated_compact_tokens', 0):,}")
+                lines.append(f"- **Token Savings:** {s.get('compression_ratio', 0.0):.1f}%")
+                lines.append(f"- **Compact Path:** `{s.get('compact_file')}`")
+            return _text("\n".join(lines))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

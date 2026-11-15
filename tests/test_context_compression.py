@@ -148,3 +148,239 @@ def test_gateway_history_search_integration(project):
     text = res["result"]["content"][0]["text"]
     assert "[runs] runs/01-test.log" in text
     assert "database connection refused" in text
+
+
+def test_compact_session_transcript_layers(tmp_path):
+    # Construct 18 steps: 6 epoch, 8 distill (with heavy tool outputs), 4 recent
+    steps = []
+    for i in range(1, 7):
+        steps.append({
+            "step": i,
+            "type": "USER_INPUT" if i == 1 else "PLANNER_RESPONSE",
+            "content": f"Step {i}: Initial project discovery and architecture analysis plan.",
+            "thinking": f"Deliberating on step {i} requirements and constraints."
+        })
+
+    # Middle steps with heavy logs that will be compressed
+    large_log = "\n".join([f"line {j}: processing module test_{j}.py ... OK" for j in range(120)])
+    for i in range(7, 15):
+        steps.append({
+            "step": i,
+            "type": "PLANNER_RESPONSE",
+            "content": f"Step {i}: executing test runner and linters.",
+            "tool_calls": [{"name": "run_command", "args": {"CommandLine": "pytest"}}],
+            "tool_output": large_log,
+        })
+
+    # Recent steps (keep_last=4)
+    for i in range(15, 19):
+        steps.append({
+            "step": i,
+            "type": "PLANNER_RESPONSE",
+            "content": f"Step {i}: Finalizing verification and drafting report.",
+            "thinking": f"Checking assertions for step {i}."
+        })
+
+    transcript_file = tmp_path / "test_session.jsonl"
+    transcript_file.write_text("\n".join(json.dumps(s) for s in steps) + "\n", encoding="utf-8")
+
+    res = context_pruning.compact_session_transcript(
+        transcript_file,
+        project_root=tmp_path,
+        session_id="test-sess-01",
+        keep_last=4,
+        epoch_size=6,
+        save_disk=True,
+    )
+
+    assert res["status"] == "ok"
+    assert res["session_id"] == "test-sess-01"
+    assert res["original_steps"] == 18
+    assert res["compact_steps"] < 18
+    assert res["compression_ratio"] > 20.0
+    assert res["tiers"]["recent_steps"] == 4
+    assert res["tiers"]["distill_steps"] == 6
+    assert res["tiers"]["epoch_steps"] == 8
+
+    # Verify disk files
+    compact_path = Path(res["compact_file"])
+    full_path = Path(res["full_file"])
+    assert compact_path.is_file()
+    assert full_path.is_file()
+    assert compact_path.stat().st_size < full_path.stat().st_size
+
+    # Formatted report check
+    report = context_pruning.format_compaction_report(res)
+    assert "# Session Compactor Report: `test-sess-01`" in report
+    assert "Token Compression Ratio" in report
+    assert "**Tier 0 (Recent Fidelity):** 4 latest steps preserved 100% verbatim" in report
+
+
+def test_session_compaction_status_and_prune(tmp_path):
+    # Setup folded sessions
+    folded_dir = tmp_path / ".autoharness" / "folded"
+    folded_dir.mkdir(parents=True)
+
+    state_file = folded_dir / "folded_sessions.json"
+    state_file.write_text(json.dumps({
+        "last_updated": "2026-11-15T18:00:00Z",
+        "sessions": {
+            "sess-1": {
+                "session_id": "sess-1",
+                "compact_file": str(folded_dir / "sess-1.compact.jsonl"),
+                "full_file": str(folded_dir / "sess-1.full.jsonl"),
+                "original_steps": 20,
+                "compact_steps": 8,
+                "estimated_original_tokens": 10000,
+                "estimated_compact_tokens": 3000,
+                "tokens_saved": 7000,
+                "compression_ratio": 70.0,
+            },
+            "sess-2": {
+                "session_id": "sess-2",
+                "compact_file": str(folded_dir / "sess-2.compact.jsonl"),
+                "full_file": str(folded_dir / "sess-2.full.jsonl"),
+                "original_steps": 15,
+                "compact_steps": 6,
+                "estimated_original_tokens": 8000,
+                "estimated_compact_tokens": 2500,
+                "tokens_saved": 5500,
+                "compression_ratio": 68.7,
+            }
+        }
+    }), encoding="utf-8")
+
+    # Create dummy files
+    (folded_dir / "sess-1.compact.jsonl").write_text("compact 1", "utf-8")
+    (folded_dir / "sess-1.full.jsonl").write_text("full 1", "utf-8")
+    (folded_dir / "sess-2.compact.jsonl").write_text("compact 2", "utf-8")
+    (folded_dir / "sess-2.full.jsonl").write_text("full 2", "utf-8")
+
+    # Status overall
+    st_all = context_pruning.get_session_compaction_status(tmp_path)
+    assert st_all["status"] == "active"
+    assert st_all["sessions_count"] == 2
+    assert st_all["total_tokens_saved"] == 12500
+
+    # Status specific session
+    st_s1 = context_pruning.get_session_compaction_status(tmp_path, session_id="sess-1")
+    assert st_s1["status"] == "found"
+    assert st_s1["session"]["compression_ratio"] == 70.0
+
+    # Prune keeping latest 1
+    prune_res = context_pruning.prune_folded_sessions(tmp_path, keep_latest=1)
+    assert prune_res["status"] == "ok"
+    assert prune_res["removed_files"] >= 1
+
+    # Verify registry pruned
+    st_pruned = context_pruning.get_session_compaction_status(tmp_path)
+    assert st_pruned["sessions_count"] == 1
+
+
+def test_cmd_compact_cli(project, capsys):
+    from autoharness.cli import cmd_compact
+    import types
+
+    # Prepare sample session transcript
+    steps = [
+        {"step": i, "content": f"Step {i} execution content with details."}
+        for i in range(1, 12)
+    ]
+    raw_path = project.root / "sample.jsonl"
+    raw_path.write_text("\n".join(json.dumps(s) for s in steps) + "\n", encoding="utf-8")
+
+    # 1. Run compaction via CLI
+    args_run = types.SimpleNamespace(
+        action="run",
+        target=str(raw_path),
+        keep_last=3,
+        epoch_size=5,
+        json=True,
+    )
+    code = cmd_compact(args_run, project, None)
+    assert code == 0
+    captured = capsys.readouterr()
+    res = json.loads(captured.out)
+    assert res["status"] == "ok"
+    assert res["original_steps"] == 11
+    assert res["compact_steps"] < 11
+
+    # 2. Check status via CLI
+    args_status = types.SimpleNamespace(
+        action="status",
+        target=None,
+        json=True,
+    )
+    code = cmd_compact(args_status, project, None)
+    assert code == 0
+    captured = capsys.readouterr()
+    st = json.loads(captured.out)
+    assert st["sessions_count"] >= 1
+
+    # 3. Prune via CLI
+    args_prune = types.SimpleNamespace(
+        action="prune",
+        keep_last=0,
+        json=True,
+    )
+    code = cmd_compact(args_prune, project, None)
+    assert code == 0
+    captured = capsys.readouterr()
+    pruned = json.loads(captured.out)
+    assert pruned["status"] == "ok"
+
+
+def test_gateway_compact_session_tools(project):
+    sent = []
+    gw = gateway.Gateway(project.root, sent.append, lambda line: None)
+    gw.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+    gw.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    steps = [
+        {"step": i, "content": f"Step {i} with large logs: " + ("x" * 200)}
+        for i in range(1, 15)
+    ]
+
+    # Test harness_compact_session
+    res = gw.handle({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "harness_compact_session",
+            "arguments": {
+                "steps": steps,
+                "session_id": "gw-compact-test",
+                "keep_last": 3,
+                "epoch_size": 5,
+                "raw_json": True,
+            }
+        }
+    })
+
+    assert not res["result"].get("isError")
+    data = json.loads(res["result"]["content"][0]["text"])
+    assert data["status"] == "ok"
+    assert data["session_id"] == "gw-compact-test"
+    assert data["tiers"]["recent_steps"] == 3
+    assert data["original_steps"] == 14
+
+    # Test harness_session_status
+    st_res = gw.handle({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "harness_session_status",
+            "arguments": {
+                "session_id": "gw-compact-test",
+                "raw_json": True,
+            }
+        }
+    })
+
+    assert not st_res["result"].get("isError")
+    st_data = json.loads(st_res["result"]["content"][0]["text"])
+    assert st_data["status"] == "found"
+    assert st_data["session_id"] == "gw-compact-test"
+
