@@ -41,10 +41,27 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `journal` | the draft of this task's entry in the project's journal, and where it goes |
 | `ruling add` | a review point the user rejected, so later critics in the project do not raise it again |
 | `config get\|set [teardown keep\|remove \| allowed_hosts "<hosts>" \| min_mode any\|full\|reviewed \| journal "<path>"\|off] [--global]` | settings |
-| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart, offering Code Mode (`harness_execute`, `harness_search`), Active Context Pruning (`harness_history_search`), persistent SQLite FTS5 memory (`harness_memory_search`), and Python AST Code Map (`harness_codemap`); `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
+| `gateway install\|uninstall\|status\|serve\|approve [--user]` | the autoharness MCP server through which new servers work without a restart, offering Code Mode, Active Context Pruning, persistent memory, AST Code Map, Harness\u00b2 Slot Inspection, Consequence Simulation, Output Compression, Regression Sentinel, Session Compaction, Swarm Barriers, Memory Reconciliation, and Permissions tools; `--user` puts it into the agent's own config (agy, Cursor, Gemini, Qwen, GigaCode), where it serves whatever project the agent runs in |
 | `memory search\|index\|status [query] [--kind ...] [--mode hybrid\|fts\|vector] [--limit N]` | in-process SQLite FTS5 persistent memory with BM25 ranking, LEANN-style selective recomputation vector index, and Reciprocal Rank Fusion (RRF) hybrid retrieval (`.autoharness/memory.db`) |
+| `memory reconcile [--prune-orphans] [--kind all\|ruling\|lesson\|review\|followup] [--json]` | audit persistent memory against ground-truth workspace files and AST symbols; detect orphaned entries (deleted task dirs, missing code files), stale references, and conflicting prescriptive policies; `--prune-orphans` removes broken entries in an atomic `SAVEPOINT` |
 | `codemap [path] [-q QUERY] [--json]` | AST Code Map and structural symbol index: extracts classes, methods, signatures and docstrings via Python stdlib `ast`, reducing context tokens by 80-90% |
+| `codemap <path> --impact <symbol>` | trace transitive blast radius: direct callers, callees, and impacted test files for a given symbol |
+| `codemap <path> --callers <symbol>` | locate all direct call sites of a symbol across the repository |
+| `codemap <path> --arch` | detect module dependency cycles and architectural boundary violations |
+| `codemap <path> --check-shims` | Anti-Shim AST Sentinel: detect fake implementations (`EMPTY_STUB_BODY`, `TRIVIAL_RETURN_STUB`, `NOT_IMPLEMENTED_STUB`, `TRIVIAL_ASSERTION_CHEAT`); integrated into `evidence diff` to block evidence with stubs |
+| `slot [export\|diff]` | inspect the 8 canonical harness slots (`system_prompt`, `guardrails`, `memory`, `skills`, `tool_guidance`, `scripts`, `subagents`, `middleware`); `export` dumps structured JSON; `diff --target <file>` computes semantic diff |
+| `probe [-k N]` | Propose\u2013Probe\u2013Compose contrastive loop: generate K candidate harness variants, probe in sandboxed execution, synthesize evidence-backed improvements without ground truth |
+| `simulate <target> [--action-type <type>]` | consequence-aware pre-execution simulation: calculate reversibility tier (`READ_ONLY`, `REVERSIBLE`, `HIGH_RISK`, `IRREVERSIBLE`), risk score (0-100), blast radius, and rollback guidance |
+| `skim <file_or_command> [--kind auto\|pytest\|diff\|traceback\|compiler\|generic] [--max-lines N] [--json]` | intelligent cascading output compression: collapse passing test progress and verbose logs by 70-95% while isolating failure anchors, stack traces, and test counts; preserves full logs in `.autoharness/logs/` |
+| `sentinel run [--test-command <cmd>] [--auto-rollback] [--pre-flight] [--no-shims] [--json]` | self-supervised regression sentinel: pre/post-flight test verification with Anti-Shim checks; auto-rolls back to verified baseline on regression or fake stubs |
+| `sentinel snapshot [--label <name>]` | capture an atomic working tree fingerprint and lightweight file backup |
+| `sentinel rollback [--snapshot-id <id>]` | restore repository to a verified snapshot with fail-safe protection and untracked artifact cleanup |
+| `sentinel status` | inspect the active baseline snapshot and last verification result |
+| `compact run [<transcript_path>] [--keep-last N] [--epoch-size N] [--json]` | dynamic context compactor: multi-tiered session compression (Tier 0 Recent, Tier 1 Distill, Tier 2 Epoch) saving 70-85% tokens; full logs in `.autoharness/folded/` |
+| `compact status [--json]` | inspect compaction statistics, token reduction metrics, and active registry |
+| `compact prune [--keep-last N] [--json]` | rotate and purge older folded transcripts to reclaim disk space |
 | `swarm init\|run\|status\|list [plan_id] [--title ...] [--file ...] [--parallel N]` | multi-agent DAG swarm workflow coordinator and runner: topological scheduling, concurrent worker execution pool with barrier synchronization, role separation, hard verification gates, and crash-proof persistence |
+| `swarm verify [<plan_id>] [--json]` | audit DAG topology and validate declarative artifact barriers (`expected_artifacts`, `barrier_assertions`, `allowed_paths`) and role boundaries; blocks downstream branches on upstream failure |
 | `drive [run\|status\|queue\|rollback] [--max-tasks N] [--followup ID] [--dry-run]` | continuous autonomy self-driving backlog loop: prioritized resolution of `followups.json`, pre- & post-flight regression sentinel checks, and automated git rollback on failures |
 | `update [--check] [--repo REPO] [--force] [--yes]` | check for updates and automated self-update of AutoHarness from GitHub releases/repository via `uv tool` or `pip` |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
@@ -58,6 +75,10 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `.autoharness/evals.jsonl` | run measurements; a local file, ignored by Git |
 | `.autoharness/kept.json`, `config.json`, `gateway.json`, `followups.json` | what stayed in the project, project settings, gateway servers, deferred findings; they can be committed (`.autoharness/.gitignore` lets only them through), the rest of the state stays out of git |
 | `.autoharness/gateway.log` | the gateway's log |
+| `.autoharness/logs/` | full uncompressed logs preserved by `skim` for drill-down debugging |
+| `.autoharness/folded/` | reversible compacted session transcripts from `compact run` |
+| `.autoharness/memory.db` | SQLite FTS5 persistent memory (rulings, lessons, reviews, follow-ups) |
+| `.autoharness/snapshots/` | sentinel baseline snapshots for rollback guard |
 | `~/.autoharness/` | `recipes/`, the library of your own skills `skills/`, the global `config.json`, gateway approvals, your own language files `lang/` (`AUTOHARNESS_HOME` overrides) |
 | `src/autoharness/data/catalog.json` | the curated catalog of capabilities, servers and trusted publishers |
 | `src/autoharness/data/lang/<code>.json` | the words of each language autoharness reads a task in |

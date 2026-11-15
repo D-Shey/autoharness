@@ -159,6 +159,46 @@ Names from lockfiles and `kept.json` are compared with the folder listing letter
 (symlink, junction); `add` does not replace a folder that differs from the one the task installed.
 `prune` and `teardown --remove` check everything first and only then remove anything.
 
+## Dynamic secret redaction
+
+All execution outputs (`runs.run`, `verify run`, `skim`) are automatically scanned for known secret
+patterns before they reach the LLM context or are stored in logs. Matched tokens are replaced
+in-place with descriptive placeholders:
+
+| Pattern | Placeholder |
+|---|---|
+| `sk-...` (OpenAI) | `[REDACTED:OPENAI_KEY]` |
+| `sk-proj-...` | `[REDACTED:OPENAI_PROJ_KEY]` |
+| `sk-ant-...` (Anthropic) | `[REDACTED:ANTHROPIC_KEY]` |
+| `ghp_...`, `github_pat_...` | `[REDACTED:GITHUB_PAT]`, `[REDACTED:GITHUB_FINE_GRAINED_PAT]` |
+| `hf_...` (Hugging Face) | `[REDACTED:HF_TOKEN]` |
+| `xoxb-...`, `xoxp-...` (Slack) | `[REDACTED:SLACK_TOKEN]` |
+| `AKIA...` (AWS access key) | `[REDACTED:AWS_ACCESS_KEY]` |
+| `Authorization: Bearer ...` | `[REDACTED:AUTH_HEADER]` |
+| `-----BEGIN ... PRIVATE KEY-----` | `[REDACTED:PRIVATE_KEY]` |
+| `proto://user:pass@host` | `proto://user:[REDACTED:PASSWORD]@host` |
+| JWT tokens (`eyJ...`) | `[REDACTED:JWT_TOKEN]` |
+
+Environment variables whose names contain `SECRET`, `TOKEN`, `PASSWORD`, `API_KEY`, `CREDENTIAL`
+or `AUTH` (case-insensitive) are also matched: their values are replaced with
+`[REDACTED:ENV_<NAME>]`.
+
+Redaction is on by default. `runs.run(..., redact=False)` disables it for cases where the raw
+output is needed (a test that checks the token itself). Full redacted logs are stored in
+`.autoharness/tasks/<id>/runs/`.
+
+## Anti-Shim evidence guard
+
+`autoharness evidence diff` automatically runs the Anti-Shim AST Sentinel on all modified Python
+files before recording a diff as evidence. If any stub patterns are found (`EMPTY_STUB_BODY`,
+`TRIVIAL_RETURN_STUB`, `NOT_IMPLEMENTED_STUB`, `TRIVIAL_ASSERTION_CHEAT`), the command exits with
+a non-zero code and prints the offending file:line and pattern. This prevents an agent from
+recording evidence that includes fake implementations or deceptive shortcuts.
+
+`autoharness sentinel run --no-shims` integrates the same check into the regression sentinel
+pipeline: a test suite that passes but contains stubs is treated as a regression and triggers
+an automatic rollback when `--auto-rollback` is set.
+
 ## Your own skills
 
 `skill save` blocks secrets (tokens, private keys, `password=…`) and dangerous patterns, warns about
