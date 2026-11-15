@@ -6,7 +6,9 @@ Provides ranked full-text search across past rulings, lessons, followups, decisi
 """
 from __future__ import annotations
 
+import ast
 import json
+import keyword
 import re
 import sqlite3
 import time
@@ -293,3 +295,386 @@ def index_project_memory(project_root: Path) -> dict[str, int]:
         pass
 
     return counts
+
+
+PATH_PATTERN = re.compile(
+    r'(?<![/\w\.-])(?:[a-zA-Z0-9_.-]+[/\\])+[a-zA-Z0-9_.-]+\.(?:py|json|md|yaml|yml|toml|txt|sh|bat|ps1|ts|js|html|css|sql)(?![/\w\.-])'
+)
+
+POSITIVE_KEYWORDS = {
+    "always", "allow", "allowed", "enable", "enabled", "require", "required",
+    "permit", "permitted", "всегда", "разрешено", "используй", "обязательно",
+    "подтверждай", "подтверждать",
+}
+NEGATIVE_KEYWORDS = {
+    "never", "prohibit", "prohibited", "forbid", "forbidden", "disable",
+    "disabled", "deny", "denied", "никогда", "запрещено", "не используй",
+    "нельзя", "блокируй", "блокировать",
+}
+COMMON_STOPWORDS = {
+    "always", "never", "allow", "prohibit", "rule", "task", "code", "file",
+    "test", "should", "must", "with", "from", "that", "this", "when", "then",
+    "into", "onto", "before", "after", "while", "using", "make", "take",
+    "does", "have", "more", "also", "each", "every", "other", "some", "such",
+    "only", "true", "false", "none", "null", "self", "error", "status",
+    "agent", "already", "accept", "verdict", "answer", "critic", "review",
+    "summary", "finding", "findings", "check", "checks", "checked", "issue",
+    "issues", "result", "results", "tested", "passed", "failed", "verified",
+    "running", "written", "first", "second", "third", "which", "there", "their",
+}
+
+
+PROSE_SYMBOLS = set(keyword.kwlist) | {
+    "has", "have", "had", "was", "were", "been", "be", "do", "does", "did",
+    "used", "removed", "added", "deleted", "fixed", "called", "defined",
+    "created", "modified", "passed", "failed", "named", "found", "seen",
+    "taken", "given", "run", "runs", "set", "sets", "like", "such", "well",
+    "here", "then", "when", "what", "which", "where", "with", "both", "each",
+    "methods", "functions", "classes", "definitions", "symbols", "modules",
+}
+
+
+def extract_code_references(
+    content: str,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[set[str], set[str]]:
+    """Extract referenced file paths and code symbols from memory content and metadata."""
+    paths: set[str] = set()
+    symbols: set[str] = set()
+
+    meta = metadata or {}
+    for key in ("file", "path"):
+        val = meta.get(key)
+        if isinstance(val, str) and val.strip():
+            clean = val.strip().replace("\\", "/").strip("`'\"()[],;:")
+            # Do not treat review artifact names as workspace files
+            if clean and not clean.startswith("critic-"):
+                paths.add(clean)
+
+    for key in ("symbol", "symbols", "function", "class", "method"):
+        val = meta.get(key)
+        if isinstance(val, str) and val.strip():
+            symbols.add(val.strip().strip("`'\"()[],;:"))
+        elif isinstance(val, list):
+            for s in val:
+                if isinstance(s, str) and s.strip():
+                    symbols.add(s.strip().strip("`'\"()[],;:"))
+
+    # Extract paths from content
+    for m in PATH_PATTERN.finditer(content):
+        raw = m.group(0).strip("`'\"()[],;:")
+        if not raw.startswith(("http:", "https:", "ftp:", "file:")):
+            paths.add(raw.replace("\\", "/"))
+
+    # Extract explicit def / class / function references from content (strictly backticked identifiers)
+    for m in re.finditer(r'(?:def|class|function|method)\s+`([a-zA-Z_]\w*)`', content):
+        sym = m.group(1)
+        if len(sym) >= 2 and sym.lower() not in PROSE_SYMBOLS:
+            symbols.add(sym)
+
+    return paths, symbols
+
+
+def collect_file_ast_symbols(file_path: Path) -> set[str]:
+    """Parse a Python source file and extract function, class, and assignment symbol names."""
+    if not file_path.is_file() or file_path.suffix != ".py":
+        return set()
+    try:
+        source = file_path.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source, filename=str(file_path))
+    except (SyntaxError, OSError):
+        return set()
+
+    symbols = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    symbols.add(target.id)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                symbols.add(node.target.id)
+    return symbols
+
+
+def detect_statement_polarity(text: str) -> str:
+    """Return 'positive', 'negative', or 'neutral' based on prescriptive policy keywords."""
+    lower = text.lower()
+    has_neg = any(re.search(r'\b' + re.escape(w) + r'\b', lower) for w in NEGATIVE_KEYWORDS)
+    if has_neg:
+        return "negative"
+    has_pos = any(re.search(r'\b' + re.escape(w) + r'\b', lower) for w in POSITIVE_KEYWORDS)
+    if has_pos:
+        return "positive"
+    return "neutral"
+
+
+def reconcile_memory_drift(
+    project_root: Path,
+    prune_orphans: bool = False,
+    kind: str | None = None,
+) -> dict[str, Any]:
+    """Audit persistent SQLite memory (.autoharness/memory.db) against ground-truth workspace files and AST symbols.
+
+    Google Research Harness² model:
+    - Identifies orphaned documents (referenced files or source tasks deleted).
+    - Identifies drifted documents (missing AST symbols, conflicting prescriptive rulings).
+    - Computes drift metrics and returns structured reconciliation report.
+    - Optionally permanently prunes orphaned documents when prune_orphans=True.
+    """
+    root = Path(project_root).resolve()
+    con = get_memory_db(root)
+    try:
+        cur = con.cursor()
+        if kind and kind != "all":
+            rows = cur.execute("SELECT * FROM memory_docs WHERE kind = ?", (kind,)).fetchall()
+        else:
+            rows = cur.execute("SELECT * FROM memory_docs").fetchall()
+
+        ast_cache: dict[Path, set[str]] = {}
+        docs: list[dict[str, Any]] = []
+        for r in rows:
+            meta = json.loads(r["metadata"]) if r["metadata"] else {}
+            docs.append({
+                "id": r["id"],
+                "kind": r["kind"],
+                "source": r["source"],
+                "title": r["title"] or "",
+                "content": r["content"],
+                "metadata": meta,
+                "updated_at": r["updated_at"],
+            })
+
+        drifted_items: list[dict[str, Any]] = []
+        orphaned_ids: list[str] = []
+        valid_count = 0
+
+        # Build polarity map for conflict detection
+        polarities: list[tuple[dict[str, Any], str, set[str]]] = []
+        for d in docs:
+            pol = detect_statement_polarity(d["title"] + " " + d["content"])
+            words = set(re.findall(r'[a-zA-Z_]\w{3,}', (d["title"] + " " + d["content"]).lower()))
+            subject_words = words - COMMON_STOPWORDS
+            polarities.append((d, pol, subject_words))
+
+        for idx, d in enumerate(docs):
+            missing_files: list[str] = []
+            missing_symbols: list[str] = []
+            conflicts: list[str] = []
+            reasons: list[str] = []
+
+            # 1. Source check for reviews
+            primary_source_missing = False
+            if d["kind"] == "review":
+                source_rel = d["source"].replace("\\", "/")
+                task_dir_name = source_rel.split("/")[0]
+                task_dir_path = root / ".autoharness" / "tasks" / task_dir_name
+                if not task_dir_path.exists():
+                    missing_files.append(source_rel)
+                    reasons.append(f"Review source task directory '.autoharness/tasks/{task_dir_name}' does not exist")
+                    primary_source_missing = True
+                # Historical review documents record past critiques; do not parse content for code drift
+                ref_paths, ref_symbols = set(), set()
+            else:
+                # 2. Extract code and file references for rulings, lessons, and followups
+                ref_paths, ref_symbols = extract_code_references(d["content"], d["metadata"])
+
+            primary_file_missing = False
+            existing_py_paths: list[Path] = []
+            IGNORE_PATH_PREFIXES = (
+                ".cursor/", ".gemini/", ".claude/", ".kimi-code/", "KIMI_CODE_HOME/",
+                "evidence/", "answers/", "prompts/", "runs/", "tmp/", "temp/",
+            )
+
+            for p_str in ref_paths:
+                p_norm = p_str.replace("\\", "/").strip("`'\"()[],;:")
+                if p_norm.startswith(("http:", "https:", "ftp:", "#")) or any(p_norm.startswith(pfx) for pfx in IGNORE_PATH_PREFIXES):
+                    continue
+                # Handle line numbers e.g. foo.py:42
+                if ":" in p_norm:
+                    parts = p_norm.split(":")
+                    if not (len(parts[0]) == 1 and parts[0].isalpha()):  # Not Windows drive letter
+                        p_norm = parts[0]
+
+                # Bare filenames: skip unless known workspace root configuration files
+                if "/" not in p_norm and "\\" not in p_norm:
+                    if p_norm not in {"package.json", "setup.py", "setup.cfg", "pyproject.toml", "tox.ini", "Makefile"}:
+                        continue
+
+                try:
+                    p_path = (root / p_norm).resolve()
+                    if not p_path.is_relative_to(root):
+                        continue
+                except (ValueError, OSError):
+                    continue
+
+                if not p_path.exists():
+                    missing_files.append(p_norm)
+                    reasons.append(f"Referenced path '{p_norm}' does not exist on disk")
+                    if d["metadata"].get("file") == p_str or d["metadata"].get("path") == p_str:
+                        primary_file_missing = True
+                else:
+                    if p_path.suffix == ".py":
+                        existing_py_paths.append(p_path)
+                        if p_path not in ast_cache:
+                            ast_cache[p_path] = collect_file_ast_symbols(p_path)
+
+            # Check symbols against AST of existing Python files
+            explicit_symbols = set()
+            for k in ("symbol", "symbols", "function", "class", "method"):
+                v = d["metadata"].get(k)
+                if isinstance(v, str) and v.strip():
+                    explicit_symbols.add(v.strip())
+                elif isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, str) and item.strip():
+                            explicit_symbols.add(item.strip())
+
+            symbols_to_verify = explicit_symbols or (ref_symbols if existing_py_paths else set())
+
+            if existing_py_paths and symbols_to_verify:
+                all_py_symbols = set()
+                for py_path in existing_py_paths:
+                    all_py_symbols.update(ast_cache.get(py_path, set()))
+
+                for s in symbols_to_verify:
+                    if s not in all_py_symbols and not s.startswith("_"):
+                        missing_symbols.append(s)
+                        reasons.append(f"Symbol '{s}' not found in AST of referenced Python files")
+            elif explicit_symbols and not existing_py_paths:
+                for s in explicit_symbols:
+                    missing_symbols.append(s)
+                    reasons.append(f"Symbol '{s}' specified in metadata but referenced file is missing")
+
+            # 3. Check conflicts with other docs (prescriptive kinds only)
+            PRESCRIPTIVE_KINDS = {"ruling", "lesson", "policy", "rule"}
+            curr_d, curr_pol, curr_subs = polarities[idx]
+            if curr_d["kind"] in PRESCRIPTIVE_KINDS and curr_pol != "neutral":
+                for other_d, other_pol, other_subs in polarities:
+                    if other_d["id"] == curr_d["id"] or other_d["kind"] not in PRESCRIPTIVE_KINDS:
+                        continue
+                    if other_pol != "neutral" and other_pol != curr_pol:
+                        shared = (curr_subs & other_subs)
+                        curr_title_words = set(re.findall(r'[a-zA-Z_]\w{3,}', curr_d["title"].lower())) - COMMON_STOPWORDS
+                        other_title_words = set(re.findall(r'[a-zA-Z_]\w{3,}', other_d["title"].lower())) - COMMON_STOPWORDS
+                        if len(shared) >= 2 or (curr_title_words & other_title_words):
+                            subj_sample = ", ".join(sorted(shared)[:2])
+                            conflict_desc = f"Opposing directive with {other_d['id']} on topic '{subj_sample}'"
+                            if conflict_desc not in conflicts:
+                                conflicts.append(conflict_desc)
+                                reasons.append(f"Contradicts {other_d['id']} ({other_pol} vs {curr_pol}) on '{subj_sample}'")
+
+            if missing_files or missing_symbols or conflicts:
+                if d["kind"] == "review":
+                    is_orphaned = primary_source_missing
+                else:
+                    is_orphaned = primary_file_missing or (bool(ref_paths) and len(missing_files) == len(ref_paths) and not existing_py_paths)
+
+                status = "orphaned" if is_orphaned else "drifted"
+                drifted_item = {
+                    "id": d["id"],
+                    "kind": d["kind"],
+                    "title": d["title"],
+                    "source": d["source"],
+                    "status": status,
+                    "missing_files": sorted(set(missing_files)),
+                    "missing_symbols": sorted(set(missing_symbols)),
+                    "conflicts": sorted(set(conflicts)),
+                    "reasons": sorted(set(reasons)),
+                }
+                drifted_items.append(drifted_item)
+                if status == "orphaned":
+                    orphaned_ids.append(d["id"])
+            else:
+                valid_count += 1
+
+        pruned_count = 0
+        if prune_orphans and orphaned_ids:
+            was_in_tx = con.in_transaction
+            sp_name = f"sp_reconcile_{uuid.uuid4().hex[:12]}"
+            con.execute(f"SAVEPOINT {sp_name}")
+            try:
+                for oid in orphaned_ids:
+                    cur.execute("DELETE FROM memory_docs WHERE id = ?", (oid,))
+                    try:
+                        cur.execute("DELETE FROM vector_embeddings WHERE doc_id = ?", (oid,))
+                    except sqlite3.OperationalError:
+                        pass
+                con.execute(f"RELEASE SAVEPOINT {sp_name}")
+                if not was_in_tx:
+                    con.commit()
+                pruned_count = len(orphaned_ids)
+            except Exception:
+                con.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                con.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+
+        total_scanned = len(docs)
+        drifted_count = sum(1 for item in drifted_items if item["status"] == "drifted")
+        orphaned_count = len(orphaned_ids)
+        drift_rate = round((drifted_count + orphaned_count) / max(1, total_scanned), 4)
+
+        return {
+            "status": "ok",
+            "scanned_docs": total_scanned,
+            "valid_count": valid_count,
+            "drifted_count": drifted_count,
+            "orphaned_count": orphaned_count,
+            "pruned_count": pruned_count,
+            "drift_rate": drift_rate,
+            "drifted_items": drifted_items,
+        }
+    finally:
+        con.close()
+
+
+def format_memory_reconcile_report(report: dict[str, Any]) -> str:
+    """Format memory drift reconciliation results into an agent/human-readable Markdown report."""
+    total = report.get("scanned_docs", 0)
+    valid = report.get("valid_count", 0)
+    drifted = report.get("drifted_count", 0)
+    orphaned = report.get("orphaned_count", 0)
+    pruned = report.get("pruned_count", 0)
+    rate_pct = round(report.get("drift_rate", 0.0) * 100, 1)
+
+    overall = "DRIFT_DETECTED" if (drifted + orphaned > 0) else "HEALTHY"
+    badge = f"`{overall}`"
+
+    lines = [
+        "# AutoHarness Knowledge Reconciliation & Memory Drift Report",
+        "",
+        f"- **Audit Status:** {badge}",
+        f"- **Scanned Documents:** {total}",
+        f"- **Valid Memories:** {valid}",
+        f"- **Drifted / Stale:** {drifted}",
+        f"- **Orphaned:** {orphaned}",
+        f"- **Pruned Records:** {pruned}",
+        f"- **Drift Rate:** {rate_pct}%",
+        "",
+    ]
+
+    items = report.get("drifted_items", [])
+    if not items:
+        lines.append("All persistent memory records are consistent with ground-truth workspace files and AST symbols. No knowledge drift detected.")
+        return "\n".join(lines)
+
+    lines.append("## Drifted and Orphaned Memory Records")
+    lines.append("| ID | Kind | Title | Status | Issues |")
+    lines.append("|---|---|---|---|---|")
+    for item in items:
+        status_badge = f"`{item['status'].upper()}`"
+        reasons_summary = "; ".join(item.get("reasons", [])) or "Stale reference"
+        clean_title = (item.get("title") or item["id"]).replace("|", "\\|")
+        lines.append(f"| `{item['id']}` | `{item['kind']}` | {clean_title} | {status_badge} | {reasons_summary} |")
+
+    lines.append("")
+    lines.append("## Remediation Guidance")
+    if orphaned > 0 and pruned == 0:
+        lines.append("- Run `autoharness memory reconcile --prune-orphans` to purge broken orphaned references.")
+    if drifted > 0:
+        lines.append("- Review conflicting rulings or update stale symbol references to match current repository codebase.")
+
+    return "\n".join(lines)
+

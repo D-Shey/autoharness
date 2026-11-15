@@ -326,6 +326,11 @@ harness.
   `autoharness swarm verify [<plan_id>] [--json]` — audit DAG topology and validate declarative task artifact barriers (`expected_artifacts`, `barrier_assertions`, `allowed_paths`) and role boundaries (`researcher`, `coder`, `verifier`, `critic`). Blocks downstream branches immediately when an upstream barrier fails to prevent cascading agent hallucination.
   Exposed to agents via `harness_swarm_verify` Gateway MCP tool.
 
+- **Dynamic Memory Drift Detection & Knowledge Reconciliation (Google Research Harness² Model)**:
+  `autoharness memory reconcile [--prune-orphans] [--kind all|ruling|lesson|review|followup] [--json]` — audit SQLite persistent memory (`.autoharness/memory.db`) against ground-truth workspace files and AST symbols. Identifies orphaned records (deleted task directories or missing code files), stale references, and conflicting prescriptive policies with multi-token domain matching. When `--prune-orphans` is specified, permanently purges broken entries within an atomic database `SAVEPOINT` transaction while protecting historical review artifacts.
+  Exposed to agents via `harness_memory_reconcile` Gateway MCP tool.
+
+
 
 
 

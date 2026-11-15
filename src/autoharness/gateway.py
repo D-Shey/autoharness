@@ -73,6 +73,12 @@ META_TOOLS = [
          "mode": {"type": "string", "enum": ["hybrid", "fts", "vector"], "description": "Search mode: 'hybrid' (BM25 + vector RRF), 'fts' (BM25 only), or 'vector' (cosine only). Default: 'hybrid'."},
          "limit": {"type": "integer", "description": "Maximum number of ranked results to return (default: 5)."}},
                      "required": ["query"]}},
+    {"name": "harness_memory_reconcile",
+     "description": "Dynamic Knowledge Reconciliation & Memory Drift Detection (Google Research Harness² model): verify persistent memory (.autoharness/memory.db) against workspace files, AST symbols, and conflicting lessons, optionally pruning orphaned references.",
+     "inputSchema": {"type": "object", "properties": {
+         "prune_orphans": {"type": "boolean", "description": "Whether to permanently prune orphaned memory items whose files or tasks no longer exist (default: false)."},
+         "kind": {"type": "string", "enum": ["all", "ruling", "lesson", "review", "followup", "swarm_task"], "description": "Filter by memory kind (default: 'all')."},
+         "raw_json": {"type": "boolean", "description": "Return raw JSON dictionary instead of formatted Markdown report (default: false)."}}}},
     {"name": "harness_codemap",
      "description": "Generate or search a compact multi-language AST Symbol Map (Python, JS, TS, Java classes, methods, functions, signatures, docstrings) for the codebase, reducing token count by 80-90% compared to reading full files.",
      "inputSchema": {"type": "object", "properties": {
@@ -586,6 +592,18 @@ class Gateway:
                 score_str = f"RRF: {r.get('rrf_score')}" if "rrf_score" in r else (f"Vector: {r.get('vector_score')}" if "vector_score" in r else f"BM25: {r.get('score')}")
                 formatted.append(f"[{r['kind'].upper()}] {r['title']} (source: {r['source']}, {score_str}):\n{r['content']}")
             return _text("\n\n---\n\n".join(formatted))
+        if name == "harness_memory_reconcile":
+            from autoharness import memory
+            if not self.project:
+                return _text("No project root configured for memory reconciliation.")
+            prune = bool(args.get("prune_orphans", False))
+            kind = args.get("kind")
+            raw_json = bool(args.get("raw_json", False))
+            res = memory.reconcile_memory_drift(self.project, prune_orphans=prune, kind=kind)
+            if raw_json:
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            report = memory.format_memory_reconcile_report(res)
+            return _text(report)
         if name == "harness_codemap":
             from autoharness import codemap
             rel_path = args.get("path") or "."

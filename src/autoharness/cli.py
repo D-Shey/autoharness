@@ -1742,6 +1742,15 @@ def cmd_memory(args, project, catalog) -> int:
             con.close()
         out({"status": "ok", "query": args.query, "mode": getattr(args, "mode", "hybrid"), "kind": args.kind, "matches_count": len(results), "results": results})
         return 0
+    elif args.action == "reconcile":
+        prune = getattr(args, "prune_orphans", False)
+        result = memory.reconcile_memory_drift(project.root, prune_orphans=prune, kind=getattr(args, "kind", "all"))
+        if getattr(args, "json", False):
+            out(result)
+        else:
+            report_md = memory.format_memory_reconcile_report(result)
+            sys.stdout.write(report_md + "\n")
+        return 0
     else:  # status
         con = memory.get_memory_db(project.root)
         try:
@@ -4056,12 +4065,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--settings", help="explicit settings file (Claude: settings.json, agy: hooks.json, kimi: config.toml)")
     s.add_argument("--remove", action="store_true", help="take the hook out again")
     s = sub.add_parser("agents", help="supported agents and where they keep MCP servers and skills")
-    s = sub.add_parser("memory", help="in-process SQLite FTS5 persistent memory with BM25 ranking and LEANN vector search")
-    s.add_argument("action", choices=["search", "index", "status"])
+    s = sub.add_parser("memory", help="in-process SQLite FTS5 persistent memory with BM25 ranking, LEANN vector search, and dynamic drift reconciliation")
+    s.add_argument("action", choices=["search", "index", "status", "reconcile"])
     s.add_argument("query", nargs="?", default="", help="search term")
     s.add_argument("--kind", choices=["all", "ruling", "lesson", "review", "followup", "swarm_task"], default="all")
     s.add_argument("--mode", choices=["hybrid", "fts", "vector"], default="hybrid", help="search mode (default: hybrid RRF)")
     s.add_argument("--limit", type=int, default=5)
+    s.add_argument("--prune-orphans", action="store_true", help="permanently prune orphaned and broken memory references")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     s = sub.add_parser("codemap", help="AST Symbol Map and structural code index")
     s.add_argument("path", nargs="?", default=".", help="file or directory path")
     s.add_argument("--query", "-q", help="search for class, method, or function symbols")
