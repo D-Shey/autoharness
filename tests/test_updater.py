@@ -23,9 +23,9 @@ def test_parse_semver():
 
 def test_check_for_updates_release_api_newer(monkeypatch):
     fake_release = {
-        "tag_name": "v1.1.0",
-        "html_url": "https://github.com/D-Shey/autoharness/releases/tag/v1.1.0",
-        "body": "New features in 1.1.0",
+        "tag_name": "v1.2.0",
+        "html_url": "https://github.com/D-Shey/autoharness/releases/tag/v1.2.0",
+        "body": "New features in 1.2.0",
     }
     raw_bytes = json.dumps(fake_release).encode("utf-8")
 
@@ -43,7 +43,7 @@ def test_check_for_updates_release_api_newer(monkeypatch):
 
     res = updater.check_for_updates("D-Shey/autoharness")
     assert res["status"] == "ok"
-    assert res["latest_version"] == "1.1.0"
+    assert res["latest_version"] == "1.2.0"
     assert res["update_available"] is True
     assert res["source"] == "github_releases"
     assert "New features" in res["notes"]
@@ -113,13 +113,13 @@ def test_check_for_updates_network_error(monkeypatch):
     assert res["update_available"] is False
 
 
-def test_version_bump_is_1_0_0():
-    """Verify that autoharness version is bumped to 1.0.0 in package and pyproject.toml."""
-    assert __version__ == "1.0.0"
+def test_version_bump_is_1_1_0():
+    """Verify that autoharness version is bumped to 1.1.0 in package and pyproject.toml."""
+    assert __version__ == "1.1.0"
     pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
     assert pyproject_path.is_file()
     text = pyproject_path.read_text("utf-8")
-    assert 'version = "1.0.0"' in text
+    assert 'version = "1.1.0"' in text
 
 
 def test_detect_install_mode(tmp_path: Path):
@@ -168,7 +168,7 @@ def test_perform_update_dry_run_runner():
 
 def test_cli_update_command(monkeypatch, capsys):
     fake_release = {
-        "tag_name": "v1.0.0",
+        "tag_name": f"v{__version__}",
         "html_url": "https://github.com/D-Shey/autoharness",
         "body": "Up to date",
     }
@@ -187,7 +187,7 @@ def test_cli_update_command(monkeypatch, capsys):
     assert code == 0
     out_check = json.loads(capsys.readouterr().out)
     assert out_check["status"] == "ok"
-    assert out_check["latest_version"] == "1.0.0"
+    assert out_check["latest_version"] == __version__
     assert out_check["update_available"] is False
 
     # 2. autoharness update (already up to date)
@@ -199,9 +199,9 @@ def test_cli_update_command(monkeypatch, capsys):
 
     # 3. autoharness update when update available without --yes requires approval (code 3)
     fake_newer = {
-        "tag_name": "v1.1.0",
+        "tag_name": "v1.2.0",
         "html_url": "https://github.com/D-Shey/autoharness",
-        "body": "Version 1.1.0 available",
+        "body": "Version 1.2.0 available",
     }
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=6.0: FakeResponse(json.dumps(fake_newer).encode("utf-8")))
     monkeypatch.setattr(updater, "perform_update", lambda **kwargs: {"status": "ok", "mocked": True})
