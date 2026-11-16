@@ -14,6 +14,7 @@ each adapter translates it into the agent's native config on write.
     agy       .agents/mcp_config.json    .agents/skills
     cursor    .cursor/mcp.json           .cursor/skills
     kimi      .kimi-code/mcp.json        .agents/skills
+    opencode  opencode.json              .opencode/skills
 
 Antigravity CLI (agy) shares `.agents/skills` with Codex, so the autoharness skill
 installed there speaks to both. Its user-level skills live in `~/.gemini/config/skills`:
@@ -215,6 +216,31 @@ def to_kimi(cfg: dict) -> tuple[dict, list[str]]:
     return out, warnings
 
 
+def to_opencode(cfg: dict) -> tuple[dict, list[str]]:
+    """OpenCode 2: local servers use `type: 'local'` and `command: ['cmd', 'arg1', ...]`;
+    remote servers use `type: 'remote'` and `url`."""
+    out: dict = {}
+    if "url" in cfg:
+        out["type"] = "remote"
+        out["url"] = cfg["url"]
+        if cfg.get("headers"):
+            out["headers"] = dict(cfg["headers"])
+        return out, []
+
+    out["type"] = "local"
+    cmd = cfg["command"]
+    args = cfg.get("args", [])
+    if isinstance(cmd, list):
+        out["command"] = list(cmd) + list(args)
+    elif args:
+        out["command"] = [cmd] + list(args)
+    else:
+        out["command"] = [cmd]
+    if cfg.get("env"):
+        out["env"] = dict(cfg["env"])
+    return out, []
+
+
 # --- MCP config stores ------------------------------------------------------
 
 def _read_json_file(path: Path) -> dict:
@@ -240,19 +266,20 @@ def _cleanup(path: Path, created_dir: bool) -> None:
 
 
 class JsonMcpStore:
-    """`{"mcpServers": {...}}` inside a JSON file that may hold other settings."""
+    """`{"mcpServers": {...}}` (or custom key like `{"mcp": {...}}`) inside a JSON file that may hold other settings."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, key: str = "mcpServers"):
         self.path = path
+        self.key = key
 
     def has(self, name: str) -> bool:
-        return name in _read_json_file(self.path).get("mcpServers", {})
+        return name in _read_json_file(self.path).get(self.key, {})
 
     def names(self) -> list[str]:
         if not self.path.exists():
             return []
         try:
-            return list(_read_json_file(self.path).get("mcpServers", {}).keys())
+            return list(_read_json_file(self.path).get(self.key, {}).keys())
         except Exception:
             return []
 
@@ -261,13 +288,13 @@ class JsonMcpStore:
 
     def preview_add(self, name: str, native: dict) -> str:
         data = _read_json_file(self.path)
-        data.setdefault("mcpServers", {})[name] = native
+        data.setdefault(self.key, {})[name] = native
         return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
     def remove(self, name: str, *, created_file: bool, created_dir: bool) -> None:
         data = _read_json_file(self.path)
-        data.get("mcpServers", {}).pop(name, None)
-        if created_file and not data.get("mcpServers") and set(data) <= {"mcpServers"}:
+        data.get(self.key, {}).pop(name, None)
+        if created_file and not data.get(self.key) and set(data) <= {self.key}:
             _cleanup(self.path, created_dir)
         elif self.path.exists():
             _write_text(self.path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
@@ -384,13 +411,14 @@ class Agent:
     reload_hint: str
     user_mcp_file: str = ""       # relative to the home directory: servers every project gets ("" unknown)
     user_mcp_home_env: str = ""   # env var relocating the config root that contains user_mcp_file (e.g. KIMI_CODE_HOME)
+    mcp_key: str = "mcpServers"
 
     def mcp_path(self, root: Path) -> Path:
         return root / self.mcp_file
 
     def mcp_store(self, root: Path):
         path = self.mcp_path(root)
-        return TomlMcpStore(path) if path.suffix == ".toml" else JsonMcpStore(path)
+        return TomlMcpStore(path) if path.suffix == ".toml" else JsonMcpStore(path, key=self.mcp_key)
 
     def skills_path(self, root: Path) -> Path:
         return root / self.skills_dir
@@ -410,7 +438,7 @@ class Agent:
         if not self.user_mcp_file:
             return None
         path = self.user_mcp_path()
-        return TomlMcpStore(path) if path.suffix == ".toml" else JsonMcpStore(path)
+        return TomlMcpStore(path) if path.suffix == ".toml" else JsonMcpStore(path, key=self.mcp_key)
 
 
 _GEMINI_HINT = "restart {title} (or run /mcp refresh) so it picks up the new server"
@@ -434,6 +462,9 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
           "restart Cursor (or refresh in Cursor Settings > MCP) so it picks up the new server", ".cursor/mcp.json"),
     Agent("kimi", "Kimi Code", ".kimi-code/mcp.json", ".agents/skills", ".agents/skills", to_kimi,
           "restart Kimi Code (or run /mcp) so it picks up the new server", ".kimi-code/mcp.json", "KIMI_CODE_HOME"),
+    Agent("opencode", "OpenCode", "opencode.json", ".opencode/skills", ".config/opencode/skills", to_opencode,
+          "restart OpenCode (or run /mcp) so it picks up the new server", ".config/opencode/opencode.json",
+          mcp_key="mcp"),
 ]}
 
 DEFAULT_AGENT = "claude"
@@ -494,9 +525,10 @@ def sharing_skills_dir(agent: Agent, user: bool = False) -> list[Agent]:
     return [a for a in AGENTS.values() if key(a) == key(agent)]
 
 
-# Env vars the agents set for the shell commands they run. agy sets ANTIGRAVITY_AGENT
-# per command and comes first: it inherits CLAUDECODE when started from Claude Code.
-_DETECT = [("ANTIGRAVITY_AGENT", "agy"), ("CLAUDECODE", "claude"), ("GEMINI_CLI", "gemini"), ("QWEN_CODE", "qwen"),
+# Env vars the agents set for the shell commands they run. OpenCode sets OPENCODE/OPENCODE_SESSION_ID,
+# agy sets ANTIGRAVITY_AGENT per command, and Claude Code sets CLAUDECODE.
+_DETECT = [("OPENCODE", "opencode"), ("OPENCODE_SESSION_ID", "opencode"),
+           ("ANTIGRAVITY_AGENT", "agy"), ("CLAUDECODE", "claude"), ("GEMINI_CLI", "gemini"), ("QWEN_CODE", "qwen"),
            ("GIGACODE_CLI", "gigacode"), ("CODEX_SANDBOX", "codex"), ("CODEX_THREAD_ID", "codex"), ("CURSOR_AGENT", "cursor")]
 
 
@@ -512,7 +544,7 @@ def detect(environ: dict | None = None) -> str | None:
 
 
 # The id of the agent session a shell command runs in, the same id its hooks receive as session_id
-_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID", "cursor": "CURSOR_CONVERSATION_ID", "agent": "CURSOR_CONVERSATION_ID"}
+_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID", "cursor": "CURSOR_CONVERSATION_ID", "agent": "CURSOR_CONVERSATION_ID", "opencode": "OPENCODE_SESSION_ID"}
 
 
 def session_id(environ: dict | None = None, agent: str | None = None) -> str:

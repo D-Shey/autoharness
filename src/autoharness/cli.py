@@ -1250,12 +1250,44 @@ def cmd_brief(args, project, catalog):
             "searched: <queries>`. Search the web (and the docs, "
             "papers, repos, tutorials of the field) for how others solved it: the algorithm, the workflow, the "
             "pitfalls. Only if nothing usable turned up: `nothing usable; searched: <queries>`.")
-    if evidence.requirements(catalog, task).get("media") and not (args.fidelity or "").strip():
+    reqs = evidence.requirements(catalog, task)
+    is_media = bool(reqs.get("media"))
+    if is_media and not (args.fidelity or "").strip():
         raise HarnessError(
             "this task is judged by eye: name the level it is judged at with --fidelity (e.g. \"stylised vector "
             "poster: composition, palette, mood and poses read at a glance; not photographic likeness\"). "
             "Without it a critic judges against the reference itself, which a different medium never reaches, "
             "and every round stays major")
+
+    components = (getattr(args, "components", None) or "").strip()
+    if is_media and (not components or components.lower().startswith("none")):
+        raise HarnessError(
+            "this task produces visual assets and requires decomposition: "
+            "--components '<comp1>: <what it does / how to verify alone>; <comp2>: ...' is mandatory. "
+            "Decompose the task into 2-4 primary isolated components (e.g. background, character silhouette, lighting/effects). "
+            "Monolithic one-pass builds are strictly forbidden.")
+
+    techniques = (getattr(args, "techniques", None) or "").strip()
+    if is_media and (not techniques or techniques.lower().startswith("none")):
+        raise HarnessError(
+            "this task produces visual assets: professional craftsmanship contracts are mandatory. "
+            "--techniques '<technique: principle; ...>' is required (e.g. multi-layer-compositing: separate lighting and ambient; "
+            "volumetric-gradients: no flat fills; no-raster-embeds: pure vector primitives and procedural filters). "
+            "Zero tolerance for amateur shortcuts.")
+
+    if is_media or reqs.get("reference"):
+        from autoharness import stencil
+        stencils_dir = stencil.get_stencils_dir(project.root)
+        scanned_stencils = list(stencils_dir.glob("*.json")) if stencils_dir.is_dir() else []
+        refs_dir = project.root / "refs"
+        refs_found = [f for f in refs_dir.iterdir() if f.is_file() and not f.name.startswith(".")] if refs_dir.is_dir() else []
+        if refs_found and not scanned_stencils:
+            ref_names = ", ".join(f.name for f in refs_found[:3])
+            raise HarnessError(
+                f"reference files found in refs/ ({ref_names}), but no structural stencils have been scanned. "
+                "Run `autoharness stencil scan refs/<file>` to extract geometric landmarks, contours, and "
+                "structural invariants into .autoharness/stencils/ before recording the brief."
+            )
     expects = args.expects.strip()
     if not EXPECTS_ITEM.search(expects) and not re.match(r"none\s*:\s*\S", expects, re.IGNORECASE):
         raise HarnessError(EXPECTS_HOW)
@@ -1898,6 +1930,83 @@ def stale_skills(project) -> list[str]:
     return stale
 
 
+def _configure_opencode_autonomous_directives(user: bool, project_root: Path | None = None) -> list[str]:
+    """Ensure OpenCode has ambient instructions to run AutoHarness autonomously for agentic software development."""
+    configured = []
+    directive = (
+        "# OpenCode AutoHarness Autonomous Directives\n\n"
+        "<EXTREMELY_IMPORTANT>\n"
+        "## CRITICAL MANDATORY BEHAVIOR: AUTOHARNESS AUTONOMOUS EXECUTION\n"
+        "You are paired with the AutoHarness engineering workflow for autonomous agentic software development.\n"
+        "You MUST ALWAYS autonomously use AutoHarness on Turn 1 of any non-trivial user task (features, bugfixes, refactoring, systems).\n"
+        "Do NOT wait for the user to say \"Use autoharness\". Run it immediately:\n"
+        "`autoharness --agent opencode init \"<user's task verbatim>\" --mode full`\n\n"
+        "### Strict Software Engineering & Craftsmanship Invariants:\n"
+        "1. **Architectural Decomposition (--components)**:\n"
+        "   Every non-trivial software engineering deliverable MUST be decomposed into 2-4 decoupled, independently testable architectural components / modules / layers in `autoharness brief`:\n"
+        "   `--components \"<comp1>: <responsibility & interface> - verify <test/assertion>; <comp2>: ...\"`\n"
+        "   (e.g., C1: domain models & persistence schema; C2: core business logic / service layer; C3: API endpoints / CLI commands; C4: integration test suite).\n"
+        "   NEVER build a monolithic deliverable in a single pass. You MUST build, test, and register each component in isolation\n"
+        "   (`autoharness evidence add <file> --kind component --for C1`) before full integration.\n\n"
+        "2. **Craftsmanship Contracts (--techniques)**:\n"
+        "   You MUST declare explicit professional engineering craftsmanship standards and invariants in `autoharness brief`:\n"
+        "   `--techniques \"<tech1>: <principle & enforcement>; <tech2>: ...\"`\n"
+        "   (e.g., clean-architecture: domain core has zero external framework dependencies; strict-type-contracts: 100% typed with mypy/tsc strict; boundary-schema-validation: all inputs validated via schemas; zero-mock-integration-tests: tests verify against real state or in-memory fixtures; idempotent-mutations: mutating operations safe to retry; structured-errors: typed domain exceptions).\n\n"
+        "3. **Structural Stencils & Invariants (stencil scan)**:\n"
+        "   Use `autoharness stencil scan` to extract structural invariants whenever reference code, API schemas, AST structures, or specifications exist:\n"
+        "   - Python/TypeScript AST skeletons: `autoharness stencil scan <file.py> --mode ast`\n"
+        "   - JSON Schemas / API contracts: `autoharness stencil scan <spec.json> --mode schema`\n"
+        "   - Visual / UI wireframes (if media): `autoharness stencil scan <ref.png> --mode contour`\n"
+        "   Verify structural conformance with `autoharness stencil check <stencil-id> <target>`.\n\n"
+        "4. **Rigorous Verification & Test-Driven Discipline**:\n"
+        "   Every check must execute real assertions with pass/fail exit codes (`autoharness verify run \"<test command>\"`). Hollow checks or echo commands without assertions are rejected.\n\n"
+        "5. **Independent Critic Review**:\n"
+        "   Before declaring any task done, request independent review via `autoharness critic`. Resolve all findings before `autoharness teardown`.\n"
+        "</EXTREMELY_IMPORTANT>\n"
+    )
+    if user:
+        cfg_dir = Path.home() / ".config" / "opencode"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        instr_file = cfg_dir / "instructions.md"
+        instr_file.write_text(directive, encoding="utf-8")
+        configured.append(str(instr_file))
+        agents_file = cfg_dir / "AGENTS.md"
+        agents_file.write_text(directive, encoding="utf-8")
+        configured.append(str(agents_file))
+
+        opencode_json = cfg_dir / "opencode.json"
+        data = {}
+        if opencode_json.exists():
+            try:
+                data = json.loads(opencode_json.read_text("utf-8") or "{}")
+            except Exception:
+                data = {}
+        instructions_list = data.get("instructions", [])
+        instr_str = str(instr_file).replace("\\", "/")
+        if instr_str not in instructions_list:
+            instructions_list.append(instr_str)
+            data["instructions"] = instructions_list
+            opencode_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            configured.append(str(opencode_json))
+    elif project_root:
+        agents_file = project_root / "AGENTS.md"
+        agents_file.write_text(directive, encoding="utf-8")
+        configured.append(str(agents_file))
+        opencode_json = project_root / "opencode.json"
+        if opencode_json.exists():
+            try:
+                data = json.loads(opencode_json.read_text("utf-8") or "{}")
+                instructions_list = data.get("instructions", [])
+                if "AGENTS.md" not in instructions_list:
+                    instructions_list.append("AGENTS.md")
+                    data["instructions"] = instructions_list
+                    opencode_json.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                    configured.append(str(opencode_json))
+            except Exception:
+                pass
+    return configured
+
+
 def cmd_install_skill(args, project, catalog):
     names = list(agents.AGENTS) if args.all else [project.agent.name]
     installed = {}
@@ -1908,6 +2017,8 @@ def cmd_install_skill(args, project, catalog):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(render_skill(agent, args.user), "utf-8")
         installed[name] = str(dest)
+        if name == "opencode":
+            _configure_opencode_autonomous_directives(args.user, project.root if project else None)
     out({"status": "ok", "installed": installed})
     return 0
 

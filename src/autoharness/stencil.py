@@ -465,7 +465,16 @@ def scan_stencil(
     if not source.is_file():
         return {"status": "error", "error": f"Source file not found: {source}"}
 
-    proj = project_root or (getattr(task, "project", None).root if getattr(task, "project", None) else (task.dir.parent.parent.parent if task else Path.cwd()))
+    proj = project_root
+    if not proj and task:
+        proj = getattr(task, "project", None).root if getattr(task, "project", None) else task.dir.parent.parent.parent
+    if not proj:
+        for parent in source.resolve().parents:
+            if (parent / ".autoharness").exists():
+                proj = parent
+                break
+    if not proj:
+        proj = Path.cwd()
     stencils_dir = get_stencils_dir(proj)
 
     existing = list(stencils_dir.glob("*.json"))

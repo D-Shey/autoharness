@@ -108,3 +108,44 @@ def test_brief_with_techniques_records_and_injects_into_critic_prompt(project, c
     assert "idempotent-upsert" in prompt_text
     assert "Commercial production standard & zero-tolerance for amateur shortcuts (calligraphy principle)" in prompt_text
     assert "finished commercial deliverable" in prompt_text
+
+
+def test_visual_brief_requires_components_techniques_and_stencils(project, capsys):
+    """Ensure media/visual tasks strictly enforce --components, --techniques, and stencil scanning."""
+    ah(capsys, project, "init", "Draw a scene from the movie Blade Runner 2049 using SVG graphics")
+    ah(capsys, project, "search", "skill", "test")
+
+    # Missing components -> fails
+    base_brief = [
+        "brief", "--goal", "movie scene SVG", "--inputs", "scene stills",
+        "--domains", TEST_DOMAINS, "--method", TEST_METHOD,
+        "--expects", "none: settled", "--constraints", "none",
+        "--verify", "visual render", "--candidates", "none", "--gaps", "none: tools cover it",
+        "--fidelity", "stylised vector poster"
+    ]
+    code, res = ah(capsys, project, *base_brief)
+    assert code == 1 and "requires decomposition" in res["error"]
+
+    # Missing techniques -> fails
+    brief_with_comp = base_brief + ["--components", "catwalk: layout; hologram: lighting"]
+    code, res = ah(capsys, project, *brief_with_comp)
+    assert code == 1 and "craftsmanship contracts" in res["error"]
+
+    # Missing stencil scan when refs/ exist -> fails
+    refs_dir = project.root / "refs"
+    refs_dir.mkdir()
+    (refs_dir / "ref.jpg").write_text("fake image", encoding="utf-8")
+    brief_with_tech = brief_with_comp + ["--techniques", "multi-layer-compositing: separate lighting and ambient"]
+    code, res = ah(capsys, project, *brief_with_tech)
+    assert code == 1 and "no structural stencils have been scanned" in res["error"]
+
+    # Once stencil is scanned -> succeeds!
+    stencils_dir = project.root / ".autoharness" / "stencils"
+    stencils_dir.mkdir(parents=True, exist_ok=True)
+    (stencils_dir / "stc_ref_01.json").write_text("{}", encoding="utf-8")
+    code, res = ah(capsys, project, *brief_with_tech)
+    assert code == 0, res
+    b = project.task().info()["brief"]
+    assert "components" in b
+    assert "techniques" in b
+

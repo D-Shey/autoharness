@@ -589,6 +589,9 @@ def test_detect_agent_from_environment():
     # Kimi Code sets no env marker for subprocesses; the explicit override and AI_AGENT still work
     assert agents.detect({"AUTOHARNESS_AGENT": "kimi"}) == "kimi"
     assert agents.detect({"AI_AGENT": "kimi-code_0.28"}) == "kimi"
+    assert agents.detect({"OPENCODE": "1"}) == "opencode"
+    assert agents.detect({"OPENCODE_SESSION_ID": "sess-123"}) == "opencode"
+    assert agents.detect({"AI_AGENT": "opencode_2.3.0"}) == "opencode"
     assert agents.detect({}) is None
 
 
@@ -605,6 +608,7 @@ def test_install_skill_for_all_agents(tmp_path, capsys):
     assert "{{" not in shared
     assert ".gigacode/settings.json" in (tmp_path / ".gigacode" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
     assert ".cursor/mcp.json" in (tmp_path / ".cursor" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+    assert "opencode.json" in (tmp_path / ".opencode" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
     code, res = cli_json(capsys, "--project", str(tmp_path), "init", "t")
     assert code == 0 and not res.get("warnings")
 
@@ -685,6 +689,73 @@ def test_cursor_config_created_by_task_is_removed(tmp_path):
     assert (tmp_path / ".cursor" / "mcp.json").exists()
     task.teardown("remove")
     assert not (tmp_path / ".cursor").exists()
+
+
+def test_to_opencode_translation():
+    remote = {
+        "type": "http",
+        "url": "https://api.example.com/mcp",
+        "headers": {"Authorization": "Bearer token", "X-User": "123"}
+    }
+    native, warnings = agents.to_opencode(remote)
+    assert warnings == []
+    assert native == {
+        "type": "remote",
+        "url": "https://api.example.com/mcp",
+        "headers": {"Authorization": "Bearer token", "X-User": "123"}
+    }
+
+    stdio = {
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+        "env": {"MODE": "ro"}
+    }
+    native, warnings = agents.to_opencode(stdio)
+    assert warnings == []
+    assert native == {
+        "type": "local",
+        "command": ["uvx", "mcp-server-fetch"],
+        "env": {"MODE": "ro"}
+    }
+
+    simple = {"command": "git-mcp"}
+    native, warnings = agents.to_opencode(simple)
+    assert native == {"type": "local", "command": ["git-mcp"]}
+
+
+def test_opencode_writes_mcp_config_and_keeps_user_settings(tmp_path):
+    project = Project(tmp_path, "opencode")
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"model": "deepseek/deepseek-chat", "mcp": {"mine": {"type": "local", "command": ["x"]}}}), "utf-8")
+    task = project.init_task("t")
+    task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
+    data = json.loads(cfg.read_text())
+    assert data["model"] == "deepseek/deepseek-chat"
+    assert data["mcp"]["mine"] == {"type": "local", "command": ["x"]}
+    assert data["mcp"]["fetch"] == {"type": "local", "command": ["uvx", "mcp-server-fetch"]}
+    task.add_skill("acme/skills@demo", trust={}, stage=fake_stager(SAFE_SKILL))
+    assert (tmp_path / ".opencode" / "skills" / "demo" / "SKILL.md").exists()
+
+    task.teardown("remove")
+    after = json.loads(cfg.read_text())
+    assert "fetch" not in after.get("mcp", {})
+    assert after["mcp"]["mine"] == {"type": "local", "command": ["x"]}
+    assert after["model"] == "deepseek/deepseek-chat"
+
+
+def test_opencode_config_created_by_task_is_removed(tmp_path):
+    task = Project(tmp_path, "opencode").init_task("t")
+    task.add_mcp("fetch", {"command": "uvx", "args": ["mcp-server-fetch"]}, source="catalog", trust={}, permissions={})
+    assert (tmp_path / "opencode.json").exists()
+    task.teardown("remove")
+    assert not (tmp_path / "opencode.json").exists()
+
+
+def test_opencode_user_skill_is_its_own(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(agents.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert cli.main(["--project", str(tmp_path), "--agent", "opencode", "install-skill", "--user"]) == 0
+    skill = (tmp_path / "home" / ".config" / "opencode" / "skills" / "autoharness" / "SKILL.md").read_text("utf-8")
+    assert "autoharness --agent opencode init" in skill and "`opencode.json`: tell the user to restart OpenCode" in skill
 
 
 def test_cursor_user_skill_installation(tmp_path, monkeypatch, capsys):
@@ -1680,7 +1751,9 @@ def tool(capsys, monkeypatch, project, name, sid="s1", **tool_input):
 BRIEF = ["--goal", "matches the film frame", "--inputs", "stills of the scene", "--domains", TEST_DOMAINS, "--method", TEST_METHOD, "--expects", "none: the task settles every choice", "--constraints", "none",
          "--verify", "render and compare side by side", "--candidates", "image-art: skip, it is a generator",
          "--gaps", "none: a browser and the shell cover every capability",
-         "--fidelity", "stylised vector poster, not photographic"]
+         "--fidelity", "stylised vector poster, not photographic",
+         "--components", "mark: isolated emblem; wordmark: letterforms and spacing",
+         "--techniques", "vector-purity: pure SVG primitives; scalable-geometry: responsive viewBox"]
 
 
 def brief(capsys, project, *extra):

@@ -763,9 +763,18 @@ def cmd_hook(args, project, catalog):
                 return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
             if reason := _writes_records(tool, tool_input, project.root):
                 return _deny(reason)
-            if active and not foreign and (server := MCP_TOOL.match(tool)) and server[1] != GATEWAY_NAME:
+            server_name = None
+            if (server := MCP_TOOL.match(tool)) and server[1] != GATEWAY_NAME:
+                server_name = server[1]
+            elif tool == "call_mcp_tool" and isinstance(tool_input, dict) and tool_input.get("ServerName"):
+                server_name = tool_input["ServerName"]
+            elif tool.startswith("mcp_") and not tool.startswith("mcp__"):
+                parts = tool.split("_")
+                if len(parts) >= 3:
+                    server_name = parts[1]
+            if active and not foreign and server_name and server_name != GATEWAY_NAME:
                 from autoharness.gateway import note_call
-                note_call(project.root, server[1])   # the gateway counts its own servers' calls
+                note_call(project.root, server_name)   # the gateway counts its own servers' calls
             from autoharness.cli import _skills_not_installed
             if (state == "done" and active and not foreign and task_info.get("mode", "full") != "light"
                     and task_info.get("brief") and GATED_TOOLS.match(tool) and not MCP_TOOL.match(tool)
