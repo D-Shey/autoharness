@@ -159,3 +159,58 @@ def test_extract_image_contours(tmp_path):
     check_res = stencil.check_stencil(out_json, target_svg)
     assert check_res["status"] == "ok"
     assert check_res["conforms"] is True
+
+
+def test_scan_stencil_lifecycle(tmp_path):
+    project_root = tmp_path / "my_proj"
+    project_root.mkdir()
+
+    # 1. JSON reference scan
+    config_file = project_root / "config.json"
+    config_file.write_text(json.dumps({"app": "gateway", "port": 8080, "debug": True}), encoding="utf-8")
+
+    scan_res = stencil.scan_stencil(config_file, project_root=project_root)
+    assert scan_res["status"] == "ok"
+    assert "stc_config_" in scan_res["stencil_id"]
+    assert scan_res["mode"] == "schema"
+    assert Path(scan_res["file"]).is_file()
+
+    # 2. List stencils
+    list_res = stencil.list_stencils(project_root)
+    assert list_res["status"] == "ok"
+    assert list_res["count"] >= 1
+    assert any(s["id"] == scan_res["stencil_id"] for s in list_res["stencils"])
+
+    # 3. Show stencil
+    show_res = stencil.show_stencil(scan_res["stencil_id"], project_root)
+    assert show_res["status"] == "ok"
+    assert show_res["stencil"]["id"] == scan_res["stencil_id"]
+    assert "properties" in show_res["stencil"]["blueprint"]
+
+    # 4. Check stencil conformance
+    valid_target = project_root / "target_config.json"
+    valid_target.write_text(json.dumps({"app": "runner", "port": 9000, "debug": False}), encoding="utf-8")
+    chk = stencil.check_stencil(scan_res["stencil_id"], valid_target, project_root=project_root)
+    assert chk["status"] == "ok"
+    assert chk["conforms"] is True
+
+
+def test_evidence_reference_auto_scans_stencil(tmp_path):
+    proj_dir = tmp_path / "evidence_proj"
+    proj_dir.mkdir()
+    project = Project(proj_dir)
+    task = project.init_task("test task")
+
+    ref_doc = proj_dir / "architecture.json"
+    ref_doc.write_text(json.dumps({"service": "auth", "tokens": ["jwt", "opaque"], "timeout": 30}), encoding="utf-8")
+
+    item = evidence.add(task, ref_doc, "reference", note="Core auth architecture spec")
+    assert item["kind"] == "reference"
+    assert "stencil_id" in item
+    assert item["stencil_mode"] == "schema"
+    assert Path(item["stencil_file"]).is_file()
+
+    # Verify stencil is in .autoharness/stencils/
+    stencils_dir = proj_dir / ".autoharness" / "stencils"
+    assert any(f.name.endswith(".json") for f in stencils_dir.glob("*.json"))
+

@@ -362,6 +362,27 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
         item["same_as"] = twin["n"]
     task._update_info(evidence=items + [item])
     task.log(f"evidence #{item['n']}: {kind} `{path.name}`" + (f" ({note})" if note else ""))
+
+    # Domain-agnostic automatic structural stencil scan on any reference
+    if kind == "reference":
+        try:
+            from autoharness import stencil
+            proj_root = getattr(task, "project", None).root if getattr(task, "project", None) else task.dir.parent.parent.parent
+            s_res = stencil.scan_stencil(dest, project_root=proj_root, mode="auto", task=task)
+            if s_res.get("status") == "ok":
+                item["stencil_id"] = s_res["stencil_id"]
+                item["stencil_mode"] = s_res["mode"]
+                item["stencil_file"] = s_res["file"]
+                cur_items = task.info().get("evidence", [])
+                for it in cur_items:
+                    if it.get("n") == item["n"]:
+                        it["stencil_id"] = s_res["stencil_id"]
+                        it["stencil_mode"] = s_res["mode"]
+                        it["stencil_file"] = s_res["file"]
+                task._update_info(evidence=cur_items)
+        except Exception:
+            pass
+
     return item
 
 

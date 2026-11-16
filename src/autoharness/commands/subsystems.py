@@ -628,13 +628,14 @@ def cmd_compact(args, project, catalog) -> int:
 
 def cmd_stencil(args, project, catalog) -> int:
     from autoharness import evidence, stencil
-    action = getattr(args, "action", "extract") or "extract"
+    action = getattr(args, "action", "scan") or "scan"
     task = project.task() if project and project.active_id() else None
+    proj_root = project.root if project else Path.cwd()
 
-    if action == "extract":
+    if action in ("scan", "extract"):
         src_str = getattr(args, "source", "") or ""
         if not src_str:
-            out({"status": "error", "error": "Source file required for extraction"})
+            out({"status": "error", "error": "Source file required for stencil scan/extract"})
             return 1
         src = Path(src_str)
         if not src.is_absolute() and project:
@@ -644,7 +645,33 @@ def cmd_stencil(args, project, catalog) -> int:
         if out_path and not out_path.is_absolute() and project:
             out_path = project.root / out_path
         mode = getattr(args, "mode", "auto") or "auto"
-        res = stencil.extract_stencil(src, out_path, mode=mode)
+        threshold = getattr(args, "threshold", 0.5)
+        if threshold is None:
+            threshold = 0.5
+        max_points = getattr(args, "max_points", 250) or 250
+        res = stencil.scan_stencil(
+            src,
+            project_root=proj_root,
+            mode=mode,
+            threshold=float(threshold),
+            max_points=int(max_points),
+            output=out_path,
+            task=task,
+        )
+        out(res)
+        return 0 if res.get("status") == "ok" else 1
+
+    elif action == "list":
+        res = stencil.list_stencils(proj_root)
+        out(res)
+        return 0
+
+    elif action == "show":
+        src_str = getattr(args, "source", "") or ""
+        if not src_str:
+            out({"status": "error", "error": "Stencil id required: autoharness stencil show <id>"})
+            return 1
+        res = stencil.show_stencil(src_str, proj_root)
         out(res)
         return 0 if res.get("status") == "ok" else 1
 
@@ -656,11 +683,11 @@ def cmd_stencil(args, project, catalog) -> int:
             return 1
         s_path = Path(s_str)
         t_path = Path(t_str)
-        if not s_path.is_absolute() and project:
+        if not s_path.is_absolute() and project and s_path.exists():
             s_path = project.root / s_path
         if not t_path.is_absolute() and project:
             t_path = project.root / t_path
-        res = stencil.check_stencil(s_path, t_path)
+        res = stencil.check_stencil(s_path, t_path, project_root=proj_root)
         out(res)
         return 0 if res.get("conforms") else 1
 

@@ -562,6 +562,10 @@ def cmd_evidence(args, project, catalog):
                + (" (a crop smaller than the whole is taken as one)" if item.get("media") == "image" else "")
                + "; earlier versions are drafts it does not see. " + nxt)
     if args.kind == "reference":
+        if item.get("stencil_id"):
+            nxt = (f"Structural stencil #{item['stencil_id']} ({item.get('stencil_mode', 'blueprint')}) automatically "
+                   f"scanned and registered in .autoharness/stencils/. Inspect with `autoharness stencil show {item['stencil_id']}` "
+                   f"or verify target alignment with `autoharness stencil check {item['stencil_id']} <target>`. ") + nxt
         nxt = ("Check that it is the thing itself the task names (the original, as published or as it really "
                "is), not someone's version of it (fan art, a remake, a mockup, an example from a blog): a "
                "version is only a hint, find the original. A page that only shows it among other things (search "
@@ -2330,11 +2334,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--keep-last", type=int, default=5, help="number of recent steps to keep verbatim (default: 5)")
     s.add_argument("--epoch-size", type=int, default=10, help="step batch size for milestone epoch condensation (default: 10)")
     s.add_argument("--json", action="store_true", help="output structured JSON")
-    s = sub.add_parser("stencil", help="Structural scanner and stencil/scaffold blueprint manager (extract schemas, AST stubs, spatial wireframes)")
-    s.add_argument("action", nargs="?", choices=["extract", "check", "add"], default="extract", help="stencil action")
-    s.add_argument("source", nargs="?", default="", help="source reference file or stencil file")
+    s = sub.add_parser("stencil", help="Domain-Agnostic Structural Stencil Scanner and Geometric Landmark/Contour Framework")
+    s.add_argument("action", nargs="?", choices=["scan", "extract", "list", "show", "check", "add"], default="scan", help="stencil action: scan, list, show, check, add")
+    s.add_argument("source", nargs="?", default="", help="source reference file or stencil id")
+    s.add_argument("--threshold", type=float, default=0.5, help="edge/contour sensitivity threshold (0.0-1.0)")
+    s.add_argument("--max-points", type=int, default=250, help="maximum contour points/polylines to extract")
     s.add_argument("--output", "-o", default="", help="output destination file for extracted stencil")
-    s.add_argument("--mode", "-m", choices=["auto", "schema", "ast", "wireframe", "contour", "outline", "text"], default="auto", help="extraction mode")
+    s.add_argument("--mode", "-m", choices=["auto", "schema", "ast", "wireframe", "contour", "svg", "outline", "text"], default="auto", help="extraction mode")
     s.add_argument("--target", "-t", default="", help="target file to check against stencil")
     s.add_argument("--note", default="", help="note when registering stencil as task evidence")
     return p

@@ -1,14 +1,23 @@
 """Domain-agnostic structural scanner and stencil/scaffold generator.
 
-Extracts verifiable structural invariants (schemas, AST skeletons, spatial wireframes)
-from reference sources without coupling to any specific task or domain.
+Extracts verifiable structural invariants (schemas, AST skeletons, spatial wireframes,
+geometric landmarks, and contour frameworks) from reference sources across any domain
+into domain-agnostic geometric stamps (.autoharness/stencils/) for high-fidelity alignment
+and ground-truth validation.
 """
 
 from __future__ import annotations
 
 import ast
+import datetime
 import json
+import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
 from typing import Any
 
 
@@ -24,7 +33,6 @@ def extract_json_schema(data: Any) -> dict[str, Any]:
     elif isinstance(data, list):
         if not data:
             return {"type": "array", "items": {}}
-        # Sample items to infer schema
         item_schemas = [extract_json_schema(item) for item in data[:5]]
         return {"type": "array", "items": item_schemas[0]}
     elif isinstance(data, bool):
@@ -85,14 +93,16 @@ def extract_image_wireframe(img_path: Path) -> dict[str, Any]:
     try:
         from PIL import Image
     except ImportError:
+        # Fallback to system python if isolated environment lacks Pillow
+        sys_res = _run_system_python_image_extract(img_path, mode="wireframe")
+        if sys_res and "dimensions" in sys_res:
+            return sys_res
         return {"error": "PIL (Pillow) is required for image wireframe extraction"}
 
     with Image.open(img_path) as img:
         width, height = img.size
         mode = img.mode
-        # Convert to RGB for channel analysis
         rgb = img.convert("RGB")
-        # Sample quadrants / key landmarks
         w2, h2 = width // 2, height // 2
         quadrants = {
             "top_left": rgb.crop((0, 0, w2, h2)),
@@ -102,11 +112,9 @@ def extract_image_wireframe(img_path: Path) -> dict[str, Any]:
         }
         quad_colors = {}
         for q_name, q_img in quadrants.items():
-            # Get average color
             colors = q_img.resize((1, 1)).getpixel((0, 0))
             quad_colors[q_name] = {"r": colors[0], "g": colors[1], "b": colors[2]}
 
-        # Find significant luminance centers
         gray = img.convert("L").resize((64, 36))
         get_data_fn = getattr(gray, "get_flattened_data", gray.getdata)
         pixels = list(get_data_fn())
@@ -127,63 +135,182 @@ def extract_image_wireframe(img_path: Path) -> dict[str, Any]:
     }
 
 
-def extract_image_contours(img_path: Path, max_contours: int = 250, min_length: float = 30.0) -> dict[str, Any]:
-    """Extract structural edge contours/polylines from an image reference as vector paths."""
+def _do_cv2_contour_extract(
+    img_path: Path,
+    max_contours: int = 250,
+    min_length: float = 30.0,
+    threshold: float = 0.5,
+    max_points: int = 250,
+) -> dict[str, Any]:
+    """Perform OpenCV polyline and landmark contour extraction."""
+    import cv2
+    import numpy as np
+
+    thresh_val = max(0.01, min(0.99, float(threshold)))
+    img = cv2.imread(str(img_path))
+    if img is None:
+        return {"error": f"Failed to load image: {img_path}"}
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Map threshold (0.0-1.0) to Canny edge detector sensitivity
+    low_t = int(max(10, 80 * (1.0 - thresh_val)))
+    high_t = int(max(25, 200 * (1.0 - thresh_val)))
+    edges = cv2.Canny(blurred, low_t, high_t)
+
+    raw_contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+    scored = []
+    for c in raw_contours:
+        arc_len = float(cv2.arcLength(c, False))
+        if arc_len >= min_length:
+            scored.append((arc_len, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    contours = []
+    landmarks = []
+    limit_contours = min(max_contours, max_points)
+    for idx, (arc_len, c) in enumerate(scored[:limit_contours], 1):
+        epsilon = max(1.0, 0.003 * arc_len)
+        approx = cv2.approxPolyDP(c, epsilon, False)
+        pts = approx.reshape(-1, 2).tolist()
+        if len(pts) >= 2:
+            x, y, bw, bh = cv2.boundingRect(approx)
+            M = cv2.moments(c)
+            cx = int(M["m10"] / M["m00"]) if M["m00"] != 0 else x + bw // 2
+            cy = int(M["m01"] / M["m00"]) if M["m00"] != 0 else y + bh // 2
+            d_str = "M " + " L ".join(f"{p[0]},{p[1]}" for p in pts)
+
+            contour_obj = {
+                "id": idx,
+                "length": round(arc_len, 2),
+                "bbox": [int(x), int(y), int(bw), int(bh)],
+                "centroid": [cx, cy],
+                "points": pts[:max_points],
+                "path_d": d_str,
+            }
+            contours.append(contour_obj)
+            if idx <= 15:
+                landmarks.append({
+                    "id": idx,
+                    "label": f"landmark_{idx}",
+                    "bbox": [int(x), int(y), int(bw), int(bh)],
+                    "center": [cx, cy],
+                    "normalized_center": [round(cx / w, 4), round(cy / h, 4)],
+                })
+
+    wireframe = extract_image_wireframe(img_path)
+
+    return {
+        "dimensions": [w, h],
+        "aspect_ratio": f"{w}:{h}",
+        "threshold_used": thresh_val,
+        "total_extracted": len(contours),
+        "landmarks": landmarks,
+        "contours": contours,
+        "wireframe_metadata": wireframe,
+    }
+
+
+def _run_system_python_image_extract(
+    img_path: Path,
+    mode: str = "contour",
+    threshold: float = 0.5,
+    max_points: int = 250,
+) -> dict[str, Any] | None:
+    """Run extraction via system python subprocess when current interpreter lacks cv2/PIL."""
+    src_dir = str(Path(__file__).resolve().parent.parent)
+    candidates = [
+        r"C:\Python314\python.exe",
+        sys.executable,
+        "python",
+        "python3",
+        "py",
+    ]
+    seen = set()
+    for py_bin in candidates:
+        if not py_bin or py_bin in seen:
+            continue
+        seen.add(py_bin)
+        try:
+            code = f"""
+import json, sys
+from pathlib import Path
+sys.path.insert(0, {src_dir!r})
+p = Path({str(img_path.resolve())!r})
+thresh = {threshold}
+mp = {max_points}
+
+try:
+    import cv2, numpy
+    from autoharness.stencil import _do_cv2_contour_extract
+    res = _do_cv2_contour_extract(p, threshold=thresh, max_points=mp)
+    print(json.dumps(res))
+    sys.exit(0)
+except Exception:
+    pass
+
+try:
+    from autoharness.stencil import extract_image_wireframe
+    res = extract_image_wireframe(p)
+    print(json.dumps(res))
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+"""
+            proc = subprocess.run([py_bin, "-c", code], capture_output=True, text=True, timeout=15)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return json.loads(proc.stdout.strip())
+        except Exception:
+            continue
+    return None
+
+
+def extract_image_contours(
+    img_path: Path,
+    max_contours: int = 250,
+    min_length: float = 30.0,
+    threshold: float = 0.5,
+    max_points: int = 250,
+) -> dict[str, Any]:
+    """Extract structural edge contours, geometric landmarks, and polylines from an image reference."""
+    thresh_val = max(0.01, min(0.99, float(threshold)))
+
+    # 1. Try in-process OpenCV extraction
     try:
         import cv2
         import numpy as np
-
-        img = cv2.imread(str(img_path))
-        if img is None:
-            return {"error": f"Failed to load image: {img_path}"}
-        h, w = img.shape[:2]
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 35, 110)
-
-        raw_contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-        scored = []
-        for c in raw_contours:
-            arc_len = float(cv2.arcLength(c, False))
-            if arc_len >= min_length:
-                scored.append((arc_len, c))
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        contours = []
-        for idx, (arc_len, c) in enumerate(scored[:max_contours], 1):
-            epsilon = max(1.0, 0.003 * arc_len)
-            approx = cv2.approxPolyDP(c, epsilon, False)
-            pts = approx.reshape(-1, 2).tolist()
-            if len(pts) >= 2:
-                x, y, bw, bh = cv2.boundingRect(approx)
-                d_str = "M " + " L ".join(f"{p[0]},{p[1]}" for p in pts)
-                contours.append({
-                    "id": idx,
-                    "length": round(arc_len, 2),
-                    "bbox": [int(x), int(y), int(bw), int(bh)],
-                    "points": pts,
-                    "path_d": d_str,
-                })
-
-        return {
-            "dimensions": [w, h],
-            "total_extracted": len(contours),
-            "contours": contours,
-        }
+        return _do_cv2_contour_extract(img_path, max_contours=max_contours, min_length=min_length, threshold=thresh_val, max_points=max_points)
     except ImportError:
-        try:
-            from PIL import Image, ImageFilter
-            with Image.open(img_path) as img:
-                w, h = img.size
-                return {
-                    "dimensions": [w, h],
-                    "total_extracted": 0,
-                    "contours": [],
-                    "note": "OpenCV recommended for full polyline extraction; Pillow fallback used."
-                }
-        except Exception as e:
-            return {"error": f"Failed extracting image contours: {e}"}
+        pass
+
+    # 2. Try system Python subprocess extraction (where cv2 and PIL are installed)
+    sys_res = _run_system_python_image_extract(img_path, mode="contour", threshold=thresh_val, max_points=max_points)
+    if sys_res and ("contours" in sys_res or "dimensions" in sys_res):
+        return sys_res
+
+    # 3. Fallback to in-process Pillow
+    try:
+        from PIL import Image
+        with Image.open(img_path) as img:
+            w, h = img.size
+            wf = extract_image_wireframe(img_path)
+            return {
+                "dimensions": [w, h],
+                "aspect_ratio": f"{w}:{h}",
+                "threshold_used": thresh_val,
+                "total_extracted": 0,
+                "landmarks": [
+                    {"id": 1, "label": "brightest_focal", "center": wf.get("focal_points", {}).get("brightest", [w // 2, h // 2])},
+                    {"id": 2, "label": "darkest_focal", "center": wf.get("focal_points", {}).get("darkest", [w // 2, h // 2])},
+                ],
+                "contours": [],
+                "wireframe_metadata": wf,
+                "note": "OpenCV polyline extraction fallback used.",
+            }
+    except Exception as e:
+        return {"error": f"Failed extracting image contours: {e}"}
 
 
 def extract_markdown_outline(text: str) -> dict[str, Any]:
@@ -195,10 +322,45 @@ def extract_markdown_outline(text: str) -> dict[str, Any]:
             level = len(line.split()[0])
             title = line.lstrip("#").strip()
             headings.append({"level": level, "title": title})
-    return {"headings": headings}
+    return {"headings": headings, "total_sections": len(headings)}
 
 
-def extract_stencil(source: Path, output: Path | None = None, mode: str = "auto") -> dict[str, Any]:
+def extract_svg_stencil(svg_path: Path) -> dict[str, Any]:
+    """Extract structural viewBox, element hierarchy, and geometry bounds from an SVG reference."""
+    import xml.etree.ElementTree as ET
+    try:
+        content = svg_path.read_text("utf-8")
+        root = ET.fromstring(content)
+        viewbox = root.attrib.get("viewBox", "")
+        width = root.attrib.get("width", "")
+        height = root.attrib.get("height", "")
+        elements = list(root.iter())
+        tags = [elem.tag.split("}")[-1] for elem in elements]
+        defs_ids = []
+        for defs in root.findall(".//{http://www.w3.org/2000/svg}defs") + root.findall(".//defs"):
+            for child in defs:
+                if "id" in child.attrib:
+                    defs_ids.append(child.attrib["id"])
+
+        return {
+            "type": "svg_stencil",
+            "viewBox": viewbox,
+            "dimensions": [width, height],
+            "total_elements": len(elements),
+            "tag_counts": {t: tags.count(t) for t in sorted(set(tags))},
+            "defs_ids": defs_ids,
+        }
+    except Exception as e:
+        return {"error": f"Failed to extract SVG stencil: {e}"}
+
+
+def extract_stencil(
+    source: Path,
+    output: Path | None = None,
+    mode: str = "auto",
+    threshold: float = 0.5,
+    max_points: int = 250,
+) -> dict[str, Any]:
     """Extract a domain-agnostic structural stencil/blueprint from a reference file."""
     if not source.is_file():
         return {"status": "error", "error": f"Source file not found: {source}"}
@@ -210,8 +372,10 @@ def extract_stencil(source: Path, output: Path | None = None, mode: str = "auto"
             selected_mode = "schema"
         elif suffix in (".py",):
             selected_mode = "ast"
-        elif suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
-            selected_mode = "wireframe"
+        elif suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff"):
+            selected_mode = "contour"
+        elif suffix in (".svg",):
+            selected_mode = "svg"
         elif suffix in (".md", ".markdown"):
             selected_mode = "outline"
         else:
@@ -245,10 +409,17 @@ def extract_stencil(source: Path, output: Path | None = None, mode: str = "auto"
 
     elif selected_mode == "contour":
         try:
-            content = extract_image_contours(source)
+            content = extract_image_contours(source, threshold=threshold, max_points=max_points)
             text_result = json.dumps(content, indent=2)
         except Exception as e:
             return {"status": "error", "error": f"Failed to extract image contours: {e}"}
+
+    elif selected_mode == "svg":
+        try:
+            content = extract_svg_stencil(source)
+            text_result = json.dumps(content, indent=2)
+        except Exception as e:
+            return {"status": "error", "error": f"Failed to extract SVG stencil: {e}"}
 
     elif selected_mode == "outline":
         try:
@@ -274,20 +445,162 @@ def extract_stencil(source: Path, output: Path | None = None, mode: str = "auto"
     }
 
 
-def check_stencil(stencil_path: Path, target_path: Path) -> dict[str, Any]:
+def get_stencils_dir(project_root: Path) -> Path:
+    """Ensure and return the domain-agnostic geometric stamps / stencil repository directory (.autoharness/stencils/)."""
+    stencils_dir = project_root / ".autoharness" / "stencils"
+    stencils_dir.mkdir(parents=True, exist_ok=True)
+    return stencils_dir
+
+
+def scan_stencil(
+    source: Path,
+    project_root: Path | None = None,
+    mode: str = "auto",
+    threshold: float = 0.5,
+    max_points: int = 250,
+    output: Path | None = None,
+    task=None,
+) -> dict[str, Any]:
+    """Scan a reference file across any domain and persist it into .autoharness/stencils/."""
+    if not source.is_file():
+        return {"status": "error", "error": f"Source file not found: {source}"}
+
+    proj = project_root or (getattr(task, "project", None).root if getattr(task, "project", None) else (task.dir.parent.parent.parent if task else Path.cwd()))
+    stencils_dir = get_stencils_dir(proj)
+
+    existing = list(stencils_dir.glob("*.json"))
+    stem_clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", source.stem)[:30]
+    stencil_id = f"stc_{stem_clean}_{len(existing) + 1:02d}"
+
+    target_file = output or (stencils_dir / f"{stencil_id}.json")
+
+    extracted = extract_stencil(source, output=target_file, mode=mode, threshold=threshold, max_points=max_points)
+    if extracted.get("status") != "ok":
+        return extracted
+
+    content = extracted["stencil"]
+    summary: dict[str, Any] = {"mode": extracted["mode"]}
+    if isinstance(content, dict):
+        if "dimensions" in content:
+            summary["dimensions"] = content["dimensions"]
+        if "total_extracted" in content:
+            summary["contours_count"] = content["total_extracted"]
+        if "landmarks" in content:
+            summary["landmarks_count"] = len(content["landmarks"])
+        if "type" in content:
+            summary["schema_type"] = content["type"]
+        if "required" in content:
+            summary["required_keys"] = content["required"]
+        if "headings" in content:
+            summary["headings_count"] = len(content["headings"])
+
+    metadata = {
+        "id": stencil_id,
+        "source": str(source),
+        "source_name": source.name,
+        "mode": extracted["mode"],
+        "threshold": threshold,
+        "max_points": max_points,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "summary": summary,
+        "blueprint": content,
+    }
+    target_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    if task:
+        try:
+            from autoharness import evidence
+            evidence.add(task, target_file, "stencil", note=f"Auto-scanned stencil from {source.name}")
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "stencil_id": stencil_id,
+        "file": str(target_file),
+        "source": str(source),
+        "mode": extracted["mode"],
+        "summary": summary,
+        "blueprint": content,
+    }
+
+
+def list_stencils(project_root: Path) -> dict[str, Any]:
+    """List all extracted stencils in .autoharness/stencils/."""
+    stencils_dir = get_stencils_dir(project_root)
+    results = []
+    for f in sorted(stencils_dir.glob("*.json")):
+        try:
+            data = json.loads(f.read_text("utf-8"))
+            results.append({
+                "id": data.get("id", f.stem),
+                "source": data.get("source_name") or data.get("source"),
+                "mode": data.get("mode", "unknown"),
+                "created_at": data.get("created_at", ""),
+                "summary": data.get("summary", {}),
+                "file": str(f),
+            })
+        except Exception:
+            results.append({"id": f.stem, "file": str(f), "mode": "unreadable"})
+    return {"status": "ok", "count": len(results), "stencils": results}
+
+
+def show_stencil(stencil_id: str, project_root: Path) -> dict[str, Any]:
+    """Retrieve full details of a stencil by id or filename."""
+    stencils_dir = get_stencils_dir(project_root)
+    cand = stencils_dir / f"{stencil_id}.json"
+    if not cand.is_file():
+        cand = stencils_dir / stencil_id
+    if not cand.is_file():
+        matches = [f for f in stencils_dir.glob("*.json") if stencil_id in f.stem]
+        if matches:
+            cand = matches[0]
+
+    if not cand.is_file():
+        return {"status": "error", "error": f"Stencil '{stencil_id}' not found in {stencils_dir}"}
+
+    try:
+        data = json.loads(cand.read_text("utf-8"))
+        return {"status": "ok", "stencil": data}
+    except Exception as e:
+        return {"status": "error", "error": f"Failed reading stencil {cand}: {e}"}
+
+
+def check_stencil(stencil_path_or_id: str | Path, target_path: Path, project_root: Path | None = None) -> dict[str, Any]:
     """Check structural conformance of a target file against a reference stencil."""
-    if not stencil_path.is_file():
-        return {"status": "error", "error": f"Stencil not found: {stencil_path}"}
+    proj = project_root or Path.cwd()
+    s_path = Path(stencil_path_or_id)
+    if not s_path.is_file():
+        s_dir = get_stencils_dir(proj)
+        cand = s_dir / f"{stencil_path_or_id}.json"
+        if cand.is_file():
+            s_path = cand
+        else:
+            matches = [f for f in s_dir.glob("*.json") if str(stencil_path_or_id) in f.stem]
+            if matches:
+                s_path = matches[0]
+
+    if not s_path.is_file():
+        return {"status": "error", "error": f"Stencil not found: {stencil_path_or_id}"}
     if not target_path.is_file():
         return {"status": "error", "error": f"Target not found: {target_path}"}
 
-    stencil_text = stencil_path.read_text("utf-8", errors="replace").strip()
+    stencil_text = s_path.read_text("utf-8", errors="replace").strip()
     target_text = target_path.read_text("utf-8", errors="replace").strip()
 
+    blueprint_data = None
+    try:
+        loaded = json.loads(stencil_text)
+        if isinstance(loaded, dict) and "blueprint" in loaded:
+            blueprint_data = loaded["blueprint"]
+            stencil_text = json.dumps(blueprint_data, indent=2)
+    except Exception:
+        pass
+
     # 1. JSON Schema Conformance Check
-    if stencil_path.suffix.lower() == ".json":
+    if s_path.suffix.lower() == ".json":
         try:
-            stencil_json = json.loads(stencil_text)
+            stencil_json = blueprint_data if blueprint_data is not None else json.loads(stencil_text)
             target_json = json.loads(target_text)
             if isinstance(stencil_json, dict) and stencil_json.get("type") == "object":
                 required = set(stencil_json.get("required", []))
@@ -304,9 +617,10 @@ def check_stencil(stencil_path: Path, target_path: Path) -> dict[str, Any]:
             pass
 
     # 2. Python AST Stub Conformance Check
-    if stencil_path.suffix.lower() == ".py" and target_path.suffix.lower() == ".py":
+    if (s_path.suffix.lower() == ".py" or (blueprint_data and isinstance(blueprint_data, dict) and blueprint_data.get("type") == "python_stub")) and target_path.suffix.lower() == ".py":
         try:
-            stencil_ast = ast.parse(stencil_text)
+            stub_code = blueprint_data["code"] if (blueprint_data and isinstance(blueprint_data, dict) and "code" in blueprint_data) else stencil_text
+            stencil_ast = ast.parse(stub_code)
             target_ast = ast.parse(target_text)
             stencil_funcs = {n.name for n in ast.walk(stencil_ast) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
             target_funcs = {n.name for n in ast.walk(target_ast) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -327,9 +641,9 @@ def check_stencil(stencil_path: Path, target_path: Path) -> dict[str, Any]:
             import xml.etree.ElementTree as ET
             root = ET.fromstring(target_text)
             viewbox = root.attrib.get("viewBox", "")
-            if stencil_path.suffix.lower() == ".json":
+            if s_path.suffix.lower() == ".json":
                 try:
-                    s_data = json.loads(stencil_text)
+                    s_data = blueprint_data if blueprint_data is not None else json.loads(stencil_text)
                     if "dimensions" in s_data:
                         w, h = s_data["dimensions"]
                         expected_vb = f"0 0 {w} {h}"
@@ -362,5 +676,4 @@ def check_stencil(stencil_path: Path, target_path: Path) -> dict[str, Any]:
         except Exception as e:
             return {"status": "error", "error": f"Failed to parse SVG: {e}"}
 
-    # Basic non-empty pass
     return {"status": "ok", "conforms": True, "type": "generic"}

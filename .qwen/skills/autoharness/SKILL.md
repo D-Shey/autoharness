@@ -334,3 +334,9 @@ harness.
   `autoharness memory reconcile [--prune-orphans] [--kind all|ruling|lesson|review|followup] [--json]` — audit SQLite persistent memory (`.autoharness/memory.db`) against ground-truth workspace files and AST symbols. Identifies orphaned records (deleted task directories or missing code files), stale references, and conflicting prescriptive policies with multi-token domain matching. When `--prune-orphans` is specified, permanently purges broken entries within an atomic database `SAVEPOINT` transaction while protecting historical review artifacts.
   Exposed to agents via `harness_memory_reconcile` Gateway MCP tool.
 
+- **Domain-Agnostic Structural Stencil Scanner & Geometric Landmark Framework**:
+  `autoharness stencil scan <image_or_file> [--threshold 0.0-1.0] [--max-points N]` — extract edge geometry, contours, and anchor coordinates from raster/vector images or reference blueprints into domain-agnostic geometric stamps (`.autoharness/stencils/`) for high-fidelity alignment and ground-truth validation. Also extracts JSON schemas, Python AST stubs, and document outlines. Automatically triggered when any reference is added via `autoharness evidence add <file> --kind reference`.
+  `autoharness stencil list` — list all scanned structural stencils in `.autoharness/stencils/`.
+  `autoharness stencil show <id>` — view detailed stencil blueprint, geometric landmarks, and contours.
+  `autoharness stencil check <stencil_or_id> <target>` — check structural conformance of a target against reference stencil invariants.
+
