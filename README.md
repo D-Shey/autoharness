@@ -123,6 +123,7 @@ These are not suggestions. The CLI requires each part:
 
 ```bash
 autoharness brief --goal "<quality bar>" --domains "..." --method "..." \
+  --techniques "<technique: principle; ...>" \
   --inputs "<what is missing and where to get it>" --expects "<open choice>: <pick> - <why>; ..." \
   --constraints "<the user's constraints, verbatim>" \
   --verify "<how to check, against what>" --candidates "<name>: take|skip, why; …" \
@@ -133,8 +134,11 @@ The brief records what a good result is and how it will be checked, the user's c
 ("no new dependencies", "offline only"), and a verdict on every candidate. Work that is judged by eye
 needs `--fidelity`: the level the result is judged at ("stylised poster, not a photograph"). Browser,
 API, log and database checks have ready templates
-(`--verify-template browser|api|api-client|logs|database`). With the [hook](docs/installation.md)
-the agent cannot change anything until the brief is recorded.
+(`--verify-template browser|api|api-client|logs|database`).
+
+- **Professional Techniques (`--techniques`).** Domain-level craftsmanship contracts (e.g. `clean-architecture: domain isolated from IO; idempotent-upsert: safe retry on duplicates; multi-layer-compositing: separate lighting and ambient`). Injected directly into critic prompts to enforce commercial production standards and the **calligraphy principle**: zero tolerance for amateur shortcuts, toy mockups, or patching over broken foundations.
+
+With the [hook](docs/installation.md) the agent cannot change anything until the brief is recorded.
 
 ### 4. Install: trust and constraints
 
@@ -185,11 +189,12 @@ autoharness critic --run claude|codex|agy                       # or autoharness
   - every brief item (`met | partial | missing | contradicts`);
   - the open choices, as the person who asked would see them;
   - whether the work follows the method found;
+  - adherence to declared professional techniques (`--techniques`);
+  - **Commercial production standard & calligraphy principle**: the critic evaluates the result as a commercial, production-grade deliverable ("дорого-богато"), rejecting crude mockups with `major`. If the foundational architecture or structure is broken, patching over it is forbidden — it must be rewritten cleanly from scratch;
   - what was done beyond the request;
   - whether each `verify run` really checks its item;
   - whether the work is finished as a whole (`ACCEPT`). "No" is at least major.
-- **A check has to be able to fail.** `true`, `echo ok` or looking for a string in a file do not
-  count. A run is tied to a version of the code and goes stale after an edit.
+- **A check has to be able to fail (AST Anti-Hollow Test Sentinel).** `true`, `echo ok`, looking for a string in a file, or token/key membership assertions (`assert "id" in d`) without verifying properties and values do not count (`hollow_check: true`). A run is tied to a version of the code and goes stale after an edit.
 - **Blind comparison.** In work judged by eye, the critic compares the current result with the best
   earlier one under the names A and B. Only autoharness knows which is which. If the earlier one is
   closer, the answer is "Went backwards", and the earlier result stays the best.
@@ -400,6 +405,21 @@ AutoHarness integrates key architectural innovations from Google Research's **Ha
 
 ### 10. Dynamic Secret Redaction & Credential Shield
 - **Built-in Sanitization**: Automatically intercepts and redacts API keys (OpenAI, Anthropic, GitHub, AWS, Slack, JWT, database connection strings) in all execution outputs, logs, and evidence before LLM processing.
+
+### 11. Domain-Agnostic Structural Stencil Scanner (`stencil scan`)
+- **Geometric Landmark & Contour Framework**: Extracts edge geometry, contours, and anchor coordinates from raster/vector images or reference blueprints into domain-agnostic geometric stamps (`.autoharness/stencils/`) for high-fidelity alignment and ground-truth validation.
+  ```bash
+  autoharness stencil scan <image_or_file> [--threshold 0.0-1.0] [--max-points N]
+  autoharness stencil list
+  autoharness stencil show <id>
+  ```
+
+### 12. Modular Architecture & Decoupled Command Dispatch
+- **Clean Separation of Concerns**: Core CLI dispatching decomposed into dedicated decoupled submodules:
+  - `autoharness.cli`: Core execution loop, argument parsing, and task lifecycle management.
+  - `autoharness.hooks`: Multi-agent session tracking, prompt interception, and pre-tool approval gating.
+  - `autoharness.commands.subsystems`: Extensible subsystem handlers (gateway, memory, codemap, swarm, drive, permissions, sentinel, stencil, slot, probe).
+  - `autoharness.commands.meta`: Audit, evaluation metrics, followups, journal, lessons, and rulings.
 
 ## Security in short
 
