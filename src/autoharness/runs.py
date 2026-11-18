@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import os
 import re
 import subprocess
 import time
@@ -172,17 +173,42 @@ NOT_A_CHECK = ("`{command}` exits 0 whatever the code does, so it checks nothing
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
-def _dir_tree_state(root: Path) -> str:
+def _dir_tree_state(root: Path, max_files: int = 20_000, max_depth: int = 12) -> str:
     h = hashlib.sha256()
-    ignored = {".autoharness", ".git", "node_modules", "__pycache__", ".venv", ".pytest_cache"}
-    for p in sorted(root.rglob("*")):
-        if p.is_file() and not any(part in ignored for part in p.relative_to(root).parts):
-            rel = str(p.relative_to(root).as_posix())
-            try:
-                digest = hashlib.sha256(p.read_bytes()).hexdigest()
-                h.update(f"{rel}\0{digest}\n".encode("utf-8"))
-            except OSError:
-                continue
+    ignored = {
+        ".autoharness", ".git", "node_modules", "__pycache__", ".venv", "venv",
+        ".pytest_cache", "AppData", "Application Data", "Library", "OneDrive",
+    }
+    resolved = root.resolve()
+    if resolved == Path.home().resolve():
+        return h.hexdigest()
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(resolved):
+        rel_dir = Path(dirpath).relative_to(resolved)
+        depth = 0 if rel_dir == Path(".") else len(rel_dir.parts)
+        if depth >= max_depth:
+            dirnames[:] = []
+            continue
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in ignored and not d.startswith(".") and not d.endswith(".egg-info")
+        )
+        for fn in sorted(filenames):
+            p = Path(dirpath) / fn
+            if not p.is_symlink():
+                files.append(p)
+                if len(files) >= max_files:
+                    break
+        if len(files) >= max_files:
+            break
+    for p in sorted(files, key=lambda x: x.relative_to(resolved).as_posix()):
+        rel = p.relative_to(resolved).as_posix()
+        try:
+            st = p.stat()
+            digest = hashlib.sha256(p.read_bytes()).hexdigest() if st.st_size < 10_000_000 else f"large:{st.st_size}"
+            h.update(f"{rel}\0{digest}\n".encode("utf-8"))
+        except OSError:
+            continue
     return h.hexdigest()
 
 

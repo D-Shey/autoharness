@@ -89,8 +89,44 @@ def test_followup_harvest_shortcuts(project):
     assert harvest_again["added"] == 0
 
 
+def test_followup_harvest_ignores_python_strings_and_appdata(project):
+    from autoharness import runs
+    (project.root / "AppData" / "Local").mkdir(parents=True)
+    (project.root / "AppData" / "Local" / "ignored.py").write_text("# shortcut: should not be scanned\n", encoding="utf-8")
+    (project.root / ".venv" / "Lib").mkdir(parents=True)
+    (project.root / ".venv" / "Lib" / "ignored_venv.py").write_text("# shortcut: ignored venv\n", encoding="utf-8")
+
+    src_dir = project.root / "src_real"
+    src_dir.mkdir()
+    (src_dir / "test_like.py").write_text(
+        'SAMPLE = "# shortcut: string literal only, not a comment"\n'
+        'def make():\n'
+        '    return "# shortcut: inside return string"\n',
+        encoding="utf-8",
+    )
+
+    res = followups.harvest(project)
+    assert res["found"] == 0
+    assert res["added"] == 0
+
+    state_before = runs._dir_tree_state(project.root)
+    (project.root / ".venv" / "Lib" / "extra.py").write_text("x = 1\n", encoding="utf-8")
+    (project.root / ".cache").mkdir()
+    (project.root / ".cache" / "blob.bin").write_text("cached", encoding="utf-8")
+    (project.root / "AppData" / "Local" / "extra.py").write_text("y = 2\n", encoding="utf-8")
+    state_after = runs._dir_tree_state(project.root)
+    assert state_before == state_after
+
+    # Depth limit check for _dir_tree_state and followups._iter_harvest_files
+    deep_dir = project.root / "d1" / "d2" / "d3" / "d4"
+    deep_dir.mkdir(parents=True)
+    (deep_dir / "deep.py").write_text("# shortcut: too deep\n", encoding="utf-8")
+    assert state_before == runs._dir_tree_state(project.root, max_depth=3)
+    assert all("deep.py" not in p.as_posix() for p in followups._iter_harvest_files(project.root, max_depth=3))
+
+
 def test_code_frugality_skill_structure():
-    skill_path = Path(".agents/skills/code-frugality/SKILL.md")
+    skill_path = Path(__file__).resolve().parent.parent / ".agents" / "skills" / "code-frugality" / "SKILL.md"
     assert skill_path.is_file()
     text = skill_path.read_text("utf-8")
 

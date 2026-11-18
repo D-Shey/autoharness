@@ -333,7 +333,7 @@ def execute(
                 proc.stdout.close()
             if proc.stderr:
                 proc.stderr.close()
-        except Exception:  # noqa: BLE001
+        except OSError:
             pass
         proc.wait()
 

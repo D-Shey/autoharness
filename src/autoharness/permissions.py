@@ -74,6 +74,10 @@ def _agent_settings_paths(agent: Agent, project_root: Path) -> tuple[Path, Path 
         return project_root / ".kimi-code" / "config.toml", user_root / "config.toml"
     elif name == "cursor":
         return project_root / ".cursor" / "settings.json", None
+    elif name == "opencode":
+        return project_root / "opencode.json", home / ".config" / "opencode" / "opencode.json"
+    elif name == "zcode":
+        return project_root / ".zcode" / "config.json", home / ".zcode" / "cli" / "setting.json"
     else:  # strands or fallback
         return project_root / ".agent" / "settings.json", None
 

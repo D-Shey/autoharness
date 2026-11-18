@@ -241,15 +241,69 @@ def to_opencode(cfg: dict) -> tuple[dict, list[str]]:
     return out, []
 
 
+def to_zcode(cfg: dict) -> tuple[dict, list[str]]:
+    """ZCode MCP servers: local uses command/args/env, remote uses type/url/headers."""
+    out: dict = {}
+    if "url" in cfg:
+        out["type"] = cfg.get("type", "http")
+        out["url"] = cfg["url"]
+        if cfg.get("headers"):
+            out["headers"] = dict(cfg["headers"])
+        return out, []
+
+    out["command"] = cfg["command"]
+    if cfg.get("args"):
+        out["args"] = list(cfg["args"])
+    if cfg.get("env"):
+        out["env"] = dict(cfg["env"])
+    return out, []
+
+
 # --- MCP config stores ------------------------------------------------------
+
+def _get_nested(data: dict, key: str) -> dict:
+    curr = data
+    for part in key.split("."):
+        if not isinstance(curr, dict):
+            return {}
+        curr = curr.get(part, {})
+    return curr if isinstance(curr, dict) else {}
+
+
+def _set_nested(data: dict, key: str, value: dict) -> None:
+    parts = key.split(".")
+    curr = data
+    for part in parts[:-1]:
+        nxt = curr.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            curr[part] = nxt
+        curr = nxt
+    curr[parts[-1]] = value
+
+
+def _only_key_path(data: dict, key: str) -> bool:
+    """True when `data` holds nothing outside the empty leaf at `key`."""
+    curr: object = data
+    for part in key.split("."):
+        if not isinstance(curr, dict) or set(curr) - {part}:
+            return False
+        curr = curr.get(part)
+    return isinstance(curr, dict) and not curr
+
 
 def _read_json_file(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text("utf-8") or "{}")
+        raw = json.loads(path.read_text("utf-8") or "{}")
     except json.JSONDecodeError as e:
         raise AgentError(f"{path} is not plain JSON ({e}); add the server by hand or remove comments") from e
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise AgentError(f"{path} root JSON must be an object, got {type(raw).__name__}")
+    return raw
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -266,21 +320,21 @@ def _cleanup(path: Path, created_dir: bool) -> None:
 
 
 class JsonMcpStore:
-    """`{"mcpServers": {...}}` (or custom key like `{"mcp": {...}}`) inside a JSON file that may hold other settings."""
+    """`{"mcpServers": {...}}` (or custom key like `{"mcp": {...}}` or `{"mcp": {"servers": {...}}}`) inside a JSON file that may hold other settings."""
 
     def __init__(self, path: Path, key: str = "mcpServers"):
         self.path = path
         self.key = key
 
     def has(self, name: str) -> bool:
-        return name in _read_json_file(self.path).get(self.key, {})
+        return name in _get_nested(_read_json_file(self.path), self.key)
 
     def names(self) -> list[str]:
         if not self.path.exists():
             return []
         try:
-            return list(_read_json_file(self.path).get(self.key, {}).keys())
-        except Exception:
+            return list(_get_nested(_read_json_file(self.path), self.key).keys())
+        except (AgentError, OSError):
             return []
 
     def add(self, name: str, native: dict) -> None:
@@ -288,13 +342,18 @@ class JsonMcpStore:
 
     def preview_add(self, name: str, native: dict) -> str:
         data = _read_json_file(self.path)
-        data.setdefault(self.key, {})[name] = native
+        servers = _get_nested(data, self.key)
+        if not servers:
+            _set_nested(data, self.key, {})
+            servers = _get_nested(data, self.key)
+        servers[name] = native
         return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
     def remove(self, name: str, *, created_file: bool, created_dir: bool) -> None:
         data = _read_json_file(self.path)
-        data.get(self.key, {}).pop(name, None)
-        if created_file and not data.get(self.key) and set(data) <= {self.key}:
+        servers = _get_nested(data, self.key)
+        servers.pop(name, None)
+        if created_file and not servers and _only_key_path(data, self.key):
             _cleanup(self.path, created_dir)
         elif self.path.exists():
             _write_text(self.path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
@@ -465,6 +524,9 @@ AGENTS: dict[str, Agent] = {a.name: a for a in [
     Agent("opencode", "OpenCode", "opencode.json", ".opencode/skills", ".config/opencode/skills", to_opencode,
           "restart OpenCode (or run /mcp) so it picks up the new server", ".config/opencode/opencode.json",
           mcp_key="mcp"),
+    Agent("zcode", "ZCode", ".zcode/config.json", ".zcode/skills", ".zcode/skills", to_zcode,
+          "restart ZCode (or run /mcp) so it picks up the new server", ".zcode/cli/setting.json",
+          mcp_key="mcp.servers"),
 ]}
 
 DEFAULT_AGENT = "claude"
@@ -526,8 +588,9 @@ def sharing_skills_dir(agent: Agent, user: bool = False) -> list[Agent]:
 
 
 # Env vars the agents set for the shell commands they run. OpenCode sets OPENCODE/OPENCODE_SESSION_ID,
-# agy sets ANTIGRAVITY_AGENT per command, and Claude Code sets CLAUDECODE.
+# ZCode sets ZCODE/ZCODE_SESSION_ID, agy sets ANTIGRAVITY_AGENT per command, and Claude Code sets CLAUDECODE.
 _DETECT = [("OPENCODE", "opencode"), ("OPENCODE_SESSION_ID", "opencode"),
+           ("ZCODE", "zcode"), ("ZCODE_SESSION_ID", "zcode"),
            ("ANTIGRAVITY_AGENT", "agy"), ("CLAUDECODE", "claude"), ("GEMINI_CLI", "gemini"), ("QWEN_CODE", "qwen"),
            ("GIGACODE_CLI", "gigacode"), ("CODEX_SANDBOX", "codex"), ("CODEX_THREAD_ID", "codex"), ("CURSOR_AGENT", "cursor")]
 
@@ -544,7 +607,7 @@ def detect(environ: dict | None = None) -> str | None:
 
 
 # The id of the agent session a shell command runs in, the same id its hooks receive as session_id
-_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID", "cursor": "CURSOR_CONVERSATION_ID", "agent": "CURSOR_CONVERSATION_ID", "opencode": "OPENCODE_SESSION_ID"}
+_SESSION = {"claude": "CLAUDE_CODE_SESSION_ID", "agy": "ANTIGRAVITY_CONVERSATION_ID", "codex": "CODEX_THREAD_ID", "cursor": "CURSOR_CONVERSATION_ID", "agent": "CURSOR_CONVERSATION_ID", "opencode": "OPENCODE_SESSION_ID", "zcode": "ZCODE_SESSION_ID"}
 
 
 def session_id(environ: dict | None = None, agent: str | None = None) -> str:

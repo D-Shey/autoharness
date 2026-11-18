@@ -149,3 +149,15 @@ def test_gateway_permissions_tools(tmp_path: Path):
     assert not res_en.get("isError")
     parsed_en = json.loads(res_en["content"][0]["text"])
     assert parsed_en["modified"] is True
+
+
+def test_opencode_and_zcode_permissions_paths(tmp_path: Path):
+    proj_root = tmp_path / "proj"
+    proj_root.mkdir()
+    oc_proj, oc_user = permissions._agent_settings_paths(permissions.AGENTS["opencode"], proj_root)
+    assert oc_proj == proj_root / "opencode.json"
+    assert oc_user is not None and oc_user.as_posix().endswith("/.config/opencode/opencode.json")
+
+    zc_proj, zc_user = permissions._agent_settings_paths(permissions.AGENTS["zcode"], proj_root)
+    assert zc_proj == proj_root / ".zcode" / "config.json"
+    assert zc_user is not None and zc_user.as_posix().endswith("/.zcode/cli/setting.json")

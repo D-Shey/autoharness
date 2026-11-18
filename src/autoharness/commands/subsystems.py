@@ -6,19 +6,8 @@ import sys
 from pathlib import Path
 
 from autoharness import approvals, config, egress
+from autoharness.commands.common import EXIT_APPROVAL, need_approval, out
 from autoharness.env import HarnessError
-
-EXIT_APPROVAL = 3
-
-
-def out(data) -> None:
-    sys.stdout.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-
-
-def need_approval(what: str, report: dict) -> int:
-    out({"status": "approval_required", "what": what, "trust": report,
-         "next": "Show this to the user. Re-run the same command with --approve only if they agree."})
-    return EXIT_APPROVAL
 
 
 def unapproved_servers(project) -> list[str]:
@@ -719,8 +708,8 @@ def cmd_slot(args, project, catalog) -> int:
         t = project.task()
         if t:
             task_info = t.info()
-    except Exception:
-        pass
+    except HarnessError:
+        task_info = None
 
     if action == "export":
         data = slots.export_harness_slots(project.root, active_task_info=task_info)
@@ -761,8 +750,8 @@ def cmd_probe(args, project, catalog) -> int:
         if t:
             task_info = t.info()
             task_prompt = task_info.get("prompt") or task_info.get("task") or task_prompt
-    except Exception:
-        pass
+    except HarnessError:
+        task_info = None
 
     k = getattr(args, "k", 2) or 2
     base_slots = slots.inspect_harness_slots(project.root, active_task_info=task_info)

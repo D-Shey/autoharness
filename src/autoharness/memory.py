@@ -236,8 +236,9 @@ def index_project_memory(project_root: Path) -> dict[str, int]:
                     doc_id=f"ruling_{idx + 1}",
                 )
                 counts["rulings"] += 1
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, sqlite3.Error, ValueError, TypeError) as e:
+            counts.setdefault("errors", 0)
+            counts["errors"] += 1
 
     # 2. Index followups.json
     followups_file = state_dir / "followups.json"
@@ -259,8 +260,9 @@ def index_project_memory(project_root: Path) -> dict[str, int]:
                     doc_id=f"followup_{fid}",
                 )
                 counts["followups"] += 1
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, sqlite3.Error, ValueError, TypeError):
+            counts.setdefault("errors", 0)
+            counts["errors"] += 1
 
     # 3. Index task answers/reviews
     tasks_dir = state_dir / "tasks"
@@ -283,8 +285,9 @@ def index_project_memory(project_root: Path) -> dict[str, int]:
                             doc_id=f"review_{task_dir.name}_{af.stem}",
                         )
                         counts["reviews"] += 1
-                    except Exception:
-                        pass
+                    except (OSError, sqlite3.Error, ValueError):
+                        counts.setdefault("errors", 0)
+                        counts["errors"] += 1
 
     con.close()
 

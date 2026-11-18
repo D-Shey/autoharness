@@ -280,13 +280,22 @@ def parse_source_file(file_path: Path) -> dict[str, Any]:
     return {"file": str(file_path), "error": f"Unsupported extension {suffix}", "exists": file_path.exists()}
 
 
+def _safe_unparse(node: ast.AST) -> str:
+    """Unparse an AST node safely, returning empty string if unsupported."""
+    if not hasattr(ast, "unparse"):
+        return ""
+    try:
+        return ast.unparse(node)
+    except (ValueError, TypeError, AttributeError, RecursionError):
+        return ""
+
+
 def _format_arg(arg: ast.arg) -> str:
     res = arg.arg
     if arg.annotation:
-        try:
-            res += f": {ast.unparse(arg.annotation)}"
-        except Exception:
-            pass
+        ann = _safe_unparse(arg.annotation)
+        if ann:
+            res += f": {ann}"
     return res
 
 
@@ -368,12 +377,8 @@ def parse_python_file(file_path: Path) -> dict[str, Any]:
             imports.append(f"from {mod} import {', '.join(names)}")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             f_doc = ast.get_docstring(node) or ""
-            ret_type = ""
-            if node.returns:
-                try:
-                    ret_type = f" -> {ast.unparse(node.returns)}"
-                except Exception:
-                    pass
+            ret_ann = _safe_unparse(node.returns) if node.returns else ""
+            ret_type = f" -> {ret_ann}" if ret_ann else ""
             functions.append({
                 "name": node.name,
                 "is_async": isinstance(node, ast.AsyncFunctionDef),
@@ -381,27 +386,18 @@ def parse_python_file(file_path: Path) -> dict[str, Any]:
                 "returns": ret_type,
                 "doc": f_doc.strip().splitlines()[0] if f_doc.strip() else "",
                 "line": node.lineno,
-                "decorators": [ast.unparse(d) for d in node.decorator_list if hasattr(ast, "unparse")],
+                "decorators": [_safe_unparse(d) for d in node.decorator_list if hasattr(ast, "unparse")],
                 "calls": _extract_ast_calls(node),
             })
         elif isinstance(node, ast.ClassDef):
             c_doc = ast.get_docstring(node) or ""
-            bases = []
-            for b in node.bases:
-                try:
-                    bases.append(ast.unparse(b))
-                except Exception:
-                    pass
+            bases = [b_str for b in node.bases if (b_str := _safe_unparse(b))]
             methods: list[dict[str, Any]] = []
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     m_doc = ast.get_docstring(item) or ""
-                    m_ret = ""
-                    if item.returns:
-                        try:
-                            m_ret = f" -> {ast.unparse(item.returns)}"
-                        except Exception:
-                            pass
+                    m_ret_ann = _safe_unparse(item.returns) if item.returns else ""
+                    m_ret = f" -> {m_ret_ann}" if m_ret_ann else ""
                     methods.append({
                         "name": item.name,
                         "is_async": isinstance(item, ast.AsyncFunctionDef),
@@ -612,38 +608,59 @@ def check_ast_policies(
 
     violations: list[dict[str, Any]] = []
 
-    # 1. DEAD_PRIVATE_METHOD check
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            private_methods: dict[str, Any] = {}
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    m_name = item.name
-                    if m_name.startswith("_") and not m_name.startswith("__"):
-                        # Skip properties, overrides, abstractmethods
-                        decs = {ast.unparse(d) if hasattr(ast, "unparse") else "" for d in item.decorator_list}
-                        if any("property" in d or "abstractmethod" in d or "override" in d for d in decs):
-                            continue
-                        private_methods[m_name] = item
+    # 1. DEAD_PRIVATE_METHOD check (including references in subclasses within the module)
+    all_classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    subclasses_by_base: dict[str, list[ast.ClassDef]] = collections.defaultdict(list)
+    for cls in all_classes:
+        for base in cls.bases:
+            base_name = base.id if isinstance(base, ast.Name) else (base.attr if isinstance(base, ast.Attribute) else "")
+            if base_name:
+                subclasses_by_base[base_name].append(cls)
 
-            if private_methods:
-                referenced: set[str] = set()
-                for child in ast.walk(node):
+    def _class_hierarchy(cls_node: ast.ClassDef) -> list[ast.ClassDef]:
+        seen_ids: set[int] = {id(cls_node)}
+        queue = [cls_node]
+        result = [cls_node]
+        while queue:
+            curr = queue.pop(0)
+            for sub in subclasses_by_base.get(curr.name, []):
+                if id(sub) not in seen_ids:
+                    seen_ids.add(id(sub))
+                    result.append(sub)
+                    queue.append(sub)
+        return result
+
+    for node in all_classes:
+        private_methods: dict[str, Any] = {}
+        for item in node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                m_name = item.name
+                if m_name.startswith("_") and not m_name.startswith("__"):
+                    # Skip properties, overrides, abstractmethods
+                    decs = {ast.unparse(d) if hasattr(ast, "unparse") else "" for d in item.decorator_list}
+                    if any("property" in d or "abstractmethod" in d or "override" in d for d in decs):
+                        continue
+                    private_methods[m_name] = item
+
+        if private_methods:
+            referenced: set[str] = set()
+            for scope_node in _class_hierarchy(node):
+                for child in ast.walk(scope_node):
                     if isinstance(child, ast.Attribute) and child.attr in private_methods:
                         referenced.add(child.attr)
                     elif isinstance(child, ast.Name) and child.id in private_methods:
                         referenced.add(child.id)
 
-                for m_name, m_node in private_methods.items():
-                    if m_name not in referenced:
-                        violations.append({
-                            "rule": "DEAD_PRIVATE_METHOD",
-                            "severity": "major",
-                            "file": filename,
-                            "line": m_node.lineno,
-                            "symbol": f"{node.name}.{m_name}",
-                            "message": f"Private method '{node.name}.{m_name}' declared at line {m_node.lineno} is never referenced in class '{node.name}'.",
-                        })
+            for m_name, m_node in private_methods.items():
+                if m_name not in referenced:
+                    violations.append({
+                        "rule": "DEAD_PRIVATE_METHOD",
+                        "severity": "major",
+                        "file": filename,
+                        "line": m_node.lineno,
+                        "symbol": f"{node.name}.{m_name}",
+                        "message": f"Private method '{node.name}.{m_name}' declared at line {m_node.lineno} is never referenced in class '{node.name}'.",
+                    })
 
     # 2. SILENCED_EXCEPTION check
     for node in ast.walk(tree):

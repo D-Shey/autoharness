@@ -134,7 +134,7 @@ def marketplace_servers(plugin: dict, fetch: Fetcher = http_get_json) -> dict[st
             return {}
         try:
             data = fetch(url)
-        except Exception:  # noqa: BLE001 - a plugin without the file
+        except (OSError, ValueError, subprocess.SubprocessError):  # a plugin without the file
             continue
         servers = data.get("mcpServers", data if path == ".mcp.json" else {})
         servers = {k: v for k, v in servers.items() if isinstance(v, dict) and ("command" in v or "url" in v)}

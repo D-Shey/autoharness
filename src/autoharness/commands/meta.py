@@ -1,20 +1,14 @@
 """Meta, audit, evaluation and journaling commands: eval, decision, followup, journal, lesson, ruling, audit."""
 from __future__ import annotations
 
-import json
-import sys
-import time
 from pathlib import Path
 
 from autoharness import followups, journal, lessons, rulings, vague
+from autoharness.commands.common import out
 from autoharness.env import HarnessError
 
 RIPE_NEXT = (f"`ripe_insights` were confirmed by {lessons.RIPE} or more tasks: fold each into the skill it belongs "
              "to (or a new one), then `autoharness lesson fold <id> --skill <name>`. ")
-
-
-def out(data) -> None:
-    sys.stdout.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def cmd_eval(args, project, catalog):
@@ -96,10 +90,6 @@ def cmd_journal(args, project, catalog):
                  "what is left), in the journal's language, and add it to the journal "
                  + ("at the top, under its header." if form["order"] == "newest first" else "at the bottom.")})
     return 0
-
-
-RIPE_NEXT = (f"`ripe_insights` were confirmed by {lessons.RIPE} or more tasks: fold each into the skill it belongs "
-             "to (or a new one), then `autoharness lesson fold <id> --skill <name>`. ")
 
 
 def cmd_lesson(args, project, catalog):

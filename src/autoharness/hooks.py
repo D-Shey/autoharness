@@ -456,8 +456,8 @@ def _agent_mcp_servers(project) -> list[str]:
     try:
         for b in agents.builtin_mcp(project.agent.name):
             servers.add(b.name)
-    except Exception:
-        pass
+    except (OSError, ValueError, agents.AgentError):
+        servers = set()
     kept_mcp = project.kept().get("mcp", {})
     if isinstance(kept_mcp, dict):
         servers.update(kept_mcp.keys())
@@ -467,8 +467,8 @@ def _agent_mcp_servers(project) -> list[str]:
         if store is not None and hasattr(store, "names"):
             try:
                 servers.update(store.names())
-            except Exception:
-                pass
+            except (OSError, ValueError, agents.AgentError):
+                continue
     if project.agent.name == "claude":
         claude_json = Path.home() / ".claude.json"
         if claude_json.exists():
@@ -476,8 +476,8 @@ def _agent_mcp_servers(project) -> list[str]:
                 data = json.loads(claude_json.read_text("utf-8") or "{}")
                 if isinstance(data.get("mcpServers"), dict):
                     servers.update(data["mcpServers"].keys())
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError, TypeError):
+                return sorted(servers)
     return sorted(servers)
 
 
@@ -974,8 +974,7 @@ def install_hook(settings: Path, remove: bool = False) -> str:
             del hooks[event]
     if not changed:
         return "not_installed" if remove else "already_installed"
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", "utf-8")
+    atomic_write(settings, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
     return "removed" if remove else "installed"
 
 
@@ -1059,7 +1058,76 @@ def install_kimi_hook(config_file: Path, remove: bool = False) -> str:
     return "installed"
 
 
+def install_zcode_hook(settings: Path, remove: bool = False) -> str:
+    """Add or remove autoharness hooks in ZCode setting.json or .zcode/config.json."""
+    if settings.exists():
+        raw = settings.read_text("utf-8-sig")
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as e:
+            raise HarnessError(f"{settings} is not valid JSON ({e})") from e
+        if data is None:
+            data = {}
+        elif not isinstance(data, dict):
+            raise HarnessError(f"{settings} root JSON must be an object")
+    else:
+        data = {}
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        data["hooks"] = hooks
+    ours = lambda h: isinstance(h, dict) and h.get("command") == HOOK_COMMAND  # noqa: E731
+    wanted = {"UserPromptSubmit": None, "PreToolUse": PRE_TOOL_MATCHER, "Stop": None}
+    changed = False
+    if "events" in hooks:
+        if not isinstance(hooks["events"], dict):
+            hooks["events"] = {}
+        target = hooks["events"]
+    else:
+        target = hooks
+    if not remove and hooks.get("enabled") is not True:
+        hooks["enabled"] = True
+        changed = True
+    for event, matcher in wanted.items():
+        entries = target.get(event)
+        if not isinstance(entries, list):
+            entries = []
+            target[event] = entries
+        mine = [e for e in entries if isinstance(e, dict) and isinstance(e.get("hooks"), list)
+                and any(ours(h) for h in e["hooks"])]
+        if remove:
+            for e in mine:
+                e["hooks"] = [h for h in e["hooks"] if not ours(h)]
+            target[event] = [e for e in entries if isinstance(e, dict) and e.get("hooks")]
+            changed = changed or bool(mine)
+        elif not mine:
+            entry = {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 10}]}
+            if matcher:
+                entry = {"matcher": matcher, **entry}
+            entries.append(entry)
+            changed = True
+    if not changed:
+        return "not_installed" if remove else "already_installed"
+    if remove:
+        has_other_hooks = any(isinstance(v, list) and bool(v) for k, v in target.items() if k != "enabled")
+        if not has_other_hooks:
+            hooks["enabled"] = False
+    atomic_write(settings, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    return "removed" if remove else "installed"
+
+
 def cmd_install_hook(args, project, catalog):
+    if project.agent.name == "zcode":
+        if args.settings:
+            settings = Path(args.settings)
+        elif args.user:
+            settings = Path.home() / ".zcode" / "cli" / "setting.json"
+        else:
+            settings = project.root / ".zcode" / "config.json"
+        status = install_zcode_hook(settings, remove=args.remove)
+        out({"status": status, "settings": str(settings), "command": HOOK_COMMAND,
+             "next": "Takes effect in new ZCode sessions: restart ZCode."})
+        return 0
     if project.agent.name == "kimi" or (args.settings and Path(args.settings).suffix == ".toml"):
         if args.settings:
             settings = Path(args.settings)
@@ -1100,10 +1168,6 @@ def cmd_agents(args, project, catalog):
                              "user_skills_dir": "~/" + a.user_skills_dir} for a in agents.AGENTS.values()}})
     return 0
 
-
-_read_transcript = None
-_first_user_message = None
-_task_created_since = None
 
 __all__ = [name for name in globals() if not name.startswith("__")]
 

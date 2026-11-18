@@ -4181,7 +4181,9 @@ def test_a_loop_that_goes_backwards_goes_to_an_arbiter_without_more_approaches(p
 def test_visual_work_names_the_fidelity_it_is_judged_at(project, capsys):
     root = str(project.root)
     cli_json(capsys, "--project", root, "init", POSTER_TASK)
-    code, res = cli_json(capsys, "--project", root, "brief", *BRIEF[:-2])
+    fid_idx = BRIEF.index("--fidelity")
+    without_fidelity = BRIEF[:fid_idx] + BRIEF[fid_idx + 2:]
+    code, res = cli_json(capsys, "--project", root, "brief", *without_fidelity)
     assert code == 1 and "--fidelity" in res["error"]
     assert cli_json(capsys, "--project", root, "brief", *BRIEF)[0] == 0
 

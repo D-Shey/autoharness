@@ -15,6 +15,7 @@ from contextlib import contextmanager
 import graphlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -653,8 +654,8 @@ def execute_swarm_plan(
             if on_update:
                 try:
                     on_update(plan, t)
-                except Exception:
-                    pass
+                except Exception as e:
+                    sys.stderr.write(f"swarm on_update callback error: {e}\n")
 
     # Execution loop
     with ThreadPoolExecutor(max_workers=parallel) as pool:
@@ -726,8 +727,8 @@ def execute_swarm_plan(
                             )
                         finally:
                             con.close()
-                    except Exception:
-                        pass
+                    except (OSError, sqlite3.Error, ValueError, ImportError) as e:
+                        res["memory_index_error"] = str(e)
                 except Exception as e:
                     update_task_state(tid, "failed", {"error": str(e), "success": False})
 

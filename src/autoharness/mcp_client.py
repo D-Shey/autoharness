@@ -113,16 +113,14 @@ def expand_secrets(value, env: Mapping[str, str] | None = None):
     return value
 
 
-def _nothing(*_):
-    return None
-
-
 class _Client:
     transport = ""
 
-    def __init__(self, name: str, config: dict, log: Callable[[str], None] = _nothing,
-                 on_tools_changed: Callable[[str], None] = _nothing, stderr=None):
-        self.name, self.config, self.log, self.on_tools_changed = name, config, log, on_tools_changed
+    def __init__(self, name: str, config: dict, log: Callable[[str], None] | None = None,
+                 on_tools_changed: Callable[[str], None] | None = None, stderr=None):
+        self.name, self.config = name, config
+        self.log = log if log is not None else (lambda *_: None)
+        self.on_tools_changed = on_tools_changed if on_tools_changed is not None else (lambda *_: None)
         self.stderr = stderr
         self.protocol_version = PROTOCOL_VERSIONS[0]
         self._id_lock = threading.Lock()
@@ -250,10 +248,11 @@ class HttpClient(_Client):
     def start(self) -> None:
         self._cfg = expand_secrets(self.config)
         self.session: str | None = None
+        self._closed = False
         self._handshake()
 
     def alive(self) -> bool:
-        return True
+        return not getattr(self, "_closed", False)
 
     def _post(self, msg: dict) -> dict | None:
         headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
@@ -299,6 +298,7 @@ class HttpClient(_Client):
         self._post({"jsonrpc": "2.0", "method": method, **({"params": params} if params else {})})
 
     def close(self) -> None:
+        self._closed = True
         if getattr(self, "session", None):
             req = urllib.request.Request(self._cfg["url"], method="DELETE",
                                          headers={"Mcp-Session-Id": self.session, **self._cfg.get("headers", {})})
@@ -308,8 +308,8 @@ class HttpClient(_Client):
                 pass
 
 
-def make_client(name: str, config: dict, log: Callable[[str], None] = _nothing,
-                on_tools_changed: Callable[[str], None] = _nothing, stderr=None) -> _Client:
+def make_client(name: str, config: dict, log: Callable[[str], None] | None = None,
+                on_tools_changed: Callable[[str], None] | None = None, stderr=None) -> _Client:
     if "command" in config:
         return StdioClient(name, config, log, on_tools_changed, stderr)
     if config.get("type") == "http":

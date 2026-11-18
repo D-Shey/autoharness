@@ -249,3 +249,61 @@ def test_gateway_sentinel_tools(tmp_path):
     rb_data = json.loads(res_rb["content"][0]["text"])
     assert rb_data["status"] == "ok"
     assert rb_data["target_snapshot"] == snap_id
+
+
+def test_sentinel_bounds_walk_and_ignores_dot_and_os_dirs(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".autoharness").mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / ".cache").mkdir()
+    (repo / ".cache" / "junk.bin").write_text("cached", encoding="utf-8")
+    (repo / "AppData" / "Local").mkdir(parents=True)
+    (repo / "AppData" / "Local" / "state.db").write_text("db", encoding="utf-8")
+
+    # Deep nested directory beyond max_depth=3
+    deep = repo / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "too_deep.py").write_text("y = 2\n", encoding="utf-8")
+
+    files = sentinel._iter_project_files(repo, max_files=50, max_depth=3)
+    rels = {f.relative_to(repo).as_posix() for f in files}
+    assert "src/main.py" in rels
+    assert ".cache/junk.bin" not in rels
+    assert "AppData/Local/state.db" not in rels
+    assert "a/b/c/d/too_deep.py" not in rels
+
+    # Snapshot + rollback should not touch ignored directories
+    snap = sentinel.capture_snapshot(repo, label="bounded")
+    assert ".cache/junk.bin" not in snap["all_files"]
+    assert "AppData/Local/state.db" not in snap["all_files"]
+    (repo / ".cache" / "new_cache.bin").write_text("keep", encoding="utf-8")
+    sentinel.rollback_to_snapshot(repo, snapshot_id=snap["id"])
+    assert (repo / ".cache" / "new_cache.bin").is_file()
+
+
+def test_sentinel_git_repo_preserves_gitignored_files_on_rollback(tmp_path):
+    repo = tmp_path / "git_repo"
+    repo.mkdir()
+    (repo / ".autoharness").mkdir()
+    subprocess.run(["git", "init", "."], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, capture_output=True, check=True)
+
+    (repo / ".gitignore").write_text("ignored_dir/\n", encoding="utf-8")
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True, check=True)
+
+    (repo / "ignored_dir").mkdir()
+    (repo / "ignored_dir" / "local_secret.txt").write_text("keep me", encoding="utf-8")
+
+    snap = sentinel.capture_snapshot(repo, label="git-baseline")
+    assert "ignored_dir/local_secret.txt" not in snap["all_files"]
+    (repo / "bad_untracked.py").write_text("bad = 1\n", encoding="utf-8")
+
+    rb = sentinel.rollback_to_snapshot(repo, snapshot_id=snap["id"])
+    assert rb["status"] == "ok"
+    assert not (repo / "bad_untracked.py").exists()
+    assert (repo / "ignored_dir" / "local_secret.txt").is_file()

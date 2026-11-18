@@ -222,11 +222,10 @@ def _run_system_python_image_extract(
     """Run extraction via system python subprocess when current interpreter lacks cv2/PIL."""
     src_dir = str(Path(__file__).resolve().parent.parent)
     candidates = [
-        r"C:\Python314\python.exe",
-        sys.executable,
-        "python",
-        "python3",
-        "py",
+        os.environ.get("AUTOHARNESS_PYTHON", ""),
+        shutil.which("python") or "",
+        shutil.which("python3") or "",
+        shutil.which("py") or "",
     ]
     seen = set()
     for py_bin in candidates:
@@ -262,7 +261,7 @@ except Exception:
             proc = subprocess.run([py_bin, "-c", code], capture_output=True, text=True, timeout=15)
             if proc.returncode == 0 and proc.stdout.strip():
                 return json.loads(proc.stdout.strip())
-        except Exception:
+        except (OSError, subprocess.SubprocessError, ValueError):
             continue
     return None
 
@@ -520,8 +519,9 @@ def scan_stencil(
         try:
             from autoharness import evidence
             evidence.add(task, target_file, "stencil", note=f"Auto-scanned stencil from {source.name}")
-        except Exception:
-            pass
+        except (OSError, ValueError, RuntimeError) as e:
+            if hasattr(task, "log"):
+                task.log(f"stencil evidence registration skipped: {e}")
 
     return {
         "status": "ok",
@@ -603,8 +603,8 @@ def check_stencil(stencil_path_or_id: str | Path, target_path: Path, project_roo
         if isinstance(loaded, dict) and "blueprint" in loaded:
             blueprint_data = loaded["blueprint"]
             stencil_text = json.dumps(blueprint_data, indent=2)
-    except Exception:
-        pass
+    except (json.JSONDecodeError, ValueError, TypeError):
+        blueprint_data = None
 
     # 1. JSON Schema Conformance Check
     if s_path.suffix.lower() == ".json":
@@ -679,8 +679,8 @@ def check_stencil(stencil_path_or_id: str | Path, target_path: Path, project_roo
                                 "target_paths": len(paths),
                             },
                         }
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+                    return {"status": "ok", "conforms": True, "type": "svg_viewbox"}
             return {"status": "ok", "conforms": True, "type": "svg_viewbox"}
         except Exception as e:
             return {"status": "error", "error": f"Failed to parse SVG: {e}"}

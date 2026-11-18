@@ -25,9 +25,72 @@ SENTINEL_STATE_FILE = "sentinel.json"
 SNAPSHOTS_DIR = "snapshots"
 SENTINEL_EXCLUDE_DIRS = {
     ".git", ".autoharness", ".venv", "venv", "node_modules",
-    "__pycache__", ".pytest_cache", "build", "dist", ".egg-info", ".playwright-mcp"
+    "__pycache__", ".pytest_cache", "build", "dist", ".egg-info", ".playwright-mcp",
+    "AppData", "Application Data", "Library", "OneDrive",
 }
+MAX_SENTINEL_FILES = 20_000
+MAX_SENTINEL_DEPTH = 12
 _lock = threading.RLock()
+
+
+def _prune_dirs(dirs: list[str]) -> list[str]:
+    return sorted(
+        d for d in dirs
+        if d not in SENTINEL_EXCLUDE_DIRS and not d.startswith(".") and not d.endswith(".egg-info")
+    )
+
+
+def _iter_project_files(
+    project_root: Path,
+    max_files: int = MAX_SENTINEL_FILES,
+    max_depth: int = MAX_SENTINEL_DEPTH,
+) -> list[Path]:
+    """Enumerate project files safely, preferring `git ls-files` and bounding non-git walks."""
+    resolved = project_root.resolve()
+    if (resolved / ".git").exists():
+        try:
+            proc = subprocess.run(
+                ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                cwd=resolved,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if proc.returncode == 0:
+                files: list[Path] = []
+                for raw in proc.stdout.decode("utf-8", errors="replace").split("\0"):
+                    if not raw:
+                        continue
+                    rel_parts = Path(raw).parts
+                    if any(part in SENTINEL_EXCLUDE_DIRS or part.endswith(".egg-info") for part in rel_parts[:-1]):
+                        continue
+                    candidate = resolved / raw
+                    if candidate.is_file() and not candidate.is_symlink():
+                        files.append(candidate)
+                        if len(files) >= max_files:
+                            break
+                return sorted(files, key=lambda p: p.relative_to(resolved).as_posix())
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    if resolved == Path.home().resolve():
+        return []
+
+    files = []
+    for dirpath, dirnames, filenames in os.walk(resolved):
+        rel_dir = Path(dirpath).relative_to(resolved)
+        depth = 0 if rel_dir == Path(".") else len(rel_dir.parts)
+        if depth >= max_depth:
+            dirnames[:] = []
+            continue
+        dirnames[:] = _prune_dirs(dirnames)
+        for fn in sorted(filenames):
+            f_path = Path(dirpath) / fn
+            if not f_path.is_symlink():
+                files.append(f_path)
+                if len(files) >= max_files:
+                    return files
+    return files
 
 
 def _get_utc_now() -> str:
@@ -57,21 +120,19 @@ def compute_tree_state(project_root: Path, base_sha: str = "") -> str:
     try:
         return evidence.tree_state(project_root, base_sha)
     except (HarnessError, OSError, subprocess.SubprocessError):
+        resolved = project_root.resolve()
         h = hashlib.sha256()
-        for root_dir, dirs, files in os.walk(project_root):
-            dirs[:] = [d for d in dirs if d not in SENTINEL_EXCLUDE_DIRS]
-            for f in sorted(files):
-                f_path = Path(root_dir) / f
-                try:
-                    rel = f_path.relative_to(project_root).as_posix()
-                    st = f_path.stat()
-                    if st.st_size < 10_000_000:
-                        content_digest = hashlib.sha256(f_path.read_bytes()).hexdigest()
-                        h.update(f"{rel}\0{content_digest}\n".encode("utf-8"))
-                    else:
-                        h.update(f"{rel}\0large:{st.st_size}\n".encode("utf-8"))
-                except OSError:
-                    pass
+        for f_path in _iter_project_files(resolved):
+            try:
+                rel = f_path.relative_to(resolved).as_posix()
+                st = f_path.stat()
+                if st.st_size < 10_000_000:
+                    content_digest = hashlib.sha256(f_path.read_bytes()).hexdigest()
+                    h.update(f"{rel}\0{content_digest}\n".encode("utf-8"))
+                else:
+                    h.update(f"{rel}\0large:{st.st_size}\n".encode("utf-8"))
+            except OSError:
+                continue
         return h.hexdigest()
 
 
@@ -107,24 +168,22 @@ def capture_snapshot(project_root: Path, label: str = "") -> dict[str, Any]:
         all_files: dict[str, str] = {}
         backup_dir = base_dir / f"{snapshot_id}_backup"
         backup_dir.mkdir(parents=True, exist_ok=True)
-        for root_dir, dirs, files in os.walk(project_root):
-            dirs[:] = [d for d in dirs if d not in SENTINEL_EXCLUDE_DIRS]
-            for f in sorted(files):
-                f_path = Path(root_dir) / f
-                try:
-                    st = f_path.stat()
-                    rel = f_path.relative_to(project_root).as_posix()
-                    if st.st_size < 10_000_000:
-                        content = f_path.read_bytes()
-                        all_files[rel] = hashlib.sha256(content).hexdigest()
-                        if st.st_size < 2_000_000:
-                            b_file = backup_dir / rel
-                            b_file.parent.mkdir(parents=True, exist_ok=True)
-                            b_file.write_bytes(content)
-                    else:
-                        all_files[rel] = f"large:{st.st_size}"
-                except OSError:
-                    pass
+        resolved_root = project_root.resolve()
+        for f_path in _iter_project_files(resolved_root):
+            try:
+                st = f_path.stat()
+                rel = f_path.relative_to(resolved_root).as_posix()
+                if st.st_size < 10_000_000:
+                    content = f_path.read_bytes()
+                    all_files[rel] = hashlib.sha256(content).hexdigest()
+                    if st.st_size < 2_000_000:
+                        b_file = backup_dir / rel
+                        b_file.parent.mkdir(parents=True, exist_ok=True)
+                        b_file.write_bytes(content)
+                else:
+                    all_files[rel] = f"large:{st.st_size}"
+            except OSError:
+                continue
 
         snapshot_data = {
             "id": snapshot_id,
@@ -219,17 +278,15 @@ def rollback_to_snapshot(project_root: Path, snapshot_id: str | None = None) -> 
 
         # 2. Clean untracked files not in baseline
         snap_all = target_snap.get("all_files", {})
-        for root_dir, dirs, files in os.walk(project_root):
-            dirs[:] = [d for d in dirs if d not in SENTINEL_EXCLUDE_DIRS]
-            for f in files:
-                f_path = Path(root_dir) / f
-                try:
-                    rel = f_path.relative_to(project_root).as_posix()
-                    if rel not in snap_all:
-                        f_path.unlink()
-                        removed_files.append(rel)
-                except OSError:
-                    pass
+        resolved_root = project_root.resolve()
+        for f_path in _iter_project_files(resolved_root):
+            try:
+                rel = f_path.relative_to(resolved_root).as_posix()
+                if rel not in snap_all:
+                    f_path.unlink()
+                    removed_files.append(rel)
+            except OSError:
+                continue
 
         # 3. Restore any modified files from backup
         snap_id = target_snap.get("id")

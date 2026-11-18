@@ -239,8 +239,6 @@ def inspect_artifact_complexity(path: Path) -> dict:
 
     return {"is_hollow": False, "size_bytes": size}
 
-    return {"is_hollow": False}
-
 
 def image_size(path: Path) -> tuple[int, int] | None:
     """Width and height from a PNG, GIF, BMP or JPEG header; None for anything else."""
@@ -380,8 +378,8 @@ def add(task: Task, path: Path, kind: str, note: str = "", extra: dict | None = 
                         it["stencil_mode"] = s_res["mode"]
                         it["stencil_file"] = s_res["file"]
                 task._update_info(evidence=cur_items)
-        except Exception:
-            pass
+        except (OSError, ValueError, RuntimeError, ImportError) as e:
+            task.log(f"stencil auto-scan skipped: {e}")
 
     return item
 

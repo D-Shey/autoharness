@@ -289,6 +289,25 @@ class OrderService:
     assert "OrderService._dynamic_prop" not in symbols
 
 
+def test_ast_policy_private_method_used_by_subclass():
+    code = """
+class BaseClient:
+    def _helper(self):
+        return 1
+
+    def _unused(self):
+        return 2
+
+class ChildClient(BaseClient):
+    def run(self):
+        return self._helper()
+"""
+    violations = codemap.check_ast_policies(code, filename="sub.py")
+    symbols = [v["symbol"] for v in violations if v["rule"] == "DEAD_PRIVATE_METHOD"]
+    assert "BaseClient._helper" not in symbols
+    assert "BaseClient._unused" in symbols
+
+
 def test_ast_policy_silenced_exceptions():
     code = """
 def process():
