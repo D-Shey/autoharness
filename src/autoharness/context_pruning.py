@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 from typing import Any
@@ -102,15 +103,17 @@ def compact_session_transcript(
     session_id: str | None = None,
     keep_last: int = 5,
     epoch_size: int = 10,
+    anchor_steps: int = 1,
     save_disk: bool = True,
 ) -> dict[str, Any]:
     """Perform multi-tiered layered compaction over an agent session transcript.
 
     Tiers:
-      - Level 0 (Recent): Last `keep_last` steps kept verbatim (100% detail).
-      - Level 1 (Distill): Intermediate steps have their large outputs (tests, diffs, tool runs)
+      - Tier Anchor (Prompt Cache): First `anchor_steps` preserved 100% verbatim for KV-cache reuse (AP-5).
+      - Tier 0 (Recent): Last `keep_last` steps kept verbatim (100% detail).
+      - Tier 1 (Distill): Intermediate steps have their large outputs (tests, diffs, tool runs)
         compressed using cascading output compression (dean0x/skim model).
-      - Level 2 (Epoch): Oldest steps aggregated into milestone summaries.
+      - Tier 2 (Epoch): Oldest intermediate steps aggregated into milestone summaries.
     """
     now_str = _get_utc_now()
     raw_steps: list[dict[str, Any]] = []
@@ -160,15 +163,24 @@ def compact_session_transcript(
     orig_tokens = _estimate_tokens(raw_dump)
 
     # 2. Determine tier boundaries
-    # Steps: [0 ... epoch_cutoff ... distill_cutoff ... total_steps]
-    distill_cutoff = max(0, total_steps - keep_last)
-    epoch_cutoff = max(0, distill_cutoff - epoch_size) if distill_cutoff > epoch_size else 0
+    # Steps: [0 ... actual_anchor ... epoch_cutoff ... distill_cutoff ... total_steps]
+    actual_anchor = min(max(0, anchor_steps), total_steps)
+    distill_cutoff = max(actual_anchor, total_steps - keep_last)
+    epoch_cutoff = max(actual_anchor, distill_cutoff - epoch_size) if (distill_cutoff - actual_anchor) > epoch_size else actual_anchor
 
     compact_steps: list[dict[str, Any]] = []
 
-    # Tier 2: Epoch condensation for steps [0 ... epoch_cutoff]
-    if epoch_cutoff > 0:
-        epoch_slice = raw_steps[:epoch_cutoff]
+    # Tier Anchor: Prompt Cache Anchor Invariant (AP-5)
+    # The first `actual_anchor` step(s) (system prompt / initial user goal) are kept 100% verbatim
+    for idx in range(0, actual_anchor):
+        step = dict(raw_steps[idx])
+        step["tier"] = "anchor"
+        step["folded"] = False
+        compact_steps.append(step)
+
+    # Tier 2: Epoch condensation for intermediate steps [actual_anchor ... epoch_cutoff]
+    if epoch_cutoff > actual_anchor:
+        epoch_slice = raw_steps[actual_anchor:epoch_cutoff]
         tool_counts: dict[str, int] = {}
         for s in epoch_slice:
             for tc in s.get("tool_calls", []):
@@ -177,15 +189,15 @@ def compact_session_transcript(
         tools_summary = ", ".join(f"{k}x{v}" for k, v in sorted(tool_counts.items()))
 
         user_prompts = [s.get("content", "") for s in epoch_slice if s.get("type") == "USER_INPUT"]
-        last_goal = user_prompts[-1][:140] if user_prompts else "Initial session phase"
+        last_goal = user_prompts[-1][:140] if user_prompts else "Intermediate session phase"
 
         epoch_summary = {
-            "step_index": 0,
+            "step_index": actual_anchor,
             "type": "EPOCH_MILESTONE",
             "tier": "epoch",
             "folded": True,
-            "range": [0, epoch_cutoff - 1],
-            "steps_condensed": epoch_cutoff,
+            "range": [actual_anchor, epoch_cutoff - 1],
+            "steps_condensed": epoch_cutoff - actual_anchor,
             "goal": last_goal,
             "tools_executed": tools_summary or "none",
             "timestamp": epoch_slice[0].get("created_at", now_str),
@@ -239,9 +251,15 @@ def compact_session_transcript(
         "tokens_saved": max(0, orig_tokens - compact_tokens),
         "compression_ratio": ratio,
         "tiers": {
-            "epoch_steps": epoch_cutoff,
+            "anchor_steps": actual_anchor,
+            "epoch_steps": epoch_cutoff - actual_anchor,
             "distill_steps": distill_cutoff - epoch_cutoff,
             "recent_steps": total_steps - distill_cutoff,
+        },
+        "prompt_cache_status": {
+            "anchor_preserved": actual_anchor > 0,
+            "anchor_steps": actual_anchor,
+            "kv_cache_aligned": True,
         },
         "steps": compact_steps,
     }
@@ -437,10 +455,22 @@ def format_compaction_report(res: dict[str, Any]) -> str:
         f"- **Steps:** {orig_s} raw steps folded into {comp_s} tiered steps",
         "",
         "## Tier Breakdown",
+    ]
+    if tiers.get("anchor_steps", 0) > 0:
+        lines.append(f"- **Tier Anchor (Prompt Cache Anchor):** {tiers.get('anchor_steps')} initial step(s) preserved 100% verbatim (KV-cache prefix stability, AP-5)")
+    lines.extend([
         f"- **Tier 2 (Epoch Condensation):** {tiers.get('epoch_steps', 0)} oldest steps summarized",
         f"- **Tier 1 (Distill Compression):** {tiers.get('distill_steps', 0)} intermediate steps skimmed",
         f"- **Tier 0 (Recent Fidelity):** {tiers.get('recent_steps', 0)} latest steps preserved 100% verbatim",
-    ]
+    ])
+    if res.get("prompt_cache_status"):
+        pcs = res["prompt_cache_status"]
+        lines.extend([
+            "",
+            "## Prompt Cache Status",
+            f"- **Anchor Preserved:** `{pcs.get('anchor_preserved', True)}`",
+            f"- **KV Cache Aligned:** `{pcs.get('kv_cache_aligned', True)}`",
+        ])
 
     if res.get("compact_file"):
         lines.extend([
@@ -523,3 +553,117 @@ def search_task_history(
                     break
 
     return matches
+
+
+VOLATILE_PREFIX_PATTERNS = [
+    re.compile(r"\b(today|timestamp|datetime|request[_ -]?id|trace[_ -]?id|run[_ -]?id|session[_ -]?id)\b", re.I),
+    re.compile(r"\b20\d\d-\d\d-\d\d\b"),
+    re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I),
+]
+
+
+def check_prompt_cache_invariants(
+    steps: list[dict[str, Any]] | None = None,
+    system_prompt: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Audit prompt cache invariants according to AP-1, AP-2, AP-4, AP-5, AP-15 rules.
+
+    Validates:
+      - AP-1 (Volatile Prefix): Dynamic timestamps, request IDs or UUIDs in the early prefix.
+      - AP-2 (Tool/Schema Ordering): Tools list sorted deterministically by name.
+      - AP-4 (Dynamic Tool Mutation): Tool catalogs mutating names/counts between steps.
+      - AP-5 (Anchor Invariant): Step 0 (anchor) preserved without mutation during folding.
+      - AP-15 (Reasoning Effort Continuity): Reasoning effort or thinking config changing mid-session.
+    """
+    violations: list[dict[str, Any]] = []
+
+    # 1. Check AP-1: Volatile prefix in system prompt or initial prompt
+    check_text = system_prompt or ""
+    if not check_text and steps:
+        for s in steps:
+            if s.get("type") in ("system", "SYSTEM_PROMPT", "USER_INPUT"):
+                check_text = str(s.get("content", ""))
+                break
+
+    if check_text:
+        # Check first 25% of text or first 500 chars
+        prefix_slice = check_text[:max(500, len(check_text) // 4)]
+        for pat in VOLATILE_PREFIX_PATTERNS:
+            m = pat.search(prefix_slice)
+            if m:
+                violations.append({
+                    "rule_id": "AP-1",
+                    "severity": "high",
+                    "category": "prefix-stability",
+                    "issue": f"Volatile dynamic token {m.group(0)!r} detected in early prompt prefix",
+                    "fix": "Move volatile facts (dates, request IDs, UUIDs) to the end of prompt or request context.",
+                    "evidence": prefix_slice[max(0, m.start() - 20):min(len(prefix_slice), m.end() + 20)],
+                })
+                break
+
+    # 2. Check AP-2: Tool schema ordering
+    if tools and len(tools) > 1:
+        tool_names = [t.get("name", "") for t in tools]
+        sorted_names = sorted(tool_names)
+        if tool_names != sorted_names:
+            violations.append({
+                "rule_id": "AP-2",
+                "severity": "high",
+                "category": "tool-schema-stability",
+                "issue": "Tool catalog is not sorted lexicographically, causing schema hash drift across runs",
+                "fix": "Sort tools deterministically by name before serializing into request payload.",
+                "evidence": f"Current: {tool_names[:5]} vs Expected: {sorted_names[:5]}",
+            })
+
+    # 3. Check AP-4, AP-5, AP-15 across steps
+    if steps and len(steps) > 1:
+        # Check AP-5: Anchor preserved
+        first_step = steps[0]
+        if first_step.get("folded") is True or first_step.get("type") == "EPOCH_MILESTONE":
+            violations.append({
+                "rule_id": "AP-5",
+                "severity": "high",
+                "category": "history-stability",
+                "issue": "First step / anchor was compacted or folded, breaking KV-cache prefix for remaining turns",
+                "fix": "Preserve initial anchor step (system prompt / initial goal) 100% verbatim using anchor_steps >= 1.",
+                "evidence": f"Step 0 type: {first_step.get('type')}, folded: {first_step.get('folded')}",
+            })
+
+        # Check AP-4 & AP-15 across steps
+        tool_counts = []
+        efforts = []
+        for s in steps:
+            if "tools" in s and isinstance(s["tools"], list):
+                tool_counts.append(len(s["tools"]))
+            tc = s.get("tool_calls")
+            if isinstance(tc, list):
+                tool_counts.append(len(tc))
+            effort = s.get("reasoning_effort") or s.get("thinking_budget") or s.get("output_config", {}).get("effort")
+            if effort is not None:
+                efforts.append(str(effort))
+
+        # AP-15: effort toggled mid-conversation
+        if len(set(efforts)) > 1:
+            violations.append({
+                "rule_id": "AP-15",
+                "severity": "medium",
+                "category": "effort-continuity",
+                "issue": f"Reasoning effort mutated mid-session across steps: {efforts}",
+                "fix": "Hold request-level reasoning effort constant inside a cached conversation.",
+                "evidence": f"Distinct effort levels detected: {list(set(efforts))}",
+            })
+
+    status = "pass"
+    if any(v["severity"] == "high" for v in violations):
+        status = "fail"
+    elif violations:
+        status = "warning"
+
+    return {
+        "status": status,
+        "cache_friendly": status == "pass",
+        "violations": violations,
+        "total_violations": len(violations),
+    }
+

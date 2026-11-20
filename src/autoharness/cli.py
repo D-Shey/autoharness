@@ -376,6 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("target", nargs="?", default="", help="path to transcript file or session id")
     s.add_argument("--keep-last", type=int, default=5, help="number of recent steps to keep verbatim (default: 5)")
     s.add_argument("--epoch-size", type=int, default=10, help="step batch size for milestone epoch condensation (default: 10)")
+    s.add_argument("--anchor-steps", type=int, default=1, help="number of initial anchor steps preserved verbatim for KV-cache prefix stability (AP-5, default: 1)")
     s.add_argument("--json", action="store_true", help="output structured JSON")
     s = sub.add_parser("stencil", help="Domain-Agnostic Structural Stencil Scanner and Geometric Landmark/Contour Framework")
     s.add_argument("action", nargs="?", choices=["scan", "extract", "list", "show", "check", "add"], default="scan", help="stencil action: scan, list, show, check, add")

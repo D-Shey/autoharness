@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import sys
 import pytest
 
 from autoharness import sentinel, cli, gateway
@@ -82,7 +83,7 @@ def test_sentinel_verification_success(tmp_path):
 
     res = sentinel.run_sentinel_verification(
         repo,
-        test_command="python -c \"import sys; sys.exit(0)\"",
+        test_command=f'"{sys.executable}" -c "import sys; sys.exit(0)"',
         auto_rollback=False,
         check_shims=False
     )
@@ -106,7 +107,7 @@ def test_sentinel_verification_failure_with_auto_rollback(tmp_path):
 
     res = sentinel.run_sentinel_verification(
         repo,
-        test_command="python -c \"import sys; sys.exit(1)\"",
+        test_command=f'"{sys.executable}" -c "import sys; sys.exit(1)"',
         auto_rollback=True,
         check_shims=False
     )
@@ -142,7 +143,7 @@ def test_sentinel_anti_shim_rejection_end_to_end(tmp_path):
 
     res = sentinel.run_sentinel_verification(
         repo,
-        test_command="python -c \"import sys; sys.exit(0)\"",
+        test_command=f'"{sys.executable}" -c "import sys; sys.exit(0)"',
         auto_rollback=True,
         check_shims=True
     )
@@ -190,7 +191,7 @@ def test_cli_sentinel(tmp_path, capsys):
     class FakeArgsRunPreFlight:
         action = "run"
         pre_flight = True
-        test_command = "python -c \"exit(0)\""
+        test_command = f'"{sys.executable}" -c "exit(0)"'
         auto_rollback = False
         no_shims = True
         json = True
@@ -233,7 +234,7 @@ def test_gateway_sentinel_tools(tmp_path):
     res_verify = gw._call({
         "name": "harness_sentinel_verify",
         "arguments": {
-            "test_command": "python -c \"exit(0)\"",
+            "test_command": f'"{sys.executable}" -c "exit(0)"',
             "check_shims": False,
             "raw_json": True
         }

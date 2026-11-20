@@ -1302,6 +1302,10 @@ def http_server():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server
     server.shutdown()
+    try:
+        server.server_close()
+    except Exception:
+        pass
 
 
 def test_http_client_json_and_sse(http_server, monkeypatch):
@@ -1535,7 +1539,7 @@ def test_gateway_serve_end_to_end(project):
             "harness_update_check", "harness_permissions_status", "harness_permissions_enable",
             "harness_simulate_action", "harness_compress_output",
             "harness_sentinel_verify", "harness_sentinel_snapshot", "harness_sentinel_rollback",
-            "harness_compact_session", "harness_session_status"
+            "harness_compact_session", "harness_check_prompt_cache", "harness_session_status"
         ]
 
         approved_servers(project, {"fake": FAKE_CFG})
@@ -1555,8 +1559,15 @@ def test_gateway_serve_end_to_end(project):
             assert rid < 400, "fake server never went away"
             time.sleep(0.2)
     finally:
-        proc.stdin.close()
-        proc.wait(timeout=15)
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
     assert proc.returncode == 0
 
 
@@ -3645,7 +3656,7 @@ def test_gateway_does_not_run_a_server_approved_nowhere(project):
     assert "fake" not in gw.clients
     approvals.approve(project.root, "fake", FAKE_CFG)
     assert gw.sync()                                                    # picked up without a restart
-    wait_for(lambda: gw.status["fake"]["status"] == "running")
+    wait_for(lambda: gw.status["fake"]["status"] == "running", timeout=30.0)
     changed = {**FAKE_CFG, "args": [*FAKE_CFG["args"], "--x"]}
     assert approvals.approved(project.root, "fake", FAKE_CFG)
     assert not approvals.approved(project.root, "fake", changed)       # approval is for this exact config

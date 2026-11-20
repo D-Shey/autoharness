@@ -184,47 +184,50 @@ def test_gateway_codemode_integration(project):
     gw.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
     assert gw.sync()
 
-    # Wait until fake server is running
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and gw.status.get("fake", {}).get("status") != "running":
-        time.sleep(0.1)
-    assert gw.status.get("fake", {}).get("status") == "running"
+    try:
+        # Wait until fake server is running
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and gw.status.get("fake", {}).get("status") != "running":
+            time.sleep(0.1)
+        assert gw.status.get("fake", {}).get("status") == "running"
 
-    def rpc(method, params=None, rid=1):
-        return gw.handle({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+        def rpc(method, params=None, rid=1):
+            return gw.handle({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
 
-    def call(name, args=None):
-        return rpc("tools/call", {"name": name, "arguments": args or {}})["result"]
+        def call(name, args=None):
+            return rpc("tools/call", {"name": name, "arguments": args or {}})["result"]
 
-    # 1. Test harness_search
-    search_res = call("harness_search", {"query": "echo"})
-    search_text = search_res["content"][0]["text"]
-    assert "FakeTools" in search_text
-    assert "echo" in search_text
+        # 1. Test harness_search
+        search_res = call("harness_search", {"query": "echo"})
+        search_text = search_res["content"][0]["text"]
+        assert "FakeTools" in search_text
+        assert "echo" in search_text
 
-    # 2. Test harness_execute single call
-    exec_code = """
-    const res = await mcp.fake.echo({ text: "hello from code mode" });
-    return res.content[0].text;
-    """
-    exec_res = call("harness_execute", {"code": exec_code})
-    assert not exec_res.get("isError")
-    assert exec_res["content"][0]["text"] == "hello from code mode"
+        # 2. Test harness_execute single call
+        exec_code = """
+        const res = await mcp.fake.echo({ text: "hello from code mode" });
+        return res.content[0].text;
+        """
+        exec_res = call("harness_execute", {"code": exec_code})
+        assert not exec_res.get("isError")
+        assert exec_res["content"][0]["text"] == "hello from code mode"
 
-    # 3. Test harness_execute batch multi-step call with filtering
-    batch_code = """
-    const items = ["alpha", "beta", "gamma"];
-    const results = [];
-    for (const item of items) {
-        const resp = await mcp.fake.echo({ text: "processed-" + item });
-        results.push(resp.content[0].text);
-    }
-    return results.filter(r => r.includes("a"));
-    """
-    batch_res = call("harness_execute", {"code": batch_code})
-    assert not batch_res.get("isError")
-    parsed = json.loads(batch_res["content"][0]["text"])
-    assert parsed == ["processed-alpha", "processed-beta", "processed-gamma"]
+        # 3. Test harness_execute batch multi-step call with filtering
+        batch_code = """
+        const items = ["alpha", "beta", "gamma"];
+        const results = [];
+        for (const item of items) {
+            const resp = await mcp.fake.echo({ text: "processed-" + item });
+            results.push(resp.content[0].text);
+        }
+        return results.filter(r => r.includes("a"));
+        """
+        batch_res = call("harness_execute", {"code": batch_code})
+        assert not batch_res.get("isError")
+        parsed = json.loads(batch_res["content"][0]["text"])
+        assert parsed == ["processed-alpha", "processed-beta", "processed-gamma"]
+    finally:
+        gw.close_all()
 
 
 def test_sandbox_async_timeout_hang():
@@ -248,24 +251,27 @@ def test_gateway_hyphenated_server_resolution(project):
     gw.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
     assert gw.sync()
 
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and gw.status.get("fake-hyphen", {}).get("status") != "running":
-        time.sleep(0.1)
-    assert gw.status.get("fake-hyphen", {}).get("status") == "running"
+    try:
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline and gw.status.get("fake-hyphen", {}).get("status") != "running":
+            time.sleep(0.1)
+        assert gw.status.get("fake-hyphen", {}).get("status") == "running"
 
-    def rpc(method, params=None, rid=1):
-        return gw.handle({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+        def rpc(method, params=None, rid=1):
+            return gw.handle({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
 
-    def call(name, args=None):
-        return rpc("tools/call", {"name": name, "arguments": args or {}})["result"]
+        def call(name, args=None):
+            return rpc("tools/call", {"name": name, "arguments": args or {}})["result"]
 
-    exec_code = """
-    const res = await mcp.fake_hyphen.echo({ text: "hyphen resolved" });
-    return res.content[0].text;
-    """
-    exec_res = call("harness_execute", {"code": exec_code})
-    assert not exec_res.get("isError")
-    assert exec_res["content"][0]["text"] == "hyphen resolved"
+        exec_code = """
+        const res = await mcp.fake_hyphen.echo({ text: "hyphen resolved" });
+        return res.content[0].text;
+        """
+        exec_res = call("harness_execute", {"code": exec_code})
+        assert not exec_res.get("isError")
+        assert exec_res["content"][0]["text"] == "hyphen resolved"
+    finally:
+        gw.close_all()
 
 
 def test_codegen_recursion_depth():

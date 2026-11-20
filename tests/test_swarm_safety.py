@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,7 +36,7 @@ def test_generated_plans_persist_and_execute_the_requested_workflow(tmp_path: Pa
                 "t1": swarm.SwarmTask(
                     id="t1",
                     name="First Task",
-                    command="python -c \"print('WORKFLOW_FIRST_EXECUTED')\"",
+                    command=f'"{sys.executable}" -c "print(\'WORKFLOW_FIRST_EXECUTED\')"',
                 )
             },
         )
@@ -46,7 +47,7 @@ def test_generated_plans_persist_and_execute_the_requested_workflow(tmp_path: Pa
                 "t2": swarm.SwarmTask(
                     id="t2",
                     name="Second Task",
-                    command="python -c \"print('WORKFLOW_SECOND_EXECUTED')\"",
+                    command=f'"{sys.executable}" -c "print(\'WORKFLOW_SECOND_EXECUTED\')"',
                 )
             },
         )
@@ -77,7 +78,7 @@ def test_concurrent_atomic_saves_have_unique_temps(tmp_path: Path):
         id="swarm_concurrent_test",
         title="Concurrent Save Plan",
         tasks={
-            "t1": swarm.SwarmTask(id="t1", name="Task 1", command="python -c \"print(1)\""),
+            "t1": swarm.SwarmTask(id="t1", name="Task 1", command=f'"{sys.executable}" -c "print(1)"'),
         },
     )
     swarm_dir = swarm.get_swarm_dir(tmp_path)

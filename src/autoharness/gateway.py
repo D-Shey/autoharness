@@ -168,16 +168,24 @@ META_TOOLS = [
          "snapshot_id": {"type": "string", "description": "Optional snapshot ID to roll back to (defaults to latest active snapshot)."}},
          "required": []}},
     {"name": "harness_compact_session",
-     "description": "Dynamically compact and fold session transcript using 3-tier windowing (Recent verbatim, Distill filtered, Epoch condensed) with cascading raw log disk persistence (Harness² model).",
+     "description": "Dynamically compact and fold session transcript using 4-tier windowing (Anchor preserved, Epoch condensed, Distill filtered, Recent verbatim) ensuring prompt cache / KV-cache stability (AP-5, Harness² model).",
      "inputSchema": {"type": "object", "properties": {
          "transcript_path": {"type": "string", "description": "Optional path to .jsonl session transcript file."},
          "steps": {"type": "array", "description": "Optional list of transcript step objects to compact directly in memory."},
          "session_id": {"type": "string", "description": "Optional session ID for indexing and storage."},
          "keep_last": {"type": "integer", "description": "Number of recent steps to keep 100% verbatim (default: 5)."},
          "epoch_size": {"type": "integer", "description": "Number of steps per epoch condensation bucket (default: 10)."},
+         "anchor_steps": {"type": "integer", "description": "Number of initial anchor steps (system prompt / initial goal) preserved 100% verbatim for KV-cache prefix stability (AP-5, default: 1)."},
          "save_disk": {"type": "boolean", "description": "Persist full and compact transcripts to .autoharness/folded/ (default: true)."},
          "raw_json": {"type": "boolean", "description": "Return structured JSON with statistics instead of formatted Markdown outline."}},
          "required": []}},
+    {"name": "harness_check_prompt_cache",
+     "description": "Audit prompt cache invariants (AP-1 volatile prefix, AP-2 tool schema ordering, AP-4 dynamic tool mutation, AP-5 anchor preservation, AP-15 effort continuity) to prevent KV-cache misses and unexpected cost surges.",
+     "inputSchema": {"type": "object", "properties": {
+         "system_prompt": {"type": "string", "description": "System instructions text to scan for volatile early tokens (AP-1)."},
+         "steps": {"type": "array", "description": "Session transcript steps to verify anchor preservation (AP-5) and effort continuity (AP-15)."},
+         "tools": {"type": "array", "description": "Tools list to check deterministic lexicographical ordering (AP-2)."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON dictionary instead of formatted report."}}}},
     {"name": "harness_session_status",
      "description": "Inspect session transcript compaction status, token reduction metrics, and folded transcript archives.",
      "inputSchema": {"type": "object", "properties": {
@@ -446,7 +454,7 @@ class Gateway:
         out: dict[str, tuple[str, str]] = {}
         with self._lock:
             for server in sorted(self.tools):
-                for t in self.tools[server]:
+                for t in sorted(self.tools[server], key=lambda x: x.get("name", "")):
                     out.setdefault(native_name(server, t["name"]), (server, t["name"]))
         return out
 
@@ -454,7 +462,7 @@ class Gateway:
         listed = list(META_TOOLS)
         with self._lock:
             by_key = {(s, t["name"]): t for s, ts in self.tools.items() for t in ts}
-        for native, key in self.native_map().items():
+        for native, key in sorted(self.native_map().items(), key=lambda kv: kv[0]):
             t = by_key[key]
             listed.append({"name": native, "description": f"[{key[0]}] {t.get('description', '')}".strip(),
                            "inputSchema": t.get("inputSchema") or {"type": "object"}})
@@ -858,6 +866,7 @@ class Gateway:
             session_id = args.get("session_id")
             keep_last = int(args.get("keep_last") or 5)
             epoch_size = int(args.get("epoch_size") or 10)
+            anchor_steps = int(args.get("anchor_steps", 1))
             save_disk = bool(args.get("save_disk", True))
             raw_json = bool(args.get("raw_json", False))
 
@@ -881,11 +890,32 @@ class Gateway:
                 session_id=session_id,
                 keep_last=keep_last,
                 epoch_size=epoch_size,
+                anchor_steps=anchor_steps,
                 save_disk=save_disk
             )
             if raw_json:
                 return _text(json.dumps(res, indent=2, ensure_ascii=False))
             return _text(context_pruning.format_compaction_report(res))
+        if name == "harness_check_prompt_cache":
+            from autoharness import context_pruning
+            raw_json = bool(args.get("raw_json", False))
+            res = context_pruning.check_prompt_cache_invariants(
+                steps=args.get("steps"),
+                system_prompt=args.get("system_prompt"),
+                tools=args.get("tools"),
+            )
+            if raw_json:
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            lines = [f"## Prompt Cache Invariants Audit: `{res['status'].upper()}`"]
+            lines.append(f"- **Cache Friendly:** `{res['cache_friendly']}`")
+            lines.append(f"- **Total Violations:** {res['total_violations']}")
+            if res["violations"]:
+                lines.append("\n### Detected Invariant Violations:")
+                for v in res["violations"]:
+                    lines.append(f"- **[{v['rule_id']}] ({v['severity']}) {v['issue']}**")
+                    lines.append(f"  - *Fix:* {v['fix']}")
+                    lines.append(f"  - *Evidence:* `{v['evidence']}`")
+            return _text("\n".join(lines))
         if name == "harness_session_status":
             from autoharness import context_pruning
             session_id = args.get("session_id")

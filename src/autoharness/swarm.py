@@ -758,21 +758,21 @@ def create_sample_swarm_plan(title: str, tasks: list[dict[str, Any]] | None = No
                 "name": "Implement Core Engine Logic",
                 "role": "coder",
                 "depends_on": ["t1_research"],
-                "command": "python -c \"print('Engine core built')\"",
+                "command": f'"{sys.executable}" -c "print(\'Engine core built\')"',
             },
             {
                 "id": "t3_ui_cli",
                 "name": "Implement CLI and Presentation",
                 "role": "coder",
                 "depends_on": ["t1_research"],
-                "command": "python -c \"print('CLI interface built')\"",
+                "command": f'"{sys.executable}" -c "print(\'CLI interface built\')"',
             },
             {
                 "id": "t4_verify",
                 "name": "Integration Testing and Verification Gate",
                 "role": "verifier",
                 "depends_on": ["t2_engine", "t3_ui_cli"],
-                "command": "python -c \"print('All integration tests passed')\"",
+                "command": f'"{sys.executable}" -c "print(\'All integration tests passed\')"',
             },
         ]
     plan_dict = {

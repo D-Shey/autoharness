@@ -601,11 +601,14 @@ def cmd_compact(args, project, catalog) -> int:
     keep_last = 5 if kl is None else int(kl)
     es = getattr(args, "epoch_size", None)
     epoch_size = 10 if es is None else int(es)
+    ans = getattr(args, "anchor_steps", None)
+    anchor_steps = 1 if ans is None else int(ans)
     res = context_pruning.compact_session_transcript(
         target_path,
         project_root=proj_root,
         keep_last=keep_last,
         epoch_size=epoch_size,
+        anchor_steps=anchor_steps,
         save_disk=True,
     )
     if raw_json:

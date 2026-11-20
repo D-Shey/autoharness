@@ -198,9 +198,13 @@ def test_compact_session_transcript_layers(tmp_path):
     assert res["original_steps"] == 18
     assert res["compact_steps"] < 18
     assert res["compression_ratio"] > 20.0
+    assert res["tiers"]["anchor_steps"] == 1
     assert res["tiers"]["recent_steps"] == 4
     assert res["tiers"]["distill_steps"] == 6
-    assert res["tiers"]["epoch_steps"] == 8
+    assert res["tiers"]["epoch_steps"] == 7
+    assert res["steps"][0]["tier"] == "anchor"
+    assert res["steps"][0]["folded"] is False
+    assert res["prompt_cache_status"]["anchor_preserved"] is True
 
     # Verify disk files
     compact_path = Path(res["compact_file"])
@@ -213,7 +217,9 @@ def test_compact_session_transcript_layers(tmp_path):
     report = context_pruning.format_compaction_report(res)
     assert "# Session Compactor Report: `test-sess-01`" in report
     assert "Token Compression Ratio" in report
+    assert "**Tier Anchor (Prompt Cache Anchor):** 1 initial step(s) preserved 100% verbatim" in report
     assert "**Tier 0 (Recent Fidelity):** 4 latest steps preserved 100% verbatim" in report
+    assert "Anchor Preserved:" in report
 
 
 def test_session_compaction_status_and_prune(tmp_path):
@@ -383,4 +389,63 @@ def test_gateway_compact_session_tools(project):
     st_data = json.loads(st_res["result"]["content"][0]["text"])
     assert st_data["status"] == "found"
     assert st_data["session_id"] == "gw-compact-test"
+
+    # Test harness_check_prompt_cache via gateway
+    cache_res = gw.handle({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "harness_check_prompt_cache",
+            "arguments": {
+                "system_prompt": "You are a helpful assistant. Today is 2026-11-19 and requestId=abc-123.",
+                "tools": [{"name": "zebra"}, {"name": "alpha"}],
+                "raw_json": True,
+            }
+        }
+    })
+    assert not cache_res["result"].get("isError")
+    cache_data = json.loads(cache_res["result"]["content"][0]["text"])
+    assert cache_data["status"] == "fail"
+    rule_ids = [v["rule_id"] for v in cache_data["violations"]]
+    assert "AP-1" in rule_ids
+    assert "AP-2" in rule_ids
+
+
+def test_prompt_cache_invariants_comprehensive():
+    # 1. Clean valid inputs
+    clean_prompt = "You are an expert engineer adhering to strict invariants. Do not execute unverified commands."
+    clean_tools = [{"name": "build_project"}, {"name": "run_tests"}, {"name": "verify_diff"}]
+    clean_steps = [
+        {"step": 0, "type": "system", "content": clean_prompt, "folded": False},
+        {"step": 1, "type": "user", "content": "Analyze project architecture", "reasoning_effort": "high"},
+        {"step": 2, "type": "assistant", "content": "Result outline", "reasoning_effort": "high"},
+    ]
+    res_clean = context_pruning.check_prompt_cache_invariants(
+        steps=clean_steps,
+        system_prompt=clean_prompt,
+        tools=clean_tools,
+    )
+    assert res_clean["status"] == "pass"
+    assert res_clean["cache_friendly"] is True
+    assert res_clean["total_violations"] == 0
+
+    # 2. Mutated anchor (AP-5)
+    bad_steps_anchor = [
+        {"step": 0, "type": "EPOCH_MILESTONE", "folded": True, "content": "Folded milestone"},
+        {"step": 1, "type": "user", "content": "Next turn"},
+    ]
+    res_anchor = context_pruning.check_prompt_cache_invariants(steps=bad_steps_anchor)
+    assert res_anchor["status"] == "fail"
+    assert any(v["rule_id"] == "AP-5" for v in res_anchor["violations"])
+
+    # 3. Effort toggling (AP-15)
+    bad_steps_effort = [
+        {"step": 0, "type": "system", "content": clean_prompt, "folded": False},
+        {"step": 1, "type": "user", "reasoning_effort": "low"},
+        {"step": 2, "type": "assistant", "reasoning_effort": "high"},
+    ]
+    res_effort = context_pruning.check_prompt_cache_invariants(steps=bad_steps_effort)
+    assert any(v["rule_id"] == "AP-15" for v in res_effort["violations"])
+
 

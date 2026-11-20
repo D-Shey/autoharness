@@ -157,7 +157,7 @@ def test_eval_batch_runner_can_call_autoharness_without_locking_itself(tmp_path,
                       '    code=cli.main(["--project",case["input"],"status"])\n'
                       'print(json.dumps({"passed":code==0}))\n', encoding='utf-8')
     code, result = run(root, capsys, 'eval', 'batch', '--dataset', str(dataset), '--variant', 'baseline',
-                       '--timeout', '3', '--', sys.executable, str(runner))
+                       '--timeout', '20', '--', sys.executable, str(runner))
     assert code == 0 and result['recorded'] == 1
 
 

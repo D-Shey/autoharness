@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import sys
 import pytest
 from autoharness import swarm, gateway
 from autoharness.env import Project
@@ -117,7 +118,7 @@ def test_execute_swarm_plan_barrier_blocks_downstream(tmp_path):
                 id="t1",
                 name="Failing Barrier Node",
                 role="coder",
-                command="python -c \"print('ran')\"",
+                command=f'"{sys.executable}" -c "print(\'ran\')"',
                 expected_artifacts=["missing_output.py"],  # will fail barrier
             ),
             "t2": swarm.SwarmTask(
@@ -125,7 +126,7 @@ def test_execute_swarm_plan_barrier_blocks_downstream(tmp_path):
                 name="Downstream Dependent Node",
                 role="verifier",
                 depends_on=["t1"],
-                command="python -c \"print('should not run')\"",
+                command=f'"{sys.executable}" -c "print(\'should not run\')"',
             ),
         },
     )

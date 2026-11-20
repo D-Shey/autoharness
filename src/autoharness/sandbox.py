@@ -326,7 +326,10 @@ def execute(
         watchdog.cancel()
         if proc.poll() is None:
             proc.kill()
+        stderr_err = ""
         try:
+            if proc.stderr:
+                stderr_err = proc.stderr.read()
             if proc.stdin:
                 proc.stdin.close()
             if proc.stdout:
@@ -338,9 +341,12 @@ def execute(
         proc.wait()
 
     if final_result is None:
+        err_msg = f"Execution timed out or runner exited unexpectedly after {timeout} seconds"
+        if stderr_err.strip():
+            err_msg += f" (stderr: {stderr_err.strip()})"
         return {
             "isError": True,
-            "error": f"Execution timed out or runner exited unexpectedly after {timeout} seconds",
+            "error": err_msg,
         }
 
     return final_result
