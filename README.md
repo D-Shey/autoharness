@@ -418,8 +418,40 @@ AutoHarness integrates key architectural innovations from Google Research's **Ha
 - **Clean Separation of Concerns**: Core CLI dispatching decomposed into dedicated decoupled submodules:
   - `autoharness.cli`: Core execution loop, argument parsing, and task lifecycle management.
   - `autoharness.hooks`: Multi-agent session tracking, prompt interception, and pre-tool approval gating.
-  - `autoharness.commands.subsystems`: Extensible subsystem handlers (gateway, memory, codemap, swarm, drive, permissions, sentinel, stencil, slot, probe).
+  - `autoharness.commands.subsystems`: Extensible subsystem handlers (gateway, memory, codemap, swarm, drive, permissions, sentinel, stencil, slot, probe, openspec).
   - `autoharness.commands.meta`: Audit, evaluation metrics, followups, journal, lessons, and rulings.
+
+### 13. Swarm Concurrency Isolation & Intent Leases
+- **Ephemeral Git Worktree Isolation**: Isolates concurrent subagents into dedicated detached HEAD Git worktrees (`git worktree add --detach <wt_dir> HEAD`), preventing file access conflicts with deterministic merge.
+- **Intent Lease & Receipt-Gated Completion**: Path collision locks with TTL expiration (`IntentLeaseManager`) and cryptographically signed SHA-256 completion receipts (`SwarmReceipt`).
+  ```bash
+  autoharness swarm leases      # inspect active path locks and TTLs
+  autoharness swarm receipts    # inspect verified completion receipts
+  ```
+
+### 14. In-Process AI Gateway Circuit Breaker
+- **Cascading Failure Protection**: Circuit breaker for MCP tools with `CLOSED`, `OPEN`, and `HALF_OPEN` state transitions, automatic cooldown recovery, and fallbacks. In-process LRU cache with TTL expiration.
+  ```bash
+  autoharness gateway circuit   # inspect active tool circuit breaker health
+  ```
+
+### 15. Clawvet-Style Offline AST Security Gatekeeper
+- **Deep Syntax Inspection**: Static Python AST scanner detecting code execution primitives (`eval`, `exec`, `subprocess(..., shell=True)`), credential targets (`.env`, `.ssh/id_rsa`, `.aws`), and obfuscation in skills and MCP server declarations.
+  ```bash
+  autoharness vet <candidate>
+  ```
+
+### 16. OpenSpec Spec-Driven Development Compatibility Bridge
+- **Full Companion Coexistence**: Native compatibility with OpenSpec (`/opsx:*` slash commands and `openspec` CLI), allowing early artifact generation (`openspec/`, `proposal.md`, `specs/`, `design.md`, `tasks.md`) without hook blocking, with bidirectional task synchronization into AutoHarness followups.
+  ```bash
+  autoharness openspec status   # detect OpenSpec workspace and changes
+  autoharness openspec sync     # sync tasks.md checklist items to followups
+  autoharness openspec changes  # list active and archived changes
+  ```
+
+### 17. Multiagent Peer Challenge & Sentinel TDD Enforcement
+- **Two-Sided Peer Review Challenge**: Arbitrates critic claims against author defenses and code evidence, synthesizing consensus resolutions (`overruled`, `compromise`, `upheld`).
+- **Sentinel TDD Red/Green Discipline**: Enforces that bug-reproducing tests fail cleanly (RED phase) before implementation and verifies the transition to GREEN after code changes.
 
 ## Security in short
 

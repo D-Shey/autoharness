@@ -4,7 +4,54 @@ All notable changes to AutoHarness are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] - 2026-11-08
+## [1.2.0] - 2026-11-22
+
+Comprehensive architectural update integrating major industry patterns and companion spec-driven toolchain compatibility:
+
+### Added
+- **Git Worktree Concurrency Isolation** (`autoharness swarm`):
+  - Ephemeral detached HEAD worktrees (`git worktree add --detach <wt_dir> HEAD`) for parallel subagents.
+  - Deterministic merging of worker artifacts back into the primary workspace (`merge_worktree_artifacts`).
+  - Automatic worktree pruning and cleanup with fallback safety.
+- **Intent Lease & Receipt-Gated Completion** (`autoharness swarm leases`, `receipts`):
+  - Collision-safe path leases with TTL expiration and atomic state locking (`IntentLeaseManager`).
+  - Cryptographically signed completion receipts using SHA-256 artifact hashes (`issue_completion_receipt`, `verify_completion_receipt`).
+  - CLI subcommands `autoharness swarm leases` and `autoharness swarm receipts`.
+- **Clawvet-Style Offline AST Security Gatekeeper** (`autoharness vet`):
+  - Deep syntax analysis detecting code execution (`eval`, `exec`, `__import__`, `subprocess(shell=True)`), credential exfiltration (`.env`, `.ssh/id_rsa`, `.aws`), and obfuscation patterns without external dependencies.
+  - Integrated into skill installation and MCP vetting with severity ratings (`clean`, `warning`, `critical`).
+- **In-Process AI Gateway Circuit Breaker** (`autoharness gateway circuit`):
+  - Cascading failure protection for MCP tools with state transitions (`CLOSED`, `OPEN`, `HALF_OPEN`), cooldown recovery, and fallback execution.
+  - Thread-safe LRU cache with TTL expiration (`LRUTtlCache`).
+- **Machine-Native DOM & SVG Perception** (`autoharness stencil`):
+  - Structural DOM element parsing, interactive control discovery, accessibility scoring (0.0-1.0), and semantic landmark recognition without vision models.
+  - Automatic detection of a11y violations (`IMG_MISSING_ALT`, `HEADING_HIERARCHY_SKIP`).
+- **Perplexity-Style Multiagent Peer Challenge** (`autoharness review`):
+  - Two-sided arbitration between critic claims and author code evidence (`create_peer_challenge`).
+  - Consensus synthesis determining whether claims are `overruled`, `compromise`, or `upheld` (`synthesize_peer_resolution`).
+- **Sentinel TDD Red/Green Phase Enforcement** (`autoharness sentinel`):
+  - Automatic verification that bugfix tests fail cleanly (RED phase) before implementation is accepted.
+  - Automated confirmation that implementation resolves failing baseline to passing (GREEN phase).
+- **keyshroud Dynamic Secret Masking** (`autoharness/secrets.py`):
+  - Zero-dependency regex redactor sanitizing OpenAI, Anthropic, GitHub, Google API Keys (`AIzaSy...`), JWTs, AWS credentials, and Git URL tokens from tool outputs and logs.
+  - Recursive dictionary sanitizer (`mask_dict`).
+- **Session Telemetry & Swarm DAG Metrics** (`autoharness/telemetry.py`):
+  - Topological depth calculation (`dag_depth`), task completion ratios, and receipt counters.
+- **OpenSpec Spec-Driven Development Compatibility Bridge** (`autoharness openspec`):
+  - Native coexistence with OpenSpec companion CLI and `/opsx:*` slash commands (`explore`, `propose`, `apply`, `update`, `sync`, `archive`, `new`, `continue`, `ff`, `verify`).
+  - Pre-tool hook whitelisting allowing early artifact creation (`openspec/`, `proposal.md`, `specs/`, `design.md`, `tasks.md`).
+  - Bidirectional task synchronization from `tasks.md` into AutoHarness followups (`autoharness openspec sync`).
+
+### Fixed
+- Fixed directory scanning in `list_swarm_plans()` to ignore non-dict JSON files like `leases.json`.
+- Fixed dictionary argument handling in `synthesize_peer_resolution()` and added missing `json` import in `reviewers.py`.
+- Fixed zero-check accessibility score calculation in `extract_dom_perception()` for clean vector SVG files.
+
+## [1.1.0] - 2026-11-21
+
+- Version synchronization across package distribution and agent configurations.
+
+
 
 Major milestone release achieving full autonomous agentic engineering readiness (Agentic Readiness Index: 91.1%, Grade A+).
 

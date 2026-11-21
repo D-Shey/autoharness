@@ -841,8 +841,12 @@ def extract_dom_perception(html_or_path: str | Path) -> dict[str, Any]:
         else:
             parser._passed_checks += 1
 
-    total_checks = max(1, parser._total_checks)
-    a11y_score = round(max(0.0, min(1.0, parser._passed_checks / total_checks)), 4)
+    if parser._total_checks == 0:
+        total_checks = 0
+        a11y_score = 1.0 if not parser.violations else 0.0
+    else:
+        total_checks = parser._total_checks
+        a11y_score = round(max(0.0, min(1.0, parser._passed_checks / total_checks)), 4)
 
     # Compact skeleton
     skeleton_lines = []
