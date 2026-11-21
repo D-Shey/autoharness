@@ -676,10 +676,12 @@ def list_swarm_plans(project_root: Path) -> list[dict[str, Any]]:
         swarm_dir = get_swarm_dir(project_root)
         plans = []
         for f in swarm_dir.glob("*.json"):
-            if f.name.startswith(".tmp_"):
+            if f.name.startswith(".tmp_") or f.name in ("leases.json", "receipts.json"):
                 continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    continue
                 tasks = data.get("tasks", {})
                 total = len(tasks)
                 completed = sum(1 for t in (tasks.values() if isinstance(tasks, dict) else tasks) if t.get("status") == "completed")

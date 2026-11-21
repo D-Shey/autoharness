@@ -8,6 +8,7 @@ waits for its answer, the autoharness hook neither gates nor prompts them.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -177,8 +178,9 @@ def synthesize_peer_resolution(challenge: dict[str, Any]) -> dict[str, Any]:
     evaluations = []
 
     for item in claims:
-        claim_text = item["critic_claim"].lower()
-        defense = item["author_defense"].lower()
+        claim_text = str(item.get("critic_claim", "")).lower()
+        defense_val = item.get("author_defense", "")
+        defense = json.dumps(defense_val).lower() if isinstance(defense_val, (dict, list)) else str(defense_val).lower()
 
         refuted = False
         refuting_evidence = ""
