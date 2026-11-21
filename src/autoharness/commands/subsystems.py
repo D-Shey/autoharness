@@ -46,6 +46,13 @@ def cmd_gateway(args, project, catalog):
              "next": f"Ask the user to {agent.reload_hint} to drop the gateway."})
     elif args.action == "approve":
         return gateway_approve(args, project)
+    elif args.action == "circuit":
+        state_file = project.state / "gateway.state.json"
+        state = json.loads(state_file.read_text("utf-8")) if state_file.exists() else {}
+        servers = state.get("servers", {})
+        circuits = {k: v.get("circuit", {"state": "closed", "failures": 0}) for k, v in servers.items()}
+        out({"circuits": circuits, "state_updated": state.get("updated")})
+        return 0
     else:
         reg = project.gateway_registry()
         state_file = project.state / "gateway.state.json"
@@ -297,6 +304,44 @@ def cmd_swarm(args, project, catalog) -> int:
             else:
                 print(swarm.format_swarm_verify_report(report))
             return 0 if report.get("status") == "passed" else 1
+        except Exception as e:
+            out({"status": "error", "error": str(e)})
+            return 1
+
+    if action == "leases":
+        mgr = swarm.IntentLeaseManager(project.root)
+        plan_id = getattr(args, "plan_id", None)
+        active = mgr.list_active_leases(plan_id)
+        out({
+            "status": "ok",
+            "plan_id": plan_id,
+            "active_leases_count": len(active),
+            "leases": active,
+        })
+        return 0
+
+    if action == "receipts":
+        plan_id = getattr(args, "plan_id", None)
+        if not plan_id:
+            plans = swarm.list_swarm_plans(project.root)
+            if not plans:
+                out({"status": "error", "error": "No swarm plans found to check receipts."})
+                return 1
+            plan_id = plans[0]["id"]
+        try:
+            plan = swarm.load_swarm_plan(plan_id, project.root)
+            receipts_summary = {}
+            for tid, t in plan.tasks.items():
+                if t.receipt:
+                    v = swarm.verify_completion_receipt(t.receipt, project.root, t)
+                    receipts_summary[tid] = v
+            out({
+                "status": "ok",
+                "plan_id": plan.id,
+                "receipts_count": len(receipts_summary),
+                "receipts": receipts_summary,
+            })
+            return 0
         except Exception as e:
             out({"status": "error", "error": str(e)})
             return 1
@@ -765,6 +810,27 @@ def cmd_probe(args, project, catalog) -> int:
     else:
         report = probe.format_probe_report(probe_res)
         print(report)
+    return 0
+
+
+def cmd_openspec(args, project, catalog):
+    from autoharness import openspec
+    action = getattr(args, "action", "status") or "status"
+    if action == "status":
+        ws = openspec.detect_workspace(project.root)
+        if getattr(args, "json", False):
+            out({"status": "ok", "openspec": ws})
+        else:
+            print(openspec.format_openspec_status(ws))
+        return 0
+    elif action == "sync":
+        res = openspec.sync_tasks_to_followups(project, getattr(args, "change", None))
+        out({"status": "ok", "sync": res})
+        return 0
+    elif action == "changes":
+        changes = openspec.list_changes(project.root)
+        out({"status": "ok", "changes": changes})
+        return 0
     return 0
 
 

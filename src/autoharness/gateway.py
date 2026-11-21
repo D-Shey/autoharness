@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable
 
 from autoharness import __version__, approvals, egress
+from autoharness.circuit import CircuitBreakerOpenError, CircuitBreakerRegistry, LRUTtlCache
 from autoharness.mcp_client import PROTOCOL_VERSIONS, McpError, make_client, withheld_env
 
 INSTRUCTIONS = ("Servers added with `autoharness add mcp` appear here without a restart. In Code Mode, call "
@@ -112,6 +113,14 @@ META_TOOLS = [
          "plan_id": {"type": "string", "description": "Optional swarm plan ID or file path to verify (defaults to latest active plan)."},
          "raw_json": {"type": "boolean", "description": "Return structured JSON instead of Markdown report."}},
          "required": []}},
+    {"name": "harness_swarm_leases",
+     "description": "Inspect active Morrow Intent Leases and path resource locks across running Swarm DAG tasks.",
+     "inputSchema": {"type": "object", "properties": {
+         "plan_id": {"type": "string", "description": "Optional swarm plan ID filter."}}}},
+    {"name": "harness_swarm_receipts",
+     "description": "Verify and inspect Morrow Receipt-Gated Completion tokens and cryptographic artifact proofs for a Swarm DAG plan.",
+     "inputSchema": {"type": "object", "properties": {
+         "plan_id": {"type": "string", "description": "Optional swarm plan ID or file path (defaults to latest plan)."}}}},
     {"name": "harness_drive_status",
      "description": "Inspect continuous autonomy backlog queue and current self-driving session status.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -192,6 +201,20 @@ META_TOOLS = [
          "session_id": {"type": "string", "description": "Optional session ID to inspect metrics for."},
          "raw_json": {"type": "boolean", "description": "Return structured JSON with statistics instead of formatted report."}},
          "required": []}},
+    {"name": "harness_circuit_status",
+     "description": "Inspect and manage in-process circuit breakers and resilience states for MCP servers (SinapsAI model).",
+     "inputSchema": {"type": "object", "properties": {
+         "server": {"type": "string", "description": "Optional server name to inspect or reset."},
+         "reset": {"type": "boolean", "description": "Whether to reset the circuit breaker(s) to CLOSED status (default: false)."}}}},
+    {"name": "harness_openspec_status",
+     "description": "Inspect OpenSpec compatibility status, active change proposals, delta specifications, and tasks (Fission-AI/OpenSpec).",
+     "inputSchema": {"type": "object", "properties": {
+         "change": {"type": "string", "description": "Optional specific change proposal name."},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON dictionary instead of formatted report."}}}},
+    {"name": "harness_openspec_sync",
+     "description": "Synchronize pending OpenSpec tasks.md checklist items into AutoHarness followups and Swarm DAG workflow.",
+     "inputSchema": {"type": "object", "properties": {
+         "change": {"type": "string", "description": "Optional specific change proposal name."}}}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -254,6 +277,8 @@ class Gateway:
         self._mtime: int | None = None
         self._allow: list[str] = []
         self._lock = threading.RLock()
+        self.circuits = CircuitBreakerRegistry()
+        self.cache = LRUTtlCache(max_size=256, default_ttl=60.0)
 
     # --- registry and children -------------------------------------------------
 
@@ -433,7 +458,7 @@ class Gateway:
         if not self.project:
             return
         with self._lock:
-            servers = {n: {**s, "tools": len(self.tools.get(n, []))} for n, s in self.status.items()}
+            servers = {n: {**s, "tools": len(self.tools.get(n, [])), "circuit": self.circuits.get(n).to_dict()} for n, s in self.status.items()}
         path = self.project / ".autoharness" / "gateway.state.json"
         try:
             path.write_text(json.dumps({"pid": os.getpid(), "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -480,6 +505,7 @@ class Gateway:
                 if st["status"] == "running" and client is not None and not client.alive():
                     st = {"status": "error", "error": "the server process exited; the next call restarts it once"}
                 servers[name] = {**st, "transport": "http" if self.configs.get(name, {}).get("type") == "http" else "stdio",
+                                 "circuit": self.circuits.get(name).to_dict(),
                                  "tools": [{"name": t["name"], "native_name": reverse.get((name, t["name"])),
                                             "description": t.get("description", ""),
                                             "inputSchema": t.get("inputSchema") or {"type": "object"}}
@@ -522,12 +548,21 @@ class Gateway:
             client = self._restart(server)
             if client is None:
                 return _text(f"server {server!r} stopped and did not restart: {self.status.get(server, {}).get('error')}", True)
+        breaker = self.circuits.get(server or "unknown")
+        if not breaker.can_execute():
+            return _text(
+                f"circuit breaker for server {server!r} is OPEN ({breaker._last_failure_reason or 'repeated failures'}): "
+                f"calls failing fast for {breaker.cooldown_seconds:.0f}s to protect stability",
+                True,
+            )
         if self.project:
             note_call(self.project, server)
         try:
-            return client.call_tool(tool, arguments)
+            return breaker.execute(lambda: client.call_tool(tool, arguments))
         except McpError as e:
             return _text(str(e), True)
+        except Exception as e:
+            return _text(f"tool call failed on {server!r}: {e}", True)
 
     def _call(self, params: dict) -> dict:
         name, args = params.get("name"), params.get("arguments") or {}
@@ -721,6 +756,33 @@ class Gateway:
                 return _text(swarm.format_swarm_verify_report(report))
             except Exception as e:
                 return _text(f"Swarm verification failed: {e}", error=True)
+        if name == "harness_swarm_leases":
+            from autoharness import swarm
+            if not self.project:
+                return _text("No project root configured for swarm operations.", error=True)
+            plan_id = args.get("plan_id")
+            mgr = swarm.IntentLeaseManager(self.project)
+            leases = mgr.list_active_leases(plan_id)
+            return _text(json.dumps({"plan_id": plan_id, "active_leases": leases}, ensure_ascii=False, indent=2))
+        if name == "harness_swarm_receipts":
+            from autoharness import swarm
+            if not self.project:
+                return _text("No project root configured for swarm operations.", error=True)
+            plan_id = args.get("plan_id")
+            if not plan_id:
+                plans = swarm.list_swarm_plans(self.project)
+                if not plans:
+                    return _text("No swarm plans found.", error=True)
+                plan_id = plans[0]["id"]
+            try:
+                plan = swarm.load_swarm_plan(plan_id, self.project)
+                results = {}
+                for tid, t in plan.tasks.items():
+                    if t.receipt:
+                        results[tid] = swarm.verify_completion_receipt(t.receipt, self.project, t)
+                return _text(json.dumps({"plan_id": plan.id, "receipts": results}, ensure_ascii=False, indent=2))
+            except Exception as e:
+                return _text(f"Receipt inspection failed: {e}", error=True)
         if name == "harness_slots":
             from autoharness import slots, probe
             action = args.get("action") or "inspect"
@@ -940,6 +1002,41 @@ class Gateway:
                 lines.append(f"- **Token Savings:** {s.get('compression_ratio', 0.0):.1f}%")
                 lines.append(f"- **Compact Path:** `{s.get('compact_file')}`")
             return _text("\n".join(lines))
+        if name == "harness_circuit_status":
+            srv = args.get("server")
+            rst = bool(args.get("reset"))
+            if rst:
+                if srv:
+                    ok = self.circuits.reset(srv)
+                    return _text(f"Circuit breaker for server {srv!r} reset: {ok}")
+                self.circuits.reset_all()
+                return _text("All circuit breakers reset to CLOSED status.")
+            if srv:
+                return _text(json.dumps(self.circuits.get(srv).to_dict(), indent=2))
+            return _text(json.dumps({"circuits": self.circuits.all_states(), "cache": self.cache.stats()}, indent=2))
+        if name == "harness_openspec_status":
+            from autoharness import openspec
+            if not self.project:
+                return _text("No project root configured for OpenSpec status.", error=True)
+            ch_name = args.get("change")
+            raw_json = bool(args.get("raw_json", False))
+            if ch_name:
+                ch = openspec.get_change(self.project, ch_name)
+                if not ch:
+                    return _text(f"OpenSpec change {ch_name!r} not found.", error=True)
+                return _text(json.dumps(ch, indent=2, ensure_ascii=False))
+            ws = openspec.detect_workspace(self.project)
+            if raw_json:
+                return _text(json.dumps(ws, indent=2, ensure_ascii=False))
+            return _text(openspec.format_openspec_status(ws))
+        if name == "harness_openspec_sync":
+            from autoharness import openspec
+            if not self.project:
+                return _text("No project root configured for OpenSpec sync.", error=True)
+            from autoharness.env import Project
+            proj = Project(self.project)
+            res = openspec.sync_tasks_to_followups(proj, args.get("change"))
+            return _text(json.dumps(res, indent=2, ensure_ascii=False))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

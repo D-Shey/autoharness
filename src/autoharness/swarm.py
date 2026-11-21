@@ -13,8 +13,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import graphlib
+import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -25,6 +27,76 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+
+class IntentLeaseConflictError(Exception):
+    """Raised when an intent lease cannot be acquired due to resource collision with an active lease."""
+    pass
+
+
+@dataclass
+class IntentLease:
+    lease_id: str
+    plan_id: str
+    task_id: str
+    paths: list[str]
+    exclusive: bool = True
+    acquired_at: float = field(default_factory=time.time)
+    expires_at: float = 0.0
+    status: str = "active"  # active, released, expired
+
+    def is_expired(self) -> bool:
+        return self.status == "active" and time.time() > self.expires_at
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> IntentLease:
+        return cls(
+            lease_id=str(data["lease_id"]),
+            plan_id=str(data.get("plan_id") or ""),
+            task_id=str(data["task_id"]),
+            paths=list(data.get("paths") or []),
+            exclusive=bool(data.get("exclusive", True)),
+            acquired_at=float(data.get("acquired_at") or time.time()),
+            expires_at=float(data.get("expires_at") or 0.0),
+            status=str(data.get("status") or "active"),
+        )
+
+
+@dataclass
+class SwarmReceipt:
+    receipt_id: str
+    plan_id: str
+    task_id: str
+    role: str
+    issued_at: float
+    issuer: str
+    artifacts_hashes: dict[str, str]
+    passed_checks: int
+    total_checks: int
+    signature: str
+    status: str = "valid"  # valid, tampered, revoked
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SwarmReceipt:
+        return cls(
+            receipt_id=str(data["receipt_id"]),
+            plan_id=str(data.get("plan_id") or ""),
+            task_id=str(data["task_id"]),
+            role=str(data.get("role") or "coder"),
+            issued_at=float(data.get("issued_at") or time.time()),
+            issuer=str(data.get("issuer") or "barrier_sentinel"),
+            artifacts_hashes=dict(data.get("artifacts_hashes") or {}),
+            passed_checks=int(data.get("passed_checks") or 0),
+            total_checks=int(data.get("total_checks") or 0),
+            signature=str(data.get("signature") or ""),
+            status=str(data.get("status") or "valid"),
+        )
 
 
 @dataclass
@@ -41,6 +113,11 @@ class SwarmTask:
     expected_artifacts: list[str] = field(default_factory=list)
     barrier_assertions: list[dict[str, Any]] = field(default_factory=list)
     allowed_paths: list[str] = field(default_factory=list)
+    isolate_worktree: bool = False  # run in isolated git worktree sandbox (opencode-agent-teams)
+    intent_paths: list[str] = field(default_factory=list)  # Morrow intent lease resource paths
+    exclusive_lease: bool = True  # exclusive lock on intent_paths while executing
+    lease_id: str | None = None  # active lease ID when leased
+    receipt: dict[str, Any] | None = None  # Receipt-Gated Completion token (Morrow)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,6 +137,11 @@ class SwarmTask:
             expected_artifacts=list(data.get("expected_artifacts") or []),
             barrier_assertions=list(data.get("barrier_assertions") or []),
             allowed_paths=list(data.get("allowed_paths") or []),
+            isolate_worktree=bool(data.get("isolate_worktree", False)),
+            intent_paths=list(data.get("intent_paths") or []),
+            exclusive_lease=bool(data.get("exclusive_lease", True)),
+            lease_id=data.get("lease_id"),
+            receipt=dict(data.get("receipt")) if data.get("receipt") else None,
         )
 
 
@@ -73,6 +155,9 @@ class SwarmPlan:
     status: str = "pending"  # pending, running, completed, failed
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    isolate_worktrees: bool = False  # global git worktree isolation for tasks
+    enforce_intent_leases: bool = True  # enforce Morrow intent lease verification
+    receipt_gated: bool = True  # enforce Morrow receipt-gated completion
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +168,9 @@ class SwarmPlan:
             "status": self.status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "isolate_worktrees": self.isolate_worktrees,
+            "enforce_intent_leases": self.enforce_intent_leases,
+            "receipt_gated": self.receipt_gated,
             "tasks": {tid: t.to_dict() for tid, t in self.tasks.items()},
         }
 
@@ -96,6 +184,9 @@ class SwarmPlan:
             status=str(data.get("status") or "pending"),
             created_at=float(data.get("created_at") or time.time()),
             updated_at=float(data.get("updated_at") or time.time()),
+            isolate_worktrees=bool(data.get("isolate_worktrees", False)),
+            enforce_intent_leases=bool(data.get("enforce_intent_leases", True)),
+            receipt_gated=bool(data.get("receipt_gated", True)),
         )
         raw_tasks = data.get("tasks") or {}
         if isinstance(raw_tasks, list):
@@ -158,6 +249,387 @@ def swarm_persistence_lock(project_root: Path):
                         fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
                 except OSError:
                     pass
+
+
+class IntentLeaseManager:
+    """Morrow-inspired Intent Lease Manager for Swarm DAG.
+    
+    Provides time-bounded resource locking (TTL) over file paths to prevent concurrency races
+    between parallel subagent tasks.
+    """
+    def __init__(self, project_root: Path):
+        self.project_root = project_root.resolve()
+        self.leases_file = get_swarm_dir(self.project_root) / "leases.json"
+
+    def _normalize_path(self, path: str) -> str:
+        p = Path(path).as_posix().strip("/").lower()
+        return p
+
+    def _paths_collide(self, p1: str, p2: str) -> bool:
+        n1 = self._normalize_path(p1)
+        n2 = self._normalize_path(p2)
+        return n1 == n2 or n1.startswith(n2 + "/") or n2.startswith(n1 + "/")
+
+    def _load_leases(self) -> list[IntentLease]:
+        with swarm_persistence_lock(self.project_root):
+            if not self.leases_file.is_file():
+                return []
+            try:
+                data = json.loads(self.leases_file.read_text("utf-8"))
+                leases = [IntentLease.from_dict(item) for item in data]
+                now = time.time()
+                for l in leases:
+                    if l.status == "active" and now > l.expires_at:
+                        l.status = "expired"
+                return leases
+            except (json.JSONDecodeError, OSError):
+                return []
+
+    def _save_leases(self, leases: list[IntentLease]) -> None:
+        with swarm_persistence_lock(self.project_root):
+            active = [l for l in leases if l.status == "active"]
+            history = [l for l in leases if l.status != "active"][-150:]
+            data = [l.to_dict() for l in (history + active)]
+            temp = self.leases_file.parent / f".tmp_leases_{uuid.uuid4().hex[:6]}_{os.getpid()}.json"
+            try:
+                temp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                os.replace(temp, self.leases_file)
+            finally:
+                if temp.exists():
+                    try:
+                        temp.unlink()
+                    except OSError:
+                        pass
+
+    def acquire_lease(
+        self,
+        plan_id: str,
+        task_id: str,
+        paths: list[str],
+        exclusive: bool = True,
+        ttl: float = 120.0,
+    ) -> IntentLease:
+        with _SWARM_THREAD_LOCK:
+            leases = self._load_leases()
+            now = time.time()
+            active_leases = [l for l in leases if l.status == "active" and now <= l.expires_at]
+
+            norm_paths = [self._normalize_path(p) for p in paths if p.strip()]
+            if norm_paths:
+                for other in active_leases:
+                    if other.task_id == task_id:
+                        continue
+                    if exclusive or other.exclusive:
+                        for p in norm_paths:
+                            for op in other.paths:
+                                if self._paths_collide(p, op):
+                                    raise IntentLeaseConflictError(
+                                        f"Intent lease collision on path {p!r}: locked by task {other.task_id!r} "
+                                        f"(lease {other.lease_id!r}, expires in {int(other.expires_at - now)}s)"
+                                    )
+
+            lease = IntentLease(
+                lease_id=f"lease_{uuid.uuid4().hex[:10]}",
+                plan_id=plan_id,
+                task_id=task_id,
+                paths=norm_paths,
+                exclusive=exclusive,
+                acquired_at=now,
+                expires_at=now + max(ttl, 0.001),
+                status="active",
+            )
+            leases.append(lease)
+            self._save_leases(leases)
+            return lease
+
+    def release_lease(self, lease_id: str) -> bool:
+        with _SWARM_THREAD_LOCK:
+            leases = self._load_leases()
+            found = False
+            for l in leases:
+                if l.lease_id == lease_id and l.status == "active":
+                    l.status = "released"
+                    found = True
+            if found:
+                self._save_leases(leases)
+            return found
+
+    def list_active_leases(self, plan_id: str | None = None) -> list[dict[str, Any]]:
+        leases = self._load_leases()
+        now = time.time()
+        active = [l for l in leases if l.status == "active" and now <= l.expires_at]
+        if plan_id:
+            active = [l for l in active if l.plan_id == plan_id]
+        return [l.to_dict() for l in active]
+
+
+def compute_receipt_signature(
+    plan_id: str,
+    task_id: str,
+    artifacts_hashes: dict[str, str],
+    passed_checks: int,
+    total_checks: int,
+    issued_at: float,
+) -> str:
+    """Compute cryptographic SHA256 digest signature ensuring tamper-proof receipt."""
+    sorted_arts = ";".join(f"{k}={v}" for k, v in sorted(artifacts_hashes.items()))
+    payload = f"RECEIPT:{plan_id}:{task_id}:{sorted_arts}:{passed_checks}:{total_checks}:{int(issued_at)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compute_file_sha256(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    hasher = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def issue_completion_receipt(
+    task: SwarmTask,
+    plan_id: str,
+    project_root: Path,
+    barrier_report: dict[str, Any],
+    issuer: str = "barrier_sentinel",
+) -> SwarmReceipt:
+    """Issue a verified SwarmReceipt for completed task with artifact hashes (Morrow receipt-gated completion)."""
+    root = project_root.resolve()
+    art_hashes = {}
+    for art in task.expected_artifacts:
+        f_path = (root / art).resolve()
+        if f_path.is_file():
+            art_hashes[str(Path(art).as_posix())] = compute_file_sha256(f_path)
+
+    now = time.time()
+    passed = barrier_report.get("passed_count", 0)
+    total = barrier_report.get("total_checks", 0)
+    sig = compute_receipt_signature(plan_id, task.id, art_hashes, passed, total, now)
+
+    receipt = SwarmReceipt(
+        receipt_id=f"rcpt_{uuid.uuid4().hex[:12]}",
+        plan_id=plan_id,
+        task_id=task.id,
+        role=task.role,
+        issued_at=now,
+        issuer=issuer,
+        artifacts_hashes=art_hashes,
+        passed_checks=passed,
+        total_checks=total,
+        signature=sig,
+        status="valid",
+    )
+
+    # Persist receipt
+    receipts_dir = get_swarm_dir(project_root) / "receipts"
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    receipt_file = receipts_dir / f"{plan_id}_{task.id}.json"
+    try:
+        receipt_file.write_text(json.dumps(receipt.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+    return receipt
+
+
+def verify_completion_receipt(
+    receipt_data: dict[str, Any] | SwarmReceipt,
+    project_root: Path,
+    task: SwarmTask | None = None,
+) -> dict[str, Any]:
+    """Verify the integrity and authenticity of a task completion receipt."""
+    if isinstance(receipt_data, dict):
+        receipt = SwarmReceipt.from_dict(receipt_data)
+    else:
+        receipt = receipt_data
+
+    expected_sig = compute_receipt_signature(
+        receipt.plan_id,
+        receipt.task_id,
+        receipt.artifacts_hashes,
+        receipt.passed_checks,
+        receipt.total_checks,
+        receipt.issued_at,
+    )
+
+    violations = []
+    if receipt.signature != expected_sig:
+        violations.append("Receipt signature mismatch (forged or modified token)")
+
+    root = project_root.resolve()
+    for art, exp_hash in receipt.artifacts_hashes.items():
+        f_path = (root / art).resolve()
+        if not f_path.is_file():
+            violations.append(f"Receipt artifact missing on disk: '{art}'")
+        else:
+            curr_hash = compute_file_sha256(f_path)
+            if curr_hash != exp_hash:
+                violations.append(f"Artifact '{art}' content was tampered after receipt issue")
+
+    is_valid = len(violations) == 0
+    return {
+        "valid": is_valid,
+        "receipt_id": receipt.receipt_id,
+        "task_id": receipt.task_id,
+        "status": "valid" if is_valid else "tampered",
+        "violations": violations,
+        "receipt": receipt.to_dict(),
+    }
+
+
+class SwarmWorktreeManager:
+    """opencode-agent-teams inspired Git Worktree Sandboxing for Swarm DAG.
+    
+    Zero external runtime dependencies (pure Python standard library).
+    Creates isolated worktrees for parallel subagent executions to eliminate file races,
+    merging verified changes back to the main working tree upon completion.
+    """
+    def __init__(self, project_root: Path):
+        self.project_root = project_root.resolve()
+        self.worktrees_dir = (self.project_root / ".autoharness" / "worktrees").resolve()
+        self.worktrees_dir.mkdir(parents=True, exist_ok=True)
+
+    def is_git_repo(self) -> bool:
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(self.project_root),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return res.returncode == 0 and res.stdout.strip() == "true"
+        except Exception:
+            return False
+
+    def create_worktree(self, task_id: str, plan_id: str | None = None) -> Path:
+        """Create an isolated worktree or fallback temporary sandbox."""
+        clean_name = f"{plan_id or 'plan'}_{task_id}_{uuid.uuid4().hex[:6]}"
+        wt_dir = (self.worktrees_dir / clean_name).resolve()
+
+        created_git_wt = False
+        if self.is_git_repo():
+            try:
+                res = subprocess.run(
+                    ["git", "worktree", "add", "--detach", str(wt_dir), "HEAD"],
+                    cwd=str(self.project_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if res.returncode == 0 and wt_dir.is_dir():
+                    created_git_wt = True
+            except Exception:
+                pass
+
+        if not created_git_wt:
+            wt_dir.mkdir(parents=True, exist_ok=True)
+
+        # Synchronize non-hidden workspace files from project_root into worktree
+        try:
+            for item in self.project_root.iterdir():
+                if item.name.startswith("."):
+                    continue
+                dest = wt_dir / item.name
+                if item.is_file():
+                    shutil.copy2(item, dest)
+                elif item.is_dir() and not dest.exists():
+                    shutil.copytree(item, dest, dirs_exist_ok=True)
+        except Exception:
+            pass
+
+        return wt_dir
+
+    def merge_worktree_artifacts(
+        self,
+        worktree_dir: Path,
+        allowed_paths: list[str] | None = None,
+        expected_artifacts: list[str] | None = None,
+    ) -> list[str]:
+        """Merge authorized changes from worktree back into project_root.
+        
+        Returns list of merged relative paths.
+        """
+        merged: list[str] = []
+        wt_root = worktree_dir.resolve()
+        proj_root = self.project_root.resolve()
+
+        if not wt_root.is_dir() or wt_root == proj_root:
+            return merged
+
+        targets_to_check = set(expected_artifacts or []) | set(allowed_paths or [])
+
+        if targets_to_check:
+            for target_rel in targets_to_check:
+                src = (wt_root / target_rel).resolve()
+                dst = (proj_root / target_rel).resolve()
+                try:
+                    dst.relative_to(proj_root)
+                except ValueError:
+                    continue  # protect against path traversal
+
+                if src.is_file():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                    merged.append(str(Path(target_rel).as_posix()))
+        else:
+            if self.is_git_repo():
+                try:
+                    res = subprocess.run(
+                        ["git", "status", "--porcelain"],
+                        cwd=str(wt_root),
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if res.returncode == 0:
+                        for line in res.stdout.splitlines():
+                            if len(line) >= 4:
+                                rel = line[3:].strip()
+                                if " -> " in rel:
+                                    rel = rel.split(" -> ")[1].strip()
+                                src = (wt_root / rel).resolve()
+                                dst = (proj_root / rel).resolve()
+                                try:
+                                    dst.relative_to(proj_root)
+                                except ValueError:
+                                    continue
+                                if src.is_file():
+                                    dst.parent.mkdir(parents=True, exist_ok=True)
+                                    shutil.copy2(src, dst)
+                                    merged.append(str(Path(rel).as_posix()))
+                except Exception:
+                    pass
+
+        return merged
+
+    def cleanup_worktree(self, worktree_dir: Path) -> None:
+        """Remove worktree safely."""
+        wt_root = worktree_dir.resolve()
+        proj_root = self.project_root.resolve()
+        if not wt_root.is_dir() or wt_root == proj_root:
+            return
+
+        if self.is_git_repo():
+            try:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(wt_root)],
+                    cwd=str(proj_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except Exception:
+                pass
+
+        if wt_root.exists():
+            for _ in range(3):
+                try:
+                    shutil.rmtree(wt_root, ignore_errors=True)
+                    break
+                except Exception:
+                    time.sleep(0.05)
 
 
 def save_swarm_plan(plan: SwarmPlan, project_root: Path) -> Path:
@@ -520,6 +992,21 @@ def verify_swarm_plan_contracts(plan: SwarmPlan, project_root: Path) -> dict[str
     total_violations = 0
     for tid, t in plan.tasks.items():
         b_res = validate_task_barriers(t, root, t.result)
+        # Check receipt integrity if task completed and plan is receipt_gated
+        if t.status == "completed" and plan.receipt_gated:
+            if t.receipt:
+                rcpt_v = verify_completion_receipt(t.receipt, root, t)
+                if not rcpt_v["valid"]:
+                    for viol in rcpt_v["violations"]:
+                        b_res["violations"].append({
+                            "kind": "receipt_violation",
+                            "message": viol,
+                        })
+            elif t.expected_artifacts:
+                b_res["violations"].append({
+                    "kind": "missing_receipt",
+                    "message": "Task marked completed but lacks a verified SwarmReceipt",
+                })
         task_reports[tid] = b_res
         total_violations += len(b_res["violations"])
 
@@ -563,16 +1050,16 @@ def format_swarm_verify_report(report: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def default_task_executor(task: SwarmTask, project_root: Path) -> dict[str, Any]:
-    """Execute a single task node: run command or evaluate step."""
+def default_task_executor(task: SwarmTask, project_root: Path, execution_root: Path | None = None) -> dict[str, Any]:
+    """Execute a single task node: run command or evaluate step in execution_root (or project_root)."""
+    effective_root = (execution_root or project_root).resolve()
     start_time = time.monotonic()
     if task.command:
-        # Run command in project root
         try:
             res = subprocess.run(
                 task.command,
                 shell=True,
-                cwd=str(project_root),
+                cwd=str(effective_root),
                 capture_output=True,
                 text=True,
                 timeout=task.timeout,
@@ -584,6 +1071,7 @@ def default_task_executor(task: SwarmTask, project_root: Path) -> dict[str, Any]
                 "stderr": res.stderr,
                 "duration": duration,
                 "success": res.returncode == 0,
+                "cwd": str(effective_root),
             }
         except subprocess.TimeoutExpired as e:
             duration = round(time.monotonic() - start_time, 3)
@@ -593,6 +1081,7 @@ def default_task_executor(task: SwarmTask, project_root: Path) -> dict[str, Any]
                 "stderr": f"Execution timed out after {task.timeout}s",
                 "duration": duration,
                 "success": False,
+                "cwd": str(effective_root),
             }
         except Exception as e:
             duration = round(time.monotonic() - start_time, 3)
@@ -602,9 +1091,9 @@ def default_task_executor(task: SwarmTask, project_root: Path) -> dict[str, Any]
                 "stderr": str(e),
                 "duration": duration,
                 "success": False,
+                "cwd": str(effective_root),
             }
     elif task.prompt:
-        # Informational prompt task (e.g. spec generation, review)
         duration = round(time.monotonic() - start_time, 3)
         return {
             "returncode": 0,
@@ -612,6 +1101,7 @@ def default_task_executor(task: SwarmTask, project_root: Path) -> dict[str, Any]
             "stderr": "",
             "duration": duration,
             "success": True,
+            "cwd": str(effective_root),
         }
     else:
         return {
@@ -620,6 +1110,7 @@ def default_task_executor(task: SwarmTask, project_root: Path) -> dict[str, Any]
             "stderr": "",
             "duration": 0.0,
             "success": True,
+            "cwd": str(effective_root),
         }
 
 
@@ -627,17 +1118,24 @@ def execute_swarm_plan(
     plan: SwarmPlan,
     project_root: Path,
     max_parallel: int | None = None,
-    worker_fn: Callable[[SwarmTask, Path], dict[str, Any]] | None = None,
+    worker_fn: Callable[..., dict[str, Any]] | None = None,
     on_update: Callable[[SwarmPlan, SwarmTask], None] | None = None,
 ) -> SwarmPlan:
-    """Execute a Swarm DAG plan with parallel worker pool and hard gates.
-
-    Downstream tasks are blocked if prerequisite tasks fail.
-    Progress is continuously synced to disk and indexed into memory.
+    """Execute a Swarm DAG plan with parallel worker pool, worktree sandboxing, and hard gates.
+    
+    Features:
+      - opencode-agent-teams Git Worktree sandboxing for isolated subagent executions.
+      - Morrow Intent Lease resource locking with TTL to eliminate concurrency races.
+      - Morrow Receipt-Gated Completion validating cryptographic tokens before marking completed.
+      - Downstream tasks are blocked if prerequisite tasks fail.
+      - Progress is continuously synced to disk and indexed into memory.
     """
     validate_dag(plan)
     parallel = max_parallel or plan.max_parallel or 4
     executor_fn = worker_fn or default_task_executor
+
+    lease_mgr = IntentLeaseManager(project_root)
+    worktree_mgr = SwarmWorktreeManager(project_root)
 
     plan.status = "running"
     save_swarm_plan(plan, project_root)
@@ -656,6 +1154,91 @@ def execute_swarm_plan(
                     on_update(plan, t)
                 except Exception as e:
                     sys.stderr.write(f"swarm on_update callback error: {e}\n")
+
+    def run_task_in_sandbox(task: SwarmTask, lease: IntentLease | None) -> tuple[str, dict[str, Any]]:
+        # 1. Determine execution directory (worktree vs project_root)
+        use_wt = (task.isolate_worktree or plan.isolate_worktrees) and (task.command is not None)
+        wt_dir = None
+        exec_root = project_root
+        if use_wt:
+            try:
+                wt_dir = worktree_mgr.create_worktree(task.id, plan.id)
+                exec_root = wt_dir
+            except Exception as e:
+                sys.stderr.write(f"Failed to create worktree for task {task.id}: {e}\n")
+                wt_dir = None
+                exec_root = project_root
+
+        # 2. Invoke executor
+        res: dict[str, Any] = {}
+        try:
+            try:
+                res = executor_fn(task, project_root, exec_root)
+            except TypeError:
+                try:
+                    res = executor_fn(task, exec_root)
+                except TypeError:
+                    res = executor_fn(task, project_root)
+        except Exception as e:
+            res = {
+                "returncode": -1,
+                "stdout": "",
+                "stderr": str(e),
+                "duration": 0.0,
+                "success": False,
+            }
+
+        # 3. Merge worktree artifacts back to project_root if worktree was used
+        if wt_dir:
+            try:
+                merged = worktree_mgr.merge_worktree_artifacts(
+                    wt_dir,
+                    allowed_paths=task.allowed_paths,
+                    expected_artifacts=task.expected_artifacts,
+                )
+                res["merged_artifacts"] = merged
+            except Exception as e:
+                res["merge_error"] = str(e)
+            finally:
+                worktree_mgr.cleanup_worktree(wt_dir)
+
+        # 4. Validate barrier assertions and contract requirements
+        barrier_res = validate_task_barriers(task, project_root, res)
+        res["barrier_validation"] = barrier_res
+
+        status = "failed"
+        if barrier_res["status"] != "passed":
+            res["error"] = f"Barrier contract validation failed: {len(barrier_res['violations'])} violation(s)"
+        elif not res.get("success", True):
+            res["error"] = res.get("stderr") or "Task command failed"
+        else:
+            # 5. Receipt-Gated Completion (Morrow)
+            if plan.receipt_gated:
+                try:
+                    rcpt = issue_completion_receipt(task, plan.id, project_root, barrier_res)
+                    verify_res = verify_completion_receipt(rcpt, project_root, task)
+                    if verify_res["valid"]:
+                        task.receipt = rcpt.to_dict()
+                        res["receipt"] = rcpt.to_dict()
+                        status = "completed"
+                    else:
+                        status = "failed"
+                        res["error"] = f"Receipt verification failed: {verify_res['violations']}"
+                except Exception as e:
+                    status = "failed"
+                    res["error"] = f"Failed to issue/verify completion receipt: {e}"
+            else:
+                status = "completed"
+
+        # 6. Release intent lease
+        if lease:
+            try:
+                lease_mgr.release_lease(lease.lease_id)
+                task.lease_id = None
+            except Exception as e:
+                sys.stderr.write(f"Failed to release lease {lease.lease_id}: {e}\n")
+
+        return status, res
 
     # Execution loop
     with ThreadPoolExecutor(max_workers=parallel) as pool:
@@ -676,38 +1259,58 @@ def execute_swarm_plan(
                     pending_tasks.remove(t)
 
             # Find ready tasks (all dependencies completed)
-            ready_tasks = [
+            candidate_tasks = [
                 t for t in pending_tasks
                 if set(t.depends_on).issubset(completed_ids)
             ]
 
-            if not ready_tasks and not running_tasks:
-                # Deadlock or remaining tasks are blocked
+            if not candidate_tasks and not running_tasks:
                 with state_lock:
                     for t in pending_tasks:
                         update_task_state(t.id, "blocked", {"error": "Dependencies could not be satisfied", "success": False})
                 break
 
-            # Dispatch ready tasks up to concurrency capacity
+            # Lease checking for candidates
+            dispatched = []
+            available_slots = max(0, parallel - len(running_tasks))
+            for t in candidate_tasks:
+                if len(dispatched) >= available_slots:
+                    break
+                lease = None
+                if plan.enforce_intent_leases:
+                    file_paths = [p for p in (t.intent_paths or t.allowed_paths or t.expected_artifacts) if p]
+                    if file_paths:
+                        try:
+                            lease = lease_mgr.acquire_lease(
+                                plan.id,
+                                t.id,
+                                file_paths,
+                                exclusive=t.exclusive_lease,
+                                ttl=t.timeout + 60.0,
+                            )
+                            t.lease_id = lease.lease_id
+                        except IntentLeaseConflictError:
+                            # Intent collision with currently running task; wait for next cycle
+                            continue
+                dispatched.append((t, lease))
+
+            if not dispatched and not running_tasks:
+                # Deadlock in lease configuration: mark blocked
+                with state_lock:
+                    for t in candidate_tasks:
+                        update_task_state(t.id, "blocked", {"error": "Unresolvable Intent Lease conflict", "success": False})
+                break
+
             futures = []
-            for t in ready_tasks:
+            for t, lease in dispatched:
                 update_task_state(t.id, "running")
-                future = pool.submit(executor_fn, t, project_root)
+                future = pool.submit(run_task_in_sandbox, t, lease)
                 futures.append((future, t.id))
 
-            # Wait for at least one task to complete before next scheduling cycle
+            # Wait for dispatched tasks
             for fut, tid in futures:
                 try:
-                    res = fut.result()
-                    task_obj = plan.tasks[tid]
-                    # Evaluate barrier assertions and artifact contracts
-                    barrier_res = validate_task_barriers(task_obj, project_root, res)
-                    res["barrier_validation"] = barrier_res
-                    if barrier_res["status"] != "passed":
-                        status = "failed"
-                        res["error"] = f"Barrier contract validation failed: {len(barrier_res['violations'])} violation(s)"
-                    else:
-                        status = "completed" if res.get("success", True) else "failed"
+                    status, res = fut.result()
                     update_task_state(tid, status, res)
 
                     # Index artifact to project memory

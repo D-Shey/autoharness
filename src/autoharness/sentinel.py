@@ -22,6 +22,7 @@ from autoharness import codemap, evidence
 from autoharness.env import HarnessError
 
 SENTINEL_STATE_FILE = "sentinel.json"
+SENTINEL_TDD_FILE = "sentinel_tdd.json"
 SNAPSHOTS_DIR = "snapshots"
 SENTINEL_EXCLUDE_DIRS = {
     ".git", ".autoharness", ".venv", "venv", "node_modules",
@@ -540,3 +541,208 @@ def format_sentinel_report(result: dict[str, Any]) -> str:
         ])
 
     return "\n".join(lines).strip()
+
+
+# --- TDD Phase Enforcement & Discipline (Aval Model) --------------------------
+
+
+def record_tdd_red_phase(
+    project_root: Path,
+    test_command: str = "pytest",
+    timeout_sec: float = 600.0,
+) -> dict[str, Any]:
+    """Verify and capture TDD Red Phase baseline: reproducing test must fail initially."""
+    now_str = _get_utc_now()
+    try:
+        proc = subprocess.run(
+            test_command,
+            shell=True,
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_sec,
+            check=False,
+        )
+        proc_output = proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
+        proc_code = proc.returncode
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {
+            "status": "error",
+            "phase": "red",
+            "error": f"Failed to execute test command: {e}",
+            "timestamp": now_str,
+        }
+
+    # In TDD Red Phase: passing tests mean the bug is not reproduced or feature is already satisfied!
+    if proc_code == 0:
+        return {
+            "status": "rejected",
+            "phase": "red",
+            "error": (
+                "TDD Red Phase violation: test command exited with 0 (passed)! "
+                "A genuine TDD requirement test must fail initially to prove it reproduces "
+                "the missing functionality or bug."
+            ),
+            "test_command": test_command,
+            "timestamp": now_str,
+        }
+
+    tail = "\n".join(proc_output.splitlines()[-20:])
+    tdd_record = {
+        "status": "active",
+        "phase": "red",
+        "test_command": test_command,
+        "fail_exit_code": proc_code,
+        "fail_tail": tail,
+        "red_timestamp": now_str,
+        "green_timestamp": None,
+    }
+
+    # Persist TDD state
+    with _lock:
+        state_dir = project_root / ".autoharness"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        tdd_file = state_dir / SENTINEL_TDD_FILE
+        tdd_tmp = None
+        try:
+            t_fd, tdd_tmp = tempfile.mkstemp(dir=state_dir, prefix="tdd-", suffix=".tmp")
+            with os.fdopen(t_fd, "w", encoding="utf-8") as f:
+                json.dump(tdd_record, f, indent=2, ensure_ascii=False)
+            os.replace(tdd_tmp, tdd_file)
+        finally:
+            if tdd_tmp and os.path.exists(tdd_tmp):
+                try:
+                    os.unlink(tdd_tmp)
+                except OSError:
+                    pass
+
+    return {
+        "status": "ok",
+        "phase": "red",
+        "message": "TDD Red Phase baseline captured: test failed cleanly as expected.",
+        "test_command": test_command,
+        "fail_exit_code": proc_code,
+        "timestamp": now_str,
+    }
+
+
+def verify_tdd_green_phase(
+    project_root: Path,
+    test_command: str | None = None,
+    timeout_sec: float = 600.0,
+) -> dict[str, Any]:
+    """Verify TDD Green Phase: implementation must turn the prior Red Phase test green."""
+    now_str = _get_utc_now()
+    tdd_file = project_root / ".autoharness" / SENTINEL_TDD_FILE
+
+    if not tdd_file.is_file():
+        return {
+            "status": "rejected",
+            "phase": "green",
+            "error": (
+                "TDD Green Phase violation: no Red Phase baseline found in .autoharness/sentinel_tdd.json! "
+                "You must establish a failing test before claiming it passes."
+            ),
+            "timestamp": now_str,
+        }
+
+    try:
+        tdd_data = json.loads(tdd_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "status": "error",
+            "phase": "green",
+            "error": "Failed to parse sentinel_tdd.json",
+            "timestamp": now_str,
+        }
+
+    if tdd_data.get("phase") != "red":
+        return {
+            "status": "rejected",
+            "phase": "green",
+            "error": f"TDD state is already {tdd_data.get('phase')}, not awaiting green transition.",
+            "timestamp": now_str,
+        }
+
+    cmd = test_command or tdd_data.get("test_command", "pytest")
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_sec,
+            check=False,
+        )
+        proc_output = proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
+        proc_code = proc.returncode
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {
+            "status": "error",
+            "phase": "green",
+            "error": f"Failed to execute test command: {e}",
+            "timestamp": now_str,
+        }
+
+    if proc_code != 0:
+        return {
+            "status": "failed",
+            "phase": "green",
+            "error": f"Test command still failing with exit code {proc_code}.",
+            "test_command": cmd,
+            "output_tail": "\n".join(proc_output.splitlines()[-20:]),
+            "timestamp": now_str,
+        }
+
+    # Transition to green
+    tdd_data["phase"] = "green"
+    tdd_data["green_timestamp"] = now_str
+    tdd_data["status"] = "completed"
+
+    with _lock:
+        state_dir = project_root / ".autoharness"
+        t_fd, tdd_tmp = tempfile.mkstemp(dir=state_dir, prefix="tdd-", suffix=".tmp")
+        try:
+            with os.fdopen(t_fd, "w", encoding="utf-8") as f:
+                json.dump(tdd_data, f, indent=2, ensure_ascii=False)
+            os.replace(tdd_tmp, tdd_file)
+        finally:
+            if tdd_tmp and os.path.exists(tdd_tmp):
+                try:
+                    os.unlink(tdd_tmp)
+                except OSError:
+                    pass
+
+    return {
+        "status": "ok",
+        "phase": "green",
+        "message": "TDD Green Phase verified: implementation successfully resolved the failing test.",
+        "test_command": cmd,
+        "red_timestamp": tdd_data.get("red_timestamp"),
+        "green_timestamp": now_str,
+    }
+
+
+def get_tdd_status(project_root: Path) -> dict[str, Any]:
+    """Retrieve active TDD discipline state."""
+    tdd_file = project_root / ".autoharness" / SENTINEL_TDD_FILE
+    if not tdd_file.is_file():
+        return {
+            "status": "idle",
+            "phase": "none",
+            "active": False,
+        }
+    try:
+        data = json.loads(tdd_file.read_text(encoding="utf-8"))
+        return {
+            "status": data.get("status", "idle"),
+            "phase": data.get("phase", "none"),
+            "active": data.get("status") == "active",
+            **data,
+        }
+    except (OSError, json.JSONDecodeError):
+        return {"status": "error", "error": "Corrupt TDD state file"}
+

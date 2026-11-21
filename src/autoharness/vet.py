@@ -13,6 +13,7 @@ import json
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from autoharness import approvals, lang
 from autoharness.env import HarnessError, Stager, Task, _hash_dir
@@ -162,13 +163,237 @@ def _skill_files(root: Path) -> tuple[str, list[str]]:
     return "\n\n".join(shown), listing
 
 
+SENSITIVE_TARGET_PATTERN = re.compile(
+    r"(?i)(\.env|\.ssh|id_rsa|id_ed25519|\.aws/|credentials|secrets\.json|\.git/config|/etc/shadow|/etc/passwd)"
+)
+
+
+class AstSecurityVisitor(ast.NodeVisitor):
+    """Static AST security scanner for skill scripts (inspired by Clawvet)."""
+
+    def __init__(self, filename: str = ""):
+        self.filename = filename
+        self.findings: list[dict[str, Any]] = []
+
+    def _add(self, rule: str, severity: str, message: str, node: ast.AST) -> None:
+        lineno = getattr(node, "lineno", 1)
+        col = getattr(node, "col_offset", 0)
+        self.findings.append({
+            "rule": rule,
+            "severity": severity,
+            "message": message,
+            "file": self.filename,
+            "line": lineno,
+            "col": col,
+        })
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        # 1. Direct function calls
+        if isinstance(func, ast.Name):
+            fname = func.id
+            if fname in ("eval", "exec", "compile"):
+                if any(isinstance(a, ast.Call) and getattr(getattr(a, "func", None), "attr", "") == "b64decode" for a in node.args):
+                    self._add("OBFUSCATED_PAYLOAD", "high", f"Execution of base64 decoded payload via {fname}()", node)
+                else:
+                    self._add("DYNAMIC_EXECUTION", "high", f"Dynamic code execution via {fname}()", node)
+            elif fname == "__import__":
+                self._add("DYNAMIC_IMPORT", "medium", "Dynamic module import via __import__()", node)
+            elif fname in ("open", "Path"):
+                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                    if SENSITIVE_TARGET_PATTERN.search(node.args[0].value):
+                        self._add("SENSITIVE_FILE_ACCESS", "high", f"Access to sensitive file target: {node.args[0].value!r}", node)
+            elif fname == "dict":
+                if node.args and isinstance(node.args[0], ast.Attribute):
+                    if getattr(node.args[0].value, "id", "") == "os" and node.args[0].attr == "environ":
+                        self._add("ENVIRONMENT_HARVESTING", "medium", "Full environment dictionary dump via dict(os.environ)", node)
+
+        # 2. Attribute calls: os.system, os.popen, subprocess.Popen, etc.
+        elif isinstance(func, ast.Attribute):
+            val = func.value
+            mod_name = getattr(val, "id", "")
+            attr = func.attr
+            if mod_name == "os":
+                if attr in ("system", "popen", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe"):
+                    self._add("SHELL_INJECTION", "high", f"Direct shell command execution via os.{attr}()", node)
+            elif mod_name == "subprocess" and attr in ("Popen", "run", "call", "check_call", "check_output"):
+                has_shell_true = any(
+                    kw.arg == "shell" and (
+                        (isinstance(kw.value, ast.Constant) and bool(kw.value.value)) or
+                        (isinstance(kw.value, ast.Name) and kw.value.id == "True")
+                    )
+                    for kw in node.keywords
+                )
+                if has_shell_true:
+                    self._add("DANGEROUS_SUBPROCESS", "high", f"Subprocess spawned with shell=True via subprocess.{attr}()", node)
+            elif mod_name == "builtins" or (isinstance(val, ast.Name) and val.id == "__builtins__"):
+                if attr in ("eval", "exec", "compile", "__import__"):
+                    self._add("DYNAMIC_EXECUTION", "high", f"Builtins reflection sink via builtins.{attr}()", node)
+
+            if attr == "copy" and isinstance(val, ast.Attribute) and getattr(val.value, "id", "") == "os" and val.attr == "environ":
+                self._add("ENVIRONMENT_HARVESTING", "medium", "Full environment dump via os.environ.copy()", node)
+
+            if attr in ("read_text", "read_bytes", "open"):
+                if isinstance(val, ast.Call) and getattr(val.func, "id", "") == "Path":
+                    if val.args and isinstance(val.args[0], ast.Constant) and isinstance(val.args[0].value, str):
+                        if SENSITIVE_TARGET_PATTERN.search(val.args[0].value):
+                            self._add("SENSITIVE_FILE_ACCESS", "high", f"Access to sensitive file target: {val.args[0].value!r}", node)
+
+        # 3. getattr(builtins, "exec")
+        if isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) >= 2:
+            target = getattr(node.args[0], "id", "")
+            method_arg = node.args[1]
+            if target in ("builtins", "__builtins__") and isinstance(method_arg, ast.Constant) and method_arg.value in ("eval", "exec", "system"):
+                self._add("REFLECTIVE_SINK", "high", f"Reflective execution sink via getattr(builtins, {method_arg.value!r})", node)
+
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.name in ("pty", "ctypes"):
+                self._add("SUSPICIOUS_MODULE", "medium", f"Import of low-level/terminal control module: {alias.name}", node)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module in ("pty", "ctypes"):
+            self._add("SUSPICIOUS_MODULE", "medium", f"Import from low-level/terminal control module: {node.module}", node)
+        self.generic_visit(node)
+
+
+def scan_python_ast_security(source: str, filename: str = "") -> list[dict[str, Any]]:
+    """Static AST security scanner (inspired by Clawvet).
+
+    Parses Python source code into an Abstract Syntax Tree to identify dangerous
+    primitives, code injection vectors, credential harvesting, and shell exploits.
+    """
+    try:
+        tree = ast.parse(source, filename=filename or "<input>")
+    except SyntaxError as e:
+        return [{
+            "rule": "SYNTAX_ERROR",
+            "severity": "medium",
+            "message": f"Syntax error during security parse: {e}",
+            "file": filename,
+            "line": e.lineno or 1,
+            "col": e.offset or 0,
+        }]
+    visitor = AstSecurityVisitor(filename=filename)
+    visitor.visit(tree)
+    return visitor.findings
+
+
+def scan_skill_security_ast(root: Path) -> dict[str, Any]:
+    """Scan all Python files in a staged skill directory for AST security violations."""
+    all_findings: list[dict[str, Any]] = []
+    py_files = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in (".py", ".pyi"))
+    for pf in py_files:
+        rel = pf.relative_to(root).as_posix()
+        try:
+            content = pf.read_text("utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        findings = scan_python_ast_security(content, filename=rel)
+        all_findings.extend(findings)
+
+    high_count = sum(1 for f in all_findings if f["severity"] == "high")
+    med_count = sum(1 for f in all_findings if f["severity"] == "medium")
+    low_count = sum(1 for f in all_findings if f["severity"] == "low")
+
+    risk = "clean"
+    if high_count > 0:
+        risk = "critical"
+    elif med_count > 0:
+        risk = "warning"
+
+    return {
+        "risk_level": risk,
+        "clean": len(all_findings) == 0,
+        "high_severity": high_count,
+        "medium_severity": med_count,
+        "low_severity": low_count,
+        "findings": all_findings,
+    }
+
+
+def format_ast_security_report(report: dict[str, Any]) -> str:
+    """Format AST security findings into a compact report for reviewers."""
+    if report.get("clean"):
+        return "--- AST Security Gatekeeper (Clawvet): CLEAN (no AST violations detected)"
+    lines = [
+        f"--- AST Security Gatekeeper (Clawvet): RISK LEVEL {report.get('risk_level', '').upper()}",
+        f"Summary: {report.get('high_severity', 0)} critical/high, {report.get('medium_severity', 0)} warnings, {report.get('low_severity', 0)} informational",
+        "Findings:",
+    ]
+    for f in report.get("findings", []):
+        lines.append(f"  - [{f.get('severity', '').upper()}] {f.get('file', '')}:{f.get('line', 1)}: {f.get('message', '')} ({f.get('rule', '')})")
+    return "\n".join(lines)
+
+
+def scan_mcp_security(config: dict[str, Any]) -> dict[str, Any]:
+    """Scan MCP server configuration for security risks and command injection."""
+    findings: list[dict[str, Any]] = []
+    cmd = config.get("command", "")
+    args = config.get("args") or []
+    env = config.get("env") or {}
+
+    cmd_lower = cmd.lower()
+    if any(sh in cmd_lower for sh in ("cmd.exe", "powershell", "pwsh", "bash", "sh")):
+        if any(a in ("-c", "/c", "-Command") for a in args):
+            findings.append({
+                "rule": "SHELL_WRAPPER",
+                "severity": "high",
+                "message": f"MCP server command launches shell interpreter: {cmd}",
+            })
+
+    for a in args:
+        if isinstance(a, str):
+            if SENSITIVE_TARGET_PATTERN.search(a):
+                findings.append({
+                    "rule": "SENSITIVE_ARG",
+                    "severity": "high",
+                    "message": f"Sensitive file target in arguments: {a!r}",
+                })
+            if "--dangerously-skip-permissions" in a or "--skip-permissions" in a:
+                findings.append({
+                    "rule": "PERMISSION_BYPASS",
+                    "severity": "high",
+                    "message": f"Permissions bypass flag in arguments: {a!r}",
+                })
+
+    for k, v in env.items():
+        if isinstance(v, str):
+            from autoharness import secrets
+            if secrets.has_secrets(v):
+                findings.append({
+                    "rule": "HARDCODED_SECRET_ENV",
+                    "severity": "high",
+                    "message": f"Sensitive credential or token hardcoded in env[{k!r}]",
+                })
+
+    high_count = sum(1 for f in findings if f["severity"] == "high")
+    med_count = sum(1 for f in findings if f["severity"] == "medium")
+    risk = "critical" if high_count > 0 else ("warning" if med_count > 0 else "clean")
+    return {
+        "risk_level": risk,
+        "clean": len(findings) == 0,
+        "high_severity": high_count,
+        "medium_severity": med_count,
+        "findings": findings,
+    }
+
+
 def skill_content(spec: str, stage: Stager, repo: str, skill: str) -> tuple[str, str]:
     """(what the reviewer reads, sha256 of the staged files) for a skill, staged the way `add` stages it."""
     with tempfile.TemporaryDirectory(prefix="autoharness-vet-") as tmp:
         staged = stage(repo, skill, Path(tmp))
         text, listing = _skill_files(staged)
+        sec_report = scan_skill_security_ast(staged)
+        sec_summary = format_ast_security_report(sec_report)
         digest = _hash_dir(staged)
-    return f"Skill {spec}. Files:\n" + "\n".join(listing) + "\n\n" + text, digest
+    header = f"Skill {spec}. Files:\n" + "\n".join(listing)
+    if sec_summary:
+        header += "\n\n" + sec_summary
+    return header + "\n\n" + text, digest
 
 
 def mcp_digest(config: dict) -> str:
@@ -178,6 +403,9 @@ def mcp_digest(config: dict) -> str:
 
 def mcp_content(name: str, report: dict, source: str) -> str:
     shown = {k: report.get(k) for k in ("config", "permissions", "reasons", "egress")} | {"source": source}
+    mcp_sec = scan_mcp_security(report.get("config", {}))
+    if not mcp_sec.get("clean"):
+        shown["security_audit"] = mcp_sec
     return f"MCP server {name}. What installing it writes and what it can reach:\n" + json.dumps(shown, indent=2)
 
 

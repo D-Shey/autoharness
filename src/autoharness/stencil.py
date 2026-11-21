@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -686,3 +687,272 @@ def check_stencil(stencil_path_or_id: str | Path, target_path: Path, project_roo
             return {"status": "error", "error": f"Failed to parse SVG: {e}"}
 
     return {"status": "ok", "conforms": True, "type": "generic"}
+
+
+# --- Machine-Native Runtime Perception (Reticle Model) -------------------------
+
+INTERACTIVE_TAGS = {"button", "a", "input", "select", "textarea"}
+INTERACTIVE_ROLES = {"button", "link", "checkbox", "textbox", "radio", "combobox", "menuitem", "tab"}
+LANDMARK_TAGS = {"main", "nav", "header", "footer", "aside", "form"}
+LANDMARK_ROLES = {"main", "navigation", "banner", "contentinfo", "complementary", "form", "search"}
+
+
+class HTMLPerceptionParser(HTMLParser):
+    """Parses HTML into machine-native perception landmarks, accessibility checks, and interactive controls."""
+
+    def __init__(self):
+        super().__init__()
+        self.elements: list[dict[str, Any]] = []
+        self.interactive: list[dict[str, Any]] = []
+        self.landmarks: list[dict[str, Any]] = []
+        self.violations: list[dict[str, Any]] = []
+        self.headings: list[tuple[int, str]] = []
+        self.title: str = ""
+        self._tag_stack: list[dict[str, Any]] = []
+        self._max_depth = 0
+        self._total_checks = 0
+        self._passed_checks = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        attr_dict = {k.lower(): (v or "") for k, v in attrs}
+        depth = len(self._tag_stack) + 1
+        if depth > self._max_depth:
+            self._max_depth = depth
+
+        elem_id = attr_dict.get("id", "")
+        classes = attr_dict.get("class", "").split()
+        role = attr_dict.get("role", "")
+        aria_label = attr_dict.get("aria-label", "") or attr_dict.get("aria-labelledby", "")
+
+        elem_data: dict[str, Any] = {
+            "tag": tag,
+            "id": elem_id,
+            "classes": classes,
+            "role": role,
+            "aria_label": aria_label,
+            "depth": depth,
+            "attributes": attr_dict,
+            "text": "",
+        }
+        self.elements.append(elem_data)
+        self._tag_stack.append(elem_data)
+
+        # Check landmarks
+        if tag in LANDMARK_TAGS or role in LANDMARK_ROLES:
+            self.landmarks.append({
+                "type": role or tag,
+                "tag": tag,
+                "id": elem_id,
+                "label": aria_label or attr_dict.get("title", ""),
+                "depth": depth,
+            })
+
+        # Check interactive
+        is_interactive = tag in INTERACTIVE_TAGS or role in INTERACTIVE_ROLES or "onclick" in attr_dict
+        if is_interactive:
+            self.interactive.append(elem_data)
+
+        # Accessibility checks
+        if tag == "img":
+            self._total_checks += 1
+            if "alt" not in attr_dict:
+                self.violations.append({
+                    "rule": "IMG_MISSING_ALT",
+                    "severity": "high",
+                    "element": tag,
+                    "id": elem_id,
+                    "message": f"Image element is missing an 'alt' attribute: id='{elem_id}'",
+                })
+            else:
+                self._passed_checks += 1
+
+        if tag == "input" and attr_dict.get("type") not in ("hidden", "submit", "button"):
+            self._total_checks += 1
+            has_label = bool(aria_label or attr_dict.get("placeholder") or attr_dict.get("title") or elem_id)
+            if not has_label:
+                self.violations.append({
+                    "rule": "INPUT_MISSING_LABEL",
+                    "severity": "medium",
+                    "element": tag,
+                    "id": elem_id,
+                    "message": f"Form input field '{attr_dict.get('name') or elem_id}' has no accessible label or placeholder",
+                })
+            else:
+                self._passed_checks += 1
+
+    def handle_endtag(self, tag: str):
+        if self._tag_stack and self._tag_stack[-1]["tag"] == tag:
+            elem = self._tag_stack.pop()
+            # Post-check button text/aria
+            if elem["tag"] == "button" or elem.get("role") == "button":
+                self._total_checks += 1
+                has_accessible_name = bool(elem["text"].strip() or elem["aria_label"] or elem["attributes"].get("title"))
+                if not has_accessible_name:
+                    self.violations.append({
+                        "rule": "BUTTON_MISSING_NAME",
+                        "severity": "high",
+                        "element": elem["tag"],
+                        "id": elem["id"],
+                        "message": f"Button element has no readable text, aria-label, or title (id='{elem['id']}')",
+                    })
+                else:
+                    self._passed_checks += 1
+
+            if re.match(r"^h([1-6])$", tag):
+                level = int(tag[1])
+                self.headings.append((level, elem["text"].strip()))
+
+    def handle_data(self, data: str):
+        clean = data.strip()
+        if not clean:
+            return
+        if self._tag_stack:
+            self._tag_stack[-1]["text"] += (" " + clean if self._tag_stack[-1]["text"] else clean)
+        if self._tag_stack and self._tag_stack[-1]["tag"] == "title":
+            self.title = clean
+
+
+def extract_dom_perception(html_or_path: str | Path) -> dict[str, Any]:
+    """Extract machine-native runtime perception tree, interactive elements, and a11y metrics (Reticle model)."""
+    text = ""
+    if isinstance(html_or_path, Path):
+        text = html_or_path.read_text(encoding="utf-8", errors="replace")
+    elif isinstance(html_or_path, str):
+        p = Path(html_or_path)
+        if len(html_or_path) < 1024 and p.is_file():
+            text = p.read_text(encoding="utf-8", errors="replace")
+        else:
+            text = html_or_path
+
+    parser = HTMLPerceptionParser()
+    parser.feed(text)
+
+    # Check heading order hierarchy
+    for i in range(1, len(parser.headings)):
+        prev_lvl, _ = parser.headings[i - 1]
+        curr_lvl, heading_text = parser.headings[i]
+        parser._total_checks += 1
+        if curr_lvl > prev_lvl + 1:
+            parser.violations.append({
+                "rule": "HEADING_HIERARCHY_SKIP",
+                "severity": "low",
+                "message": f"Heading hierarchy skipped from h{prev_lvl} to h{curr_lvl} ('{heading_text}')",
+            })
+        else:
+            parser._passed_checks += 1
+
+    total_checks = max(1, parser._total_checks)
+    a11y_score = round(max(0.0, min(1.0, parser._passed_checks / total_checks)), 4)
+
+    # Compact skeleton
+    skeleton_lines = []
+    for elem in parser.elements[:150]:
+        indent = "  " * (elem["depth"] - 1)
+        ident = f"#{elem['id']}" if elem["id"] else ""
+        classes = ("." + ".".join(elem["classes"][:2])) if elem["classes"] else ""
+        role_info = f" [role={elem['role']}]" if elem["role"] else ""
+        txt = f" \"{elem['text'][:30]}...\"" if elem["text"] else ""
+        skeleton_lines.append(f"{indent}<{elem['tag']}{ident}{classes}{role_info}>{txt}")
+
+    return {
+        "title": parser.title,
+        "total_elements": len(parser.elements),
+        "max_depth": parser._max_depth,
+        "interactive_count": len(parser.interactive),
+        "landmarks": parser.landmarks,
+        "interactive_elements": [
+            {
+                "tag": e["tag"],
+                "id": e["id"],
+                "role": e["role"],
+                "aria_label": e["aria_label"],
+                "text": e["text"][:50],
+                "type": e["attributes"].get("type", ""),
+            }
+            for e in parser.interactive
+        ],
+        "accessibility": {
+            "score": a11y_score,
+            "passed_checks": parser._passed_checks,
+            "total_checks": total_checks,
+            "violations_count": len(parser.violations),
+            "violations": parser.violations,
+        },
+        "dom_skeleton": "\n".join(skeleton_lines),
+    }
+
+
+def verify_runtime_perception(
+    target_html: str | Path,
+    requirements: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify runtime UI invariants against machine-native perception requirements (Reticle model)."""
+    perc = extract_dom_perception(target_html)
+    missing: list[str] = []
+    matched: list[str] = []
+
+    # 1. Check required tags / landmarks
+    req_landmarks = requirements.get("required_landmarks", [])
+    found_landmarks = {l["type"] for l in perc["landmarks"]}
+    for lm in req_landmarks:
+        if lm in found_landmarks:
+            matched.append(f"landmark:{lm}")
+        else:
+            missing.append(f"missing landmark '{lm}'")
+
+    # 2. Check required interactive elements
+    req_interactive = requirements.get("required_interactive", [])
+    for req in req_interactive:
+        req_tag = req.get("tag")
+        req_text = req.get("text")
+        req_id = req.get("id")
+        found = False
+        for el in perc["interactive_elements"]:
+            tag_ok = not req_tag or el["tag"] == req_tag
+            id_ok = not req_id or el["id"] == req_id
+            text_ok = not req_text or (req_text.lower() in el["text"].lower() or req_text.lower() in el["aria_label"].lower())
+            if tag_ok and id_ok and text_ok:
+                found = True
+                break
+        if found:
+            matched.append(f"interactive:{req_tag or req_id or req_text}")
+        else:
+            missing.append(f"missing interactive element matching {req}")
+
+    # 3. Check minimum accessibility score
+    min_score = float(requirements.get("min_a11y_score", 0.0))
+    a11y_passed = perc["accessibility"]["score"] >= min_score
+    if not a11y_passed:
+        missing.append(f"a11y score {perc['accessibility']['score']} is below required {min_score}")
+
+    # 4. Check critical a11y violations
+    if requirements.get("no_critical_violations"):
+        high_v = [v for v in perc["accessibility"]["violations"] if v.get("severity") == "high"]
+        if high_v:
+            missing.append(f"{len(high_v)} critical accessibility violation(s) detected")
+
+    passed = len(missing) == 0
+    return {
+        "passed": passed,
+        "matched": matched,
+        "missing": missing,
+        "perception": perc,
+    }
+
+
+def format_perception_report(perception: dict[str, Any]) -> str:
+    """Format perception statistics into a human-readable outline."""
+    a11y = perception["accessibility"]
+    lines = [
+        f"## Runtime Perception Report: {perception.get('title') or 'Untitled'}",
+        f"- **Elements:** {perception['total_elements']} (max depth: {perception['max_depth']})",
+        f"- **Interactive Elements:** {perception['interactive_count']}",
+        f"- **Landmarks:** {len(perception['landmarks'])} ({', '.join(l['type'] for l in perception['landmarks'])})",
+        f"- **Accessibility Score:** {a11y['score'] * 100:.1f}% ({a11y['passed_checks']}/{a11y['total_checks']} passed, {a11y['violations_count']} violations)",
+    ]
+    if a11y["violations"]:
+        lines.append("### Accessibility Violations:")
+        for v in a11y["violations"]:
+            lines.append(f"- **[{v['severity'].upper()}] {v['rule']}:** {v['message']}")
+    return "\n".join(lines)
+

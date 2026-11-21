@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Pattern
+from typing import Any, Pattern
 
 # Environment variable substrings that denote secret values
 SENSITIVE_ENV_KEYWORDS = (
@@ -70,6 +70,15 @@ SECRET_PATTERNS: list[tuple[str, Pattern[str]]] = [
 
     # 10. JSON Web Tokens (JWT)
     ("JWT_TOKEN", re.compile(r"\b(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_\-\.]+)\b")),
+
+    # 11. Google Cloud / Gemini API Keys
+    ("GOOGLE_API_KEY", re.compile(r"\b(AIzaSy[A-Za-z0-9_-]{33,35})\b")),
+
+    # 12. Git URL credentials (git clone https://<token>@github.com/...)
+    ("GIT_URL_TOKEN", re.compile(r"((?:https?|git)://[^:\s/]+:)([^@\s/]{8,})(@(?:github|gitlab|bitbucket)\.com)")),
+
+    # 13. Generic assignments: api_key = "...", secret = "..."
+    ("GENERIC_SECRET", re.compile(r"""(?i)\b(api_key|apikey|secret_key|secret|password|passwd|auth_token)\s*[:=]\s*["']?([A-Za-z0-9_\-.~+]{12,})["']?""")),
 ]
 
 
@@ -151,3 +160,18 @@ def has_secrets(text: str) -> bool:
             return True
 
     return False
+
+
+# Semantic alias
+mask_sensitive_tokens = redact_secrets
+
+
+def mask_dict(data: Any, custom_secrets: list[str] | None = None, redact_env: bool = True) -> Any:
+    """Recursively mask sensitive tokens and credentials in dictionaries, lists, and strings."""
+    if isinstance(data, str):
+        return redact_secrets(data, custom_secrets=custom_secrets, redact_env=redact_env)
+    if isinstance(data, dict):
+        return {k: mask_dict(v, custom_secrets=custom_secrets, redact_env=redact_env) for k, v in data.items()}
+    if isinstance(data, list):
+        return [mask_dict(x, custom_secrets=custom_secrets, redact_env=redact_env) for x in data]
+    return data

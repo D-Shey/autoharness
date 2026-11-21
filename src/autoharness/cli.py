@@ -202,7 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--answer-file", help="for `test`: the judge's answer, saved unedited")
     s.add_argument("--approve", action="store_true", help="for `save`: the user explicitly agreed")
     s = sub.add_parser("gateway", help="one MCP server that hot-adds the servers you add, no agent restarts")
-    s.add_argument("action", choices=["install", "uninstall", "status", "serve", "approve"])
+    s.add_argument("action", choices=["install", "uninstall", "status", "serve", "approve", "circuit"])
     s.add_argument("--user", action="store_true",
                    help="for `install`/`uninstall`: in the agent's own MCP file, for every project")
     s.add_argument("name", nargs="?", help="for `approve`: the server in .autoharness/gateway.json")
@@ -319,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--callers", help="find direct callers for a symbol")
     s.add_argument("--check-shims", action="store_true", help="scan for fake implementation stubs and mock cheats (Anti-Shim Sentinel)")
     s = sub.add_parser("swarm", help="Multi-agent DAG swarm workflow coordinator and runner")
-    s.add_argument("action", choices=["init", "run", "status", "list", "verify"], help="swarm action")
+    s.add_argument("action", choices=["init", "run", "status", "list", "verify", "leases", "receipts"], help="swarm action")
     s.add_argument("plan_id", nargs="?", help="plan ID or JSON plan path")
     s.add_argument("--title", help="title for the swarm plan (init)")
     s.add_argument("--file", help="tasks JSON file to initialize from (init)")
@@ -387,6 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--mode", "-m", choices=["auto", "schema", "ast", "wireframe", "contour", "svg", "outline", "text"], default="auto", help="extraction mode")
     s.add_argument("--target", "-t", default="", help="target file to check against stencil")
     s.add_argument("--note", default="", help="note when registering stencil as task evidence")
+    s = sub.add_parser("openspec", help="OpenSpec spec-driven development compatibility and workflow bridge")
+    s.add_argument("action", nargs="?", choices=["status", "sync", "changes"], default="status", help="action: status, sync, changes")
+    s.add_argument("--change", default="", help="specific change name")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     return p
 
 
@@ -398,7 +402,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel, "compact": cmd_compact, "stencil": cmd_stencil}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel, "compact": cmd_compact, "stencil": cmd_stencil, "openspec": cmd_openspec}
 
 
 def main(argv: list[str] | None = None) -> int:

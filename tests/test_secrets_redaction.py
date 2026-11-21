@@ -84,7 +84,7 @@ def test_redact_environment_secrets(monkeypatch):
     monkeypatch.setenv("AUTOHARNESS_TEST_API_TOKEN", "classified_token_xyz_987654")
     monkeypatch.setenv("DB_PASSWORD", "my_secret_database_password_2026")
 
-    text = "Failed connecting with classified_token_xyz_987654 (password: my_secret_database_password_2026)"
+    text = "Failed connecting with classified_token_xyz_987654 (using database password value my_secret_database_password_2026)"
     redacted = secrets.redact_secrets(text)
 
     assert "classified_token_xyz_987654" not in redacted
@@ -137,3 +137,29 @@ def test_runs_no_redact_flag(tmp_path):
     assert fake_token in item["skim"]
     log_content = Path(item["log"]).read_text(encoding="utf-8")
     assert fake_token in log_content
+
+
+def test_redact_google_api_key_and_git_url():
+    fake_google = "AIzaSy" + "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7"
+    fake_git_url = "https://oauth2:ghp_123456789012345678901234567890123456@github.com/org/repo.git"
+    text = f"Google Gemini key: {fake_google}\nGit clone url: {fake_git_url}"
+    redacted = secrets.redact_secrets(text)
+    assert fake_google not in redacted
+    assert "[REDACTED:GOOGLE_API_KEY]" in redacted
+    assert "ghp_" not in redacted
+
+
+def test_mask_dict_recursive():
+    fake_key = "sk-proj-123456789012345678901234567890"
+    payload = {
+        "service": "openai",
+        "nested": {
+            "token": fake_key,
+            "items": [1, 2, f"key={fake_key}"]
+        }
+    }
+    masked = secrets.mask_dict(payload)
+    assert fake_key not in json.dumps(masked)
+    assert "[REDACTED:OPENAI_PROJ_KEY]" in masked["nested"]["token"]
+    assert "[REDACTED:OPENAI_PROJ_KEY]" in masked["nested"]["items"][2]
+

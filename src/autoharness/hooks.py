@@ -275,12 +275,31 @@ def _without_stdin(tool: str, command: str) -> str:
     return rest[pipe.end():] if pipe else command
 
 
+def _is_openspec_command(words: list[str]) -> bool:
+    """Detect OpenSpec CLI, npx openspec, or /opsx:* slash commands."""
+    if not words:
+        return False
+    w0 = words[0].lower()
+    if w0 in ("openspec", "openspec.exe", "openspec.ps1", "openspec.cmd", "opsx", "opsx.exe", "opsx.cmd"):
+        return True
+    if w0.startswith("/opsx:") or w0.startswith("opsx:"):
+        return True
+    if w0 == "npx" and len(words) > 1 and words[1].lower() in ("openspec", "@fission-ai/openspec"):
+        return True
+    return False
+
+
 def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
     """The skill, or one plain `autoharness ...` command (after any `cd <dir> &&`). Nothing may run after it
     in the same call, so the gate is not passed by chaining another command on. The gate keeps the agent to
     the procedure; it is not a sandbox (the agent may also `waive` it)."""
     if tool == "Skill":
-        return str(tool_input.get("skill", "")).split(":")[-1] == "autoharness"
+        sk = str(tool_input.get("skill", "")).lower()
+        return (
+            sk.split(":")[-1] in ("autoharness", "openspec", "opsx")
+            or sk.startswith("opsx:")
+            or sk.startswith("openspec")
+        )
     if tool not in ("Bash", "PowerShell"):
         return False
     command = TRAILING_OUTPUT.sub("", _without_stdin(tool, str(tool_input.get("command", "")).strip()))
@@ -291,7 +310,7 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
     while tool == "Bash" and last and ENV_PREFIX.match(last[0]):
         last = last[1:]
     return (all(len(c) == 2 and c[0] == "cd" for c in prefix)
-            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last) or _reads_only(last)))
+            and (last[:1] == ["autoharness"] or _looks_up_autoharness(last) or _reads_only(last) or _is_openspec_command(last)))
 
 
 READERS = {"ls", "dir", "pwd", "tree", "cat", "head", "tail", "type", "get-childitem", "gci", "get-location",
@@ -366,6 +385,12 @@ def _is_args_file(path: Path | str) -> bool:
     return (name in ("args.json", "brief.json", "payload.json")
             or name.endswith(".args.json") or name.endswith(".brief.json")
             or "scratch" in p.parts)
+
+
+def _is_openspec_file(path: Path | str) -> bool:
+    """Whether a path belongs to OpenSpec specifications, changes, or planning artifacts."""
+    from autoharness import openspec
+    return openspec.is_openspec_path(path)
 
 
 def _path_values(tool_input: dict) -> list[str]:
@@ -788,7 +813,7 @@ def cmd_hook(args, project, catalog):
             if state == "pending" and GATED_TOOLS.match(tool):
                 if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
                     paths = [Path(v) for v in _path_values(tool_input)]
-                    if paths and all(_is_args_file(p) for p in paths):
+                    if paths and all(_is_args_file(p) or _is_openspec_file(p) for p in paths):
                         return 0
                 reason = handoff(Task(project, active), sid) if foreign else (
                     "autoharness first: invoke the `autoharness` skill, run `autoharness init`, review the skills and "

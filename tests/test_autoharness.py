@@ -1535,11 +1535,13 @@ def test_gateway_serve_end_to_end(project):
         assert tool_names(2) == [
             "harness_tools", "harness_call", "harness_search", "harness_execute",
             "harness_history_search", "harness_memory_search", "harness_memory_reconcile", "harness_codemap",
-            "harness_swarm_status", "harness_slots", "harness_swarm_run", "harness_swarm_verify", "harness_drive_status", "harness_drive_run",
+            "harness_swarm_status", "harness_slots", "harness_swarm_run", "harness_swarm_verify",
+            "harness_swarm_leases", "harness_swarm_receipts", "harness_drive_status", "harness_drive_run",
             "harness_update_check", "harness_permissions_status", "harness_permissions_enable",
             "harness_simulate_action", "harness_compress_output",
             "harness_sentinel_verify", "harness_sentinel_snapshot", "harness_sentinel_rollback",
-            "harness_compact_session", "harness_check_prompt_cache", "harness_session_status"
+            "harness_compact_session", "harness_check_prompt_cache", "harness_session_status",
+            "harness_circuit_status", "harness_openspec_status", "harness_openspec_sync"
         ]
 
         approved_servers(project, {"fake": FAKE_CFG})

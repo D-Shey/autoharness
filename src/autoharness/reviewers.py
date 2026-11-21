@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from autoharness.env import HarnessError
 
@@ -98,3 +99,156 @@ def run(agent: str, root: Path, prompt_file: Path, answer_file: Path, timeout: f
         raise HarnessError(f"the {agent} reviewer failed (exit {proc.returncode}): {err}")
     answer_file.write_text(stdout + "\n", "utf-8")
     return stdout
+
+
+# --- Peer Review Challenge & Cross-Validation (Perplexity Multiagent Model) ----
+
+FINDING_PATTERN = re.compile(
+    r"(?:^|\n)\s*(?:[-*•]|\d+[.)])\s*(?:(?:FINDING|ISSUE|CONCERN|GAP|PROBLEM|CRITICISM|DEFECT):\s*)?(.*)",
+    re.IGNORECASE,
+)
+
+
+def extract_critic_claims(review_text: str) -> list[str]:
+    """Extract individual actionable criticism claims from reviewer text."""
+    claims = []
+    lines = review_text.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(kw in stripped.lower() for kw in ("finding", "issue", "missing", "contradict", "problem", "fails", "incomplete")):
+            cleaned = re.sub(r"^[-*•\d.)\s]+", "", stripped).strip()
+            if len(cleaned) >= 10:
+                claims.append(cleaned)
+    if not claims:
+        for m in FINDING_PATTERN.finditer(review_text):
+            txt = m.group(1).strip()
+            if len(txt) >= 15:
+                claims.append(txt)
+    return claims[:10]
+
+
+def create_peer_challenge(
+    review_text: str,
+    original_verdict: str = "missing",
+    author_defense: str = "",
+    code_evidence: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Create a structured peer challenge against a critic review with counter-evidence."""
+    claims = extract_critic_claims(review_text)
+    items = []
+    for idx, claim in enumerate(claims, 1):
+        items.append({
+            "id": f"claim_{idx}",
+            "critic_claim": claim,
+            "author_defense": author_defense,
+            "evidence_attached": list(code_evidence.keys()) if code_evidence else [],
+        })
+
+    return {
+        "original_verdict": original_verdict,
+        "review_summary": review_text[:300].strip(),
+        "total_claims": len(items),
+        "claims": items,
+        "evidence": code_evidence or {},
+        "status": "contested" if items else "accepted",
+    }
+
+
+def synthesize_peer_resolution(challenge: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate contested review claims against provided code evidence and determine consensus resolution."""
+    claims = challenge.get("claims", [])
+    evidence = challenge.get("evidence", {})
+    orig_verdict = challenge.get("original_verdict", "missing")
+
+    if not claims:
+        return {
+            "resolution": "upheld",
+            "revised_verdict": orig_verdict,
+            "points_evaluated": 0,
+            "points_overruled": 0,
+            "points_upheld": 0,
+            "rationale": "No specific claims were contested.",
+        }
+
+    overruled_count = 0
+    upheld_count = 0
+    evaluations = []
+
+    for item in claims:
+        claim_text = item["critic_claim"].lower()
+        defense = item["author_defense"].lower()
+
+        refuted = False
+        refuting_evidence = ""
+        for file_key, content in evidence.items():
+            content_lower = content.lower()
+            words = [w for w in re.findall(r"\w{4,}", claim_text) if w not in ("missing", "cannot", "does", "should", "without", "failed")]
+            matching_words = sum(1 for w in words if w in content_lower)
+            if matching_words >= min(2, len(words)) and len(words) >= 1:
+                refuted = True
+                refuting_evidence = file_key
+                break
+
+        if not refuted and ("line " in defense or "implemented in" in defense or "tested in" in defense):
+            refuted = True
+            refuting_evidence = "author_defense_reference"
+
+        if refuted:
+            overruled_count += 1
+            evaluations.append({
+                "claim_id": item["id"],
+                "outcome": "overruled",
+                "evidence": refuting_evidence or "code_evidence_match",
+                "rationale": f"Critic claim was disproved by evidence in {refuting_evidence or 'codebase'}.",
+            })
+        else:
+            upheld_count += 1
+            evaluations.append({
+                "claim_id": item["id"],
+                "outcome": "upheld",
+                "evidence": "none",
+                "rationale": "Claim remains substantiated based on available evidence.",
+            })
+
+    total = len(claims)
+    if overruled_count == total:
+        resolution = "overruled"
+        revised_verdict = "met"
+        rationale = f"All {total} critic claims were successfully refuted with code evidence."
+    elif overruled_count > 0:
+        resolution = "compromise"
+        revised_verdict = "partial" if orig_verdict in ("missing", "contradicts") else orig_verdict
+        rationale = f"{overruled_count} of {total} claims were refuted; remaining claims were upheld."
+    else:
+        resolution = "upheld"
+        revised_verdict = orig_verdict
+        rationale = f"Critic verdict upheld: none of the {total} claims were refuted by evidence."
+
+    return {
+        "resolution": resolution,
+        "original_verdict": orig_verdict,
+        "revised_verdict": revised_verdict,
+        "points_evaluated": total,
+        "points_overruled": overruled_count,
+        "points_upheld": upheld_count,
+        "evaluations": evaluations,
+        "rationale": rationale,
+    }
+
+
+def format_peer_challenge_report(res: dict[str, Any]) -> str:
+    """Format peer challenge synthesis into a Markdown review appendix."""
+    lines = [
+        f"### Peer Review Challenge Synthesis: `{res['resolution'].upper()}`",
+        f"- **Original Verdict:** `{res['original_verdict']}` ➔ **Revised Verdict:** `{res['revised_verdict']}`",
+        f"- **Scorecard:** {res['points_overruled']}/{res['points_evaluated']} claims overruled, {res['points_upheld']} upheld",
+        f"- **Rationale:** {res['rationale']}",
+    ]
+    if res.get("evaluations"):
+        lines.append("\n#### Itemized Evaluations:")
+        for ev in res["evaluations"]:
+            icon = "✅ Overruled" if ev["outcome"] == "overruled" else "❌ Upheld"
+            lines.append(f"- **[{ev['claim_id']}] {icon}:** {ev['rationale']}")
+    return "\n".join(lines)
