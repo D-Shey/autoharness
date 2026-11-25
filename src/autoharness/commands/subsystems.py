@@ -834,7 +834,74 @@ def cmd_openspec(args, project, catalog):
     return 0
 
 
+def cmd_ontology(args, project, catalog) -> int:
+    from autoharness import ontology
+    action = getattr(args, "action", "show") or "show"
+    raw_json = bool(getattr(args, "json", False))
 
+    if action == "init":
+        res = ontology.init_ontology(project.root, overwrite=bool(getattr(args, "overwrite", False)))
+        out(res)
+        return 0
+    if action == "add":
+        entry = (getattr(args, "target", "") or "").strip()
+        if not entry:
+            out({"status": "error", "error": "Entry text is required: autoharness ontology add \"...\""})
+            return 1
+        section = getattr(args, "section", None) or "Glossary"
+        term = getattr(args, "term", "") or ""
+        res = ontology.add_ontology_entry(project.root, section=section, entry=entry, term=term)
+        out(res)
+        return 0
+    if action == "query":
+        q = getattr(args, "target", "") or ""
+        raw_limit = getattr(args, "limit", None)
+        limit = 8 if raw_limit is None else int(raw_limit)
+        res = ontology.query_ontology(project.root, query=q, limit=limit)
+        matches = res.get("matches", [])
+        if raw_json:
+            out({"status": "ok", **res})
+        else:
+            print("\n".join(f"- [{m.get('section_title', m.get('section', ''))}] {m['raw']}" for m in matches) or "No ontology entries matched.")
+        return 0
+    if action == "check":
+        res = ontology.validate_ontology(project.root)
+        out(res)
+        return 0 if res.get("status") != "drifted" else 1
+
+    data = ontology.load_ontology(project.root)
+    if raw_json:
+        out({"status": "ok", **data})
+    else:
+        print(ontology.format_ontology_report(data))
+    return 0
+
+
+def cmd_truth(args, project, catalog) -> int:
+    from autoharness import truth
+    action = getattr(args, "action", "audit") or "audit"
+    raw_json = bool(getattr(args, "json", False))
+    raw_commits = getattr(args, "commits", None)
+    raw_min = getattr(args, "min_tasks", None)
+    max_commits = 50 if raw_commits is None else int(raw_commits)
+    min_tasks = 1 if raw_min is None else int(raw_min)
+
+    if action == "postmortem":
+        res = truth.run_postmortem(project.root, min_subsequent_tasks=min_tasks)
+    elif action == "churn":
+        res = truth.git_churn_stats(project.root, max_commits=max_commits)
+    elif action == "assumptions":
+        q = (getattr(args, "query", "") or "").strip()
+        items = truth.relevant_assumptions(project.root, q, limit=20) if q else truth.load_assumptions(project.root.resolve())
+        res = {"status": "ok", "count": len(items), "items": items}
+    else:
+        res = truth.analyze_dormant_signals(project.root, max_commits=max_commits)
+
+    if raw_json or action in ("churn", "assumptions"):
+        out(res)
+    else:
+        print(truth.format_truth_report(res))
+    return 0
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

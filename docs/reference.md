@@ -65,6 +65,9 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 | `swarm verify [<plan_id>] [--json]` | audit DAG topology and validate declarative artifact barriers (`expected_artifacts`, `barrier_assertions`, `allowed_paths`) and role boundaries; blocks downstream branches on upstream failure |
 | `drive [run\|status\|queue\|rollback] [--max-tasks N] [--followup ID] [--dry-run]` | continuous autonomy self-driving backlog loop: prioritized resolution of `followups.json`, pre- & post-flight regression sentinel checks, and automated git rollback on failures |
 | `update [--check] [--repo REPO] [--force] [--yes]` | check for updates and automated self-update of AutoHarness from GitHub releases/repository via `uv tool` or `pip` |
+| `openspec [status\|sync\|changes] [--change NAME] [--json]` | OpenSpec spec-driven development compatibility bridge |
+| `ontology [show\|init\|add\|query\|check] [target] [--section SEC] [--term TERM] [--json]` | Ontology 2.0 living natural-language semantic map (`.autoharness/ontology.md`), auto-indexed into persistent memory and injected into critic reviews |
+| `truth [audit\|churn\|postmortem\|assumptions] [query] [--commits N] [--json]` | Dormant Data Truth Engine & Delayed Assumption Postmortem: detects git thrashing, recurring followups after `done`, unconfirmed reviews, and falsified assumptions |
 | `install-skill` / `install-hook` / `waive` | installs the skill and the hook; skips autoharness in a session on the user's word |
 | `agents` | the supported agents and their paths |
 
@@ -74,7 +77,7 @@ Every command prints JSON. Exit code `3` means the user's consent is needed. `--
 |---|---|
 | `.autoharness/tasks/<id>/` | the task's state: `task.json`, lockfiles, `harness.md`, `events.jsonl`, `decisions.jsonl`, evidence, reviewers' answers |
 | `.autoharness/evals.jsonl` | run measurements; a local file, ignored by Git |
-| `.autoharness/kept.json`, `config.json`, `gateway.json`, `followups.json` | what stayed in the project, project settings, gateway servers, deferred findings; they can be committed (`.autoharness/.gitignore` lets only them through), the rest of the state stays out of git |
+| `.autoharness/kept.json`, `config.json`, `gateway.json`, `followups.json`, `ontology.md`, `assumptions.json` | what stayed in the project, project settings, gateway servers, deferred findings, living Ontology 2.0 map, and assumption postmortem log |
 | `.autoharness/gateway.log` | the gateway's log |
 | `.autoharness/logs/` | full uncompressed logs preserved by `skim` for drill-down debugging |
 | `.autoharness/folded/` | reversible compacted session transcripts from `compact run` |

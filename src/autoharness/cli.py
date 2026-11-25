@@ -288,6 +288,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "each round also a code-quality reviewer, both run again after every fix")
     s.add_argument("--preserve", help="existing behaviour that must keep working; teardown then requires a passing "
                                       f"`verify run ... --for {runs.PRESERVE}` on the final code")
+    s.add_argument("--bounds", default="",
+                   help="bounded autonomy rules: `allowed_paths=src/,tests/; max_tokens=50000; escalate_on=delete,push`")
+    s.add_argument("--assumptions", default="",
+                   help="semicolon-separated fragile assumptions to track for delayed postmortem")
     s.add_argument("--verify-template", choices=["browser", "api", "api-client", "logs", "database"],
                    help="use a built-in verification guide instead of --verify")
     s = sub.add_parser("claim", help="take over the active task from the agent session that started it")
@@ -304,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("memory", help="in-process SQLite FTS5 persistent memory with BM25 ranking, LEANN vector search, and dynamic drift reconciliation")
     s.add_argument("action", choices=["search", "index", "status", "reconcile"])
     s.add_argument("query", nargs="?", default="", help="search term")
-    s.add_argument("--kind", choices=["all", "ruling", "lesson", "review", "followup", "swarm_task"], default="all")
+    s.add_argument("--kind", choices=["all", "ruling", "lesson", "review", "followup", "swarm_task", "ontology"], default="all")
     s.add_argument("--mode", choices=["hybrid", "fts", "vector"], default="hybrid", help="search mode (default: hybrid RRF)")
     s.add_argument("--limit", type=int, default=5)
     s.add_argument("--prune-orphans", action="store_true", help="permanently prune orphaned and broken memory references")
@@ -391,6 +395,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["status", "sync", "changes"], default="status", help="action: status, sync, changes")
     s.add_argument("--change", default="", help="specific change name")
     s.add_argument("--json", action="store_true", help="output structured JSON")
+    s = sub.add_parser("ontology", help="Ontology 2.0 living natural-language domain map (.autoharness/ontology.md)")
+    s.add_argument("action", nargs="?", choices=["show", "status", "init", "add", "query", "check"], default="show")
+    s.add_argument("target", nargs="?", default="", help="entry text for add, or search query for query")
+    s.add_argument("--section", default="Glossary", help="ontology section heading for add (default: Glossary)")
+    s.add_argument("--term", default="", help="optional explicit concept name prefix for add")
+    s.add_argument("--limit", type=int, default=8)
+    s.add_argument("--overwrite", action="store_true", help="overwrite existing ontology.md on init")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
+    s = sub.add_parser("truth", help="Dormant Data Truth Engine & Delayed Assumption Postmortem")
+    s.add_argument("action", nargs="?", choices=["audit", "churn", "postmortem", "assumptions"], default="audit")
+    s.add_argument("query", nargs="?", default="", help="optional topic query for assumptions")
+    s.add_argument("--commits", type=int, default=50, help="git commits to scan for churn")
+    s.add_argument("--min-tasks", type=int, default=1, help="minimum subsequent tasks before marking pending assumptions validated")
+    s.add_argument("--json", action="store_true", help="output structured JSON")
     return p
 
 
@@ -402,7 +420,7 @@ COMMANDS = {"plan": cmd_plan, "init": cmd_init, "mode": cmd_mode, "eval": cmd_ev
             "evidence": cmd_evidence, "review": cmd_review, "critic": cmd_critic, "approach": cmd_approach,
             "arbiter": cmd_arbiter, "arbitrate": cmd_arbitrate, "check": cmd_check, "claim": cmd_claim,
             "memory": cmd_memory, "codemap": cmd_codemap, "swarm": cmd_swarm, "drive": cmd_drive, "update": cmd_update,
-            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel, "compact": cmd_compact, "stencil": cmd_stencil, "openspec": cmd_openspec}
+            "permissions": cmd_permissions, "yolo": cmd_permissions, "slot": cmd_slot, "probe": cmd_probe, "simulate": cmd_simulate, "skim": cmd_skim, "sentinel": cmd_sentinel, "compact": cmd_compact, "stencil": cmd_stencil, "openspec": cmd_openspec, "ontology": cmd_ontology, "truth": cmd_truth}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -457,11 +475,14 @@ def main(argv: list[str] | None = None) -> int:
         # the hook writes only session state in ~/.autoharness, and agy runs it outside the project
         if (args.cmd == "gateway" and args.action == "serve") or (args.cmd == "eval" and args.action == "batch") \
                 or args.cmd == "hook":
-            exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
+            catalog = None if args.cmd == "hook" else Catalog.load()
+            exit_code = COMMANDS[args.cmd](args, project, catalog)
             return exit_code
         from autoharness import transactions
         # a check or a reviewer may run for many minutes: those commands lock only while they write
-        long = (args.cmd == "verify" and args.action == "run") or (args.cmd in ("critic", "check") and args.run)
+        long = ((args.cmd == "verify" and args.action == "run")
+                or (args.cmd in ("critic", "check") and args.run)
+                or args.cmd == "truth")
         with transactions.locked(project.root):
             transactions.recover(project.root)
             if args.cmd in OWNED:
@@ -471,14 +492,14 @@ def main(argv: list[str] | None = None) -> int:
                 return exit_code
         exit_code = COMMANDS[args.cmd](args, project, Catalog.load())
         return exit_code
-    except (HarnessError, agents.AgentError) as e:
+    except (HarnessError, agents.AgentError, ValueError) as e:
         out({"status": "error", "error": str(e)})
         return 1
     except OSError as e:
         out({"status": "error", "error": f"network or filesystem error: {e}"})
         return 1
     finally:
-        if args.cmd != "gateway" or args.action != "serve":
+        if args.cmd != "hook" and (args.cmd != "gateway" or args.action != "serve"):
             from autoharness import telemetry
             try:
                 telemetry.record(project.root, before or project.active_id(), args.cmd,

@@ -304,7 +304,17 @@ def cmd_brief(args, project, catalog):
     expects = args.expects.strip()
     if not EXPECTS_ITEM.search(expects) and not re.match(r"none\s*:\s*\S", expects, re.IGNORECASE):
         raise HarnessError(EXPECTS_HOW)
-    task.record_brief({"goal": args.goal, "domains": domains, "method": method, "inputs": args.inputs,
+    bounds_raw = (getattr(args, "bounds", None) or "").strip()
+    assumptions_raw = (getattr(args, "assumptions", None) or "").strip()
+    bounds_spec = {}
+    if bounds_raw:
+        from autoharness import consequence
+        try:
+            bounds_spec = consequence.parse_autonomy_bounds(bounds_raw)
+        except ValueError as e:
+            raise HarnessError(f"invalid --bounds: {e}") from e
+    assumption_list = [a.strip() for a in re.split(r"[;\n]+", assumptions_raw) if a.strip()] if assumptions_raw else []
+    brief_payload = ({"goal": args.goal, "domains": domains, "method": method, "inputs": args.inputs,
                        "constraints": args.constraints, "expects": expects,
                        "verify": verify, "candidates": args.candidates, "gaps": args.gaps}
                       | ({"verify_template": args.verify_template} if args.verify_template else {})
@@ -312,7 +322,13 @@ def cmd_brief(args, project, catalog):
                       | ({"fidelity": args.fidelity} if args.fidelity else {})
                       | ({"components": args.components} if getattr(args, "components", None) else {})
                       | ({"techniques": args.techniques.strip()} if getattr(args, "techniques", None) and args.techniques.strip() else {})
+                      | ({"bounds": bounds_spec} if bounds_spec else {})
+                      | ({"assumptions": assumption_list} if assumption_list else {})
                       | ({runs.PRESERVE: args.preserve} if args.preserve else {}))
+    task.record_brief(brief_payload)
+    if assumption_list:
+        from autoharness import truth
+        truth.record_assumptions(project.root, task.id, assumption_list)
     task._update_info(planned_skills=planned)
     warnings = [] if task.discovery_ran() else [
         "no search ran for this task; run `autoharness search skill|mcp \"<query>\"` before deciding nothing fits"]

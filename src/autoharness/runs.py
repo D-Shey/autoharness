@@ -13,11 +13,15 @@ does not pass for a check of the code at teardown. What the agent only reports (
 from __future__ import annotations
 
 import ast
+import ctypes
+import functools
 import hashlib
 import os
 import re
+import signal
 import subprocess
 import time
+from ctypes import wintypes
 from pathlib import Path
 
 from autoharness import evidence, transactions
@@ -368,6 +372,180 @@ def skim_output(output: str, exit_code: int | None = 0, budget_chars: int = 2500
     return res
 
 
+JOB_OBJECT_EXTENDED_LIMIT_INFO_CLASS = 9
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+@functools.lru_cache(maxsize=1)
+def _win32_kernel32():
+    if os.name != "nt":
+        return None
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k32.SetInformationJobObject.restype = wintypes.BOOL
+    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    k32.AssignProcessToJobObject.restype = wintypes.BOOL
+    k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    k32.TerminateJobObject.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    return k32
+
+
+def _attach_kill_on_close_job(proc: subprocess.Popen[bytes]) -> int | None:
+    """Bind a Windows child process to a Job Object with KILL_ON_JOB_CLOSE so OS reaps the tree if parent dies."""
+    if os.name != "nt" or not getattr(proc, "_handle", None):
+        return None
+    try:
+        k32 = _win32_kernel32()
+        if k32 is None:
+            return None
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(
+            job,
+            JOB_OBJECT_EXTENDED_LIMIT_INFO_CLASS,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            k32.CloseHandle(job)
+            return None
+        if not k32.AssignProcessToJobObject(job, wintypes.HANDLE(int(proc._handle))):
+            k32.CloseHandle(job)
+            return None
+        return int(job)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _close_job_handle(job_handle: int | None) -> None:
+    if os.name == "nt" and job_handle:
+        try:
+            k32 = _win32_kernel32()
+            if k32 is not None:
+                k32.CloseHandle(wintypes.HANDLE(job_handle))
+        except OSError:
+            pass
+
+
+def _kill_process_tree(proc: subprocess.Popen[bytes], job_handle: int | None = None) -> None:
+    """Terminate `proc` and all of its descendant processes across Windows and POSIX."""
+    if os.name == "nt":
+        if job_handle:
+            try:
+                k32 = _win32_kernel32()
+                if k32 is not None:
+                    k32.TerminateJobObject(wintypes.HANDLE(job_handle), 1)
+            except OSError:
+                pass
+        if proc.poll() is None:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=10,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+    else:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_shell_command(command: str, cwd: Path, timeout: float) -> tuple[int | None, bytes, bool]:
+    """Execute `command` in its own process group/job object and reap the entire tree on exit or timeout."""
+    popen_kw: dict = {
+        "shell": True,
+        "cwd": cwd,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if os.name == "nt":
+        popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kw["start_new_session"] = True
+    proc = subprocess.Popen(command, **popen_kw)
+    job_handle: int | None = None
+    try:
+        job_handle = _attach_kill_on_close_job(proc)
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, (stdout or b"") + (stderr or b""), False
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc, job_handle)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            stdout, stderr = b"", b""
+        return None, (stdout or b"") + (stderr or b""), True
+    except BaseException:
+        _kill_process_tree(proc, job_handle)
+        try:
+            proc.wait(timeout=1)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        raise
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+        _close_job_handle(job_handle)
+
+
 def run(task: Task, command: str, name: str = "", purpose: str = "", timeout: float = DEFAULT_TIMEOUT,
         redact: bool = True) -> dict:
     """Run `command` in the project root through the shell and record it. Passed means exit code 0."""
@@ -377,12 +555,7 @@ def run(task: Task, command: str, name: str = "", purpose: str = "", timeout: fl
     name = name or command.split()[0]
     started = time.monotonic()
     # the project lock is not held while the check runs (a test suite may take minutes): only for the record
-    try:
-        proc = subprocess.run(command, shell=True, cwd=root, capture_output=True, stdin=subprocess.DEVNULL,
-                              timeout=timeout)
-        code, raw, timed_out = proc.returncode, proc.stdout + proc.stderr, False
-    except subprocess.TimeoutExpired as e:
-        code, raw, timed_out = None, (e.stdout or b"") + (e.stderr or b""), True
+    code, raw, timed_out = _run_shell_command(command, root, timeout)
     seconds = round(time.monotonic() - started, 2)
     output = raw.decode("utf-8", "replace")
     safe_command = command

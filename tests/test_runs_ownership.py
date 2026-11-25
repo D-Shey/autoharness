@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -30,17 +31,24 @@ def isolated(monkeypatch, tmp_path_factory):
     monkeypatch.delenv(reviewers.ENV_FLAG, raising=False)
 
 
+@pytest.fixture(scope="session")
+def _git_template(tmp_path_factory):
+    tpl = tmp_path_factory.mktemp("git_template")
+    run = lambda *a: subprocess.run(["git", *a], cwd=tpl, check=True, capture_output=True)  # noqa: E731
+    run("init", "-q")
+    run("config", "user.email", "t@example.com")
+    run("config", "user.name", "t")
+    (tpl / "a.py").write_text("x = 1\n", "utf-8")
+    run("add", "a.py")
+    run("commit", "-qm", "init")
+    return tpl
+
+
 @pytest.fixture
-def project(tmp_path):
+def project(tmp_path, _git_template):
     root = tmp_path / "project"
-    root.mkdir()
+    shutil.copytree(_git_template, root)
     git = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)  # noqa: E731
-    git("init", "-q")
-    git("config", "user.email", "t@example.com")
-    git("config", "user.name", "t")
-    (root / "a.py").write_text("x = 1\n", "utf-8")
-    git("add", "a.py")
-    git("commit", "-qm", "init")
     p = Project(root, "claude")
     p.git = git
     return p

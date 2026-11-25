@@ -209,11 +209,23 @@ def simulate_action(
         reasons.append(f"Unknown action type '{action_type}'. Treating as elevated risk.")
         rollback_plan = "Inspect system logs and environment manually."
 
+    clamped_score = max(0, min(100, risk_score))
+    judgment_focus = _build_judgment_focus(
+        action_type=action_type,
+        target=target_clean,
+        tier=tier,
+        risk_score=clamped_score,
+        affected_files=affected_files,
+        touches_sensitive=touches_sensitive,
+        rollback_plan=rollback_plan,
+        reasons=reasons,
+    )
+
     return {
         "action_type": action_type,
         "target": target_clean,
         "reversibility_tier": tier.value,
-        "risk_score": max(0, min(100, risk_score)),
+        "risk_score": clamped_score,
         "reasons": reasons,
         "blast_radius": {
             "affected_files": affected_files,
@@ -222,6 +234,157 @@ def simulate_action(
             "touches_sensitive_paths": touches_sensitive,
         },
         "rollback_plan": rollback_plan,
+        "judgment_focus": judgment_focus,
+    }
+
+
+def _build_judgment_focus(
+    action_type: str,
+    target: str,
+    tier: ReversibilityTier,
+    risk_score: int,
+    affected_files: list[str],
+    touches_sensitive: bool,
+    rollback_plan: str,
+    reasons: list[str],
+) -> dict[str, Any]:
+    """Generate Anti-Cognitive-Surrender judgment cues for human oversight."""
+    attention_level = "critical" if tier == ReversibilityTier.IRREVERSIBLE or risk_score >= 70 else (
+        "elevated" if tier == ReversibilityTier.HIGH_RISK or touches_sensitive else "standard"
+    )
+    why = reasons[0] if reasons else f"{action_type} on `{target}` carries {tier.value} reversibility."
+    counter_q = (
+        f"Before approving `{action_type}` on `{target}`, what breaks if rollback ({rollback_plan}) fails or misses downstream dependents?"
+        if attention_level != "standard"
+        else f"Confirm `{target}` matches intended scope ({len(affected_files)} affected file(s))."
+    )
+    return {
+        "attention_level": attention_level,
+        "why_not_routine": why,
+        "counter_question": counter_q,
+        "human_signoff_required": attention_level in ("critical", "elevated"),
+    }
+
+
+def _strip_dot_slash(path_text: str) -> str:
+    norm = path_text.strip().replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return "" if norm in (".", "") else norm
+
+
+def parse_autonomy_bounds(bounds: dict[str, Any] | str | None) -> dict[str, Any]:
+    """Parse bounded-autonomy specification (`allowed_paths`, `max_tokens`, `escalate_on`)."""
+    if not bounds:
+        return {}
+    if isinstance(bounds, dict):
+        parsed = dict(bounds)
+        for list_key in ("allowed_paths", "escalate_on"):
+            if list_key in parsed and parsed[list_key] is not None:
+                val = parsed[list_key]
+                if isinstance(val, str):
+                    items = [x.strip() for x in val.split(",") if x.strip()]
+                elif isinstance(val, (list, tuple, set)):
+                    items = [str(x).strip() for x in val if str(x).strip()]
+                else:
+                    raise ValueError(f"invalid {list_key} value: expected list or string")
+                if not items:
+                    raise ValueError(f"{list_key} cannot be empty")
+                parsed[list_key] = [x.replace("\\", "/") for x in items] if list_key == "allowed_paths" else [x.lower() for x in items]
+        if "max_tokens" in parsed and parsed["max_tokens"] is not None:
+            mt = parsed["max_tokens"]
+            if isinstance(mt, bool) or not isinstance(mt, int) or mt <= 0:
+                raise ValueError(f"invalid max_tokens value {mt!r}: expected positive integer")
+        return parsed
+    parsed: dict[str, Any] = {}
+    for part in re.split(r"[;\n]+", str(bounds)):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part and ":" not in part:
+            raise ValueError(f"invalid autonomy bound segment {part!r}: expected key=value")
+        sep = "=" if "=" in part else ":"
+        k, v = part.split(sep, 1)
+        key = k.strip().lower().replace("-", "_")
+        val = v.strip()
+        if not key:
+            raise ValueError(f"empty bound key in {part!r}")
+        if key in ("allowed_paths", "paths", "scope"):
+            items = [x.strip().replace("\\", "/") for x in val.split(",") if x.strip()]
+            if not items:
+                raise ValueError("allowed_paths cannot be empty")
+            parsed["allowed_paths"] = items
+        elif key in ("escalate_on", "escalate"):
+            items = [x.strip().lower() for x in val.split(",") if x.strip()]
+            if not items:
+                raise ValueError("escalate_on cannot be empty")
+            parsed["escalate_on"] = items
+        elif key == "max_tokens":
+            try:
+                mt = int(val)
+            except ValueError as exc:
+                raise ValueError(f"invalid max_tokens value {val!r}: expected positive integer") from exc
+            if mt <= 0:
+                raise ValueError(f"invalid max_tokens value {val!r}: expected positive integer")
+            parsed["max_tokens"] = mt
+        else:
+            if not val:
+                raise ValueError(f"empty value for autonomy bound {key!r}")
+            parsed[key] = val
+    return parsed
+
+
+def check_autonomy_bounds(
+    project_root: Path,
+    target: str | None = None,
+    bounds: dict[str, Any] | str | None = None,
+    tokens_used: int | None = None,
+    action_type: str = "",
+) -> dict[str, Any]:
+    """Check whether a planned target, action, or token budget stays within declared autonomy bounds."""
+    spec = parse_autonomy_bounds(bounds)
+    if not spec:
+        return {"bounded": False, "within_bounds": True, "violations": [], "bounds": {}}
+
+    violations: list[str] = []
+    has_raw_allowed = "allowed_paths" in spec and bool(spec.get("allowed_paths"))
+    allowed_paths = [_strip_dot_slash(str(p)) for p in (spec.get("allowed_paths") or []) if str(p).strip()]
+    if target and (has_raw_allowed or allowed_paths):
+        root_resolved = project_root.resolve()
+        target_norm = target.replace("\\", "/")
+        raw_path = Path(target_norm)
+        candidate = raw_path.resolve() if raw_path.is_absolute() else (root_resolved / raw_path).resolve()
+        try:
+            rel = candidate.relative_to(root_resolved).as_posix()
+            in_repo = True
+        except ValueError:
+            rel = target_norm
+            in_repo = False
+        if not in_repo or not any(
+            ap == "" or rel == ap.rstrip("/") or rel.startswith(ap.rstrip("/") + "/")
+            for ap in allowed_paths
+        ):
+            violations.append(f"Target `{rel}` is outside allowed_paths {allowed_paths}")
+
+    max_tokens = spec.get("max_tokens")
+    if (
+        not isinstance(max_tokens, bool)
+        and isinstance(max_tokens, int)
+        and max_tokens > 0
+        and tokens_used is not None
+        and tokens_used > max_tokens
+    ):
+        violations.append(f"Token budget exceeded: {tokens_used} > max_tokens {max_tokens}")
+
+    escalate_on = [e.lower() for e in spec.get("escalate_on", []) if str(e).strip()]
+    if action_type and escalate_on and any(tok in action_type.lower() for tok in escalate_on):
+        violations.append(f"Action `{action_type}` triggers declared escalation rule {escalate_on}")
+
+    return {
+        "bounded": True,
+        "within_bounds": len(violations) == 0,
+        "violations": violations,
+        "bounds": spec,
     }
 
 
@@ -237,6 +400,7 @@ def format_consequence_manifest(simulation: dict[str, Any]) -> str:
     tests = blast.get("impacted_tests", [])
     sensitive = blast.get("touches_sensitive_paths", False)
     rollback = simulation.get("rollback_plan", "None")
+    jfocus = simulation.get("judgment_focus", {})
 
     lines = [
         f"# Consequence Simulation Manifest (Risk Score: {score}/100 [{tier}])",
@@ -257,6 +421,15 @@ def format_consequence_manifest(simulation: dict[str, Any]) -> str:
     ]
     for r in simulation.get("reasons", []):
         lines.append(f"- {r}")
+
+    if jfocus:
+        lines.extend([
+            "",
+            "## Human Judgment Focus (Anti-Cognitive-Surrender)",
+            f"- **Attention Level:** `{jfocus.get('attention_level', 'standard')}`",
+            f"- **Why Not Routine:** {jfocus.get('why_not_routine', '')}",
+            f"- **Counter-Question:** {jfocus.get('counter_question', '')}",
+        ])
 
     lines.extend([
         "",

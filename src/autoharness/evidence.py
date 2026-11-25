@@ -1379,13 +1379,29 @@ Where:
 - NOISE: unrelated churn, speculative code, or unrequested refactoring.
 Any change tagged HINDERS must also appear as a blocking or major difference in your numbered list above.
 """
+    from . import ontology
+    onto_ctx = ontology.format_ontology_context(
+        task.project.root,
+        query=f"{info.get('task', '')} {brief.get('goal', '')}".strip(),
+        max_entries=10,
+    )
+    ontology_text = (
+        f"\nProject Ontology 2.0 (canonical domain concepts & boundaries; flag drift or undefined terms):\n{onto_ctx}\n"
+        if onto_ctx else ""
+    )
+    devils_advocate = """
+Devil's Advocate & Counter-Evidence Check:
+- Name at least one concrete silent failure mode, edge case, or hidden dependency that passing tests alone would not catch.
+- Call out MISSING counter-evidence (what check or real-state verification was skipped or only mocked).
+- Under a heading "Fragile Assumptions", list the riskiest unverified assumptions this implementation depends on (or "none").
+"""
     prompt = f"""You are an independent critic. You did not make this work and owe its author nothing.
 
 Task given to the author:
 {info.get("task", "")}
 
 Quality bar: {brief.get("goal", "(not recorded)")}
-{method_text}{techniques_text}The user's constraints: {brief.get("constraints", "(not recorded)")}
+{method_text}{techniques_text}{ontology_text}The user's constraints: {brief.get("constraints", "(not recorded)")}
 
 Target fidelity: {fidelity}. Judge at that level: detail beyond it ({beyond}) is at most minor.
 {craft}
@@ -1420,7 +1436,7 @@ Tag each one:
 {see}
 Give each difference the severity it has, without praise: the task may end once the worst fixable one is
 minor. Do not suggest changing the constraints.
-{coverage}{action_attribution}{previous}{comparison}{ACCEPT_ASK}
+{devils_advocate}{coverage}{action_attribution}{previous}{comparison}{ACCEPT_ASK}
 End with exactly one line naming the worst severity among the FIXABLE differences:
 VERDICT: blocker | major | minor | none"""
     return {"prompt": prompt, "result": result["file"], "results": [e["file"] for e in results],

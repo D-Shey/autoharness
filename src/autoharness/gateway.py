@@ -18,6 +18,7 @@ from typing import Callable
 
 from autoharness import __version__, approvals, egress
 from autoharness.circuit import CircuitBreakerOpenError, CircuitBreakerRegistry, LRUTtlCache
+from autoharness.env import HarnessError
 from autoharness.mcp_client import PROTOCOL_VERSIONS, McpError, make_client, withheld_env
 
 INSTRUCTIONS = ("Servers added with `autoharness add mcp` appear here without a restart. In Code Mode, call "
@@ -215,6 +216,25 @@ META_TOOLS = [
      "description": "Synchronize pending OpenSpec tasks.md checklist items into AutoHarness followups and Swarm DAG workflow.",
      "inputSchema": {"type": "object", "properties": {
          "change": {"type": "string", "description": "Optional specific change proposal name."}}}},
+    {"name": "harness_ontology",
+     "description": "Inspect, initialize, query, add to, or validate Ontology 2.0 (.autoharness/ontology.md).",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "description": "show | init | add | query | check (default: show)"},
+         "section": {"type": "string", "description": "Section heading for add (default: Glossary)"},
+         "term": {"type": "string", "description": "Optional explicit concept term for add"},
+         "entry": {"type": "string", "description": "Entry text for add"},
+         "query": {"type": "string", "description": "Search query for query"},
+         "limit": {"type": "integer", "description": "Maximum entries to return for query"},
+         "overwrite": {"type": "boolean", "description": "Overwrite existing ontology.md on init"},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON instead of Markdown report."}}}},
+    {"name": "harness_truth_audit",
+     "description": "Run the Dormant Data Truth Engine or Delayed Assumption Postmortem across git churn, tasks, and followups.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "description": "audit | postmortem | churn | assumptions (default: audit)"},
+         "query": {"type": "string", "description": "Optional topic query for assumptions"},
+         "max_commits": {"type": "integer", "description": "Recent commits to inspect for git churn (default: 50)"},
+         "min_subsequent_tasks": {"type": "integer", "description": "Subsequent tasks before validating pending assumptions"},
+         "raw_json": {"type": "boolean", "description": "Return structured JSON instead of Markdown report."}}}},
 ]
 STARTUP_WAIT = 30.0  # seconds a call waits for a server that is still starting
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
@@ -1037,6 +1057,76 @@ class Gateway:
             proj = Project(self.project)
             res = openspec.sync_tasks_to_followups(proj, args.get("change"))
             return _text(json.dumps(res, indent=2, ensure_ascii=False))
+        if name == "harness_ontology":
+            from autoharness import ontology
+            if not self.project:
+                return _text("No project root configured for ontology.", error=True)
+            action = str(args.get("action") or "show")
+            if action not in ("show", "status", "init", "add", "query", "check"):
+                return _text(f"Unknown harness_ontology action: {action!r}", error=True)
+            raw_json = bool(args.get("raw_json", False))
+            try:
+                if action == "init":
+                    res = ontology.init_ontology(self.project, overwrite=bool(args.get("overwrite", False)))
+                elif action == "add":
+                    entry = str(args.get("entry") or "").strip()
+                    if not entry:
+                        return _text("`entry` is required for harness_ontology add.", error=True)
+                    res = ontology.add_ontology_entry(
+                        self.project,
+                        section=str(args.get("section") or "Glossary"),
+                        entry=entry,
+                        term=str(args.get("term") or ""),
+                    )
+                elif action == "query":
+                    raw_lim = args.get("limit")
+                    if isinstance(raw_lim, bool):
+                        return _text(f"Invalid limit: {raw_lim!r}", error=True)
+                    lim = 8 if raw_lim is None else int(raw_lim)
+                    res = ontology.query_ontology(
+                        self.project,
+                        query=str(args.get("query") or ""),
+                        limit=lim,
+                    )
+                elif action == "check":
+                    res = ontology.validate_ontology(self.project)
+                else:
+                    res = ontology.load_ontology(self.project)
+            except (HarnessError, TypeError, ValueError, OSError) as exc:
+                return _text(f"harness_ontology error: {exc}", error=True)
+            if raw_json or action in ("init", "add", "check"):
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            return _text(ontology.format_ontology_report(res) if action in ("show", "status") else json.dumps(res, indent=2, ensure_ascii=False))
+        if name == "harness_truth_audit":
+            from autoharness import truth
+            if not self.project:
+                return _text("No project root configured for truth audit.", error=True)
+            action = str(args.get("action") or "audit")
+            if action not in ("audit", "postmortem", "churn", "assumptions"):
+                return _text(f"Unknown harness_truth_audit action: {action!r}", error=True)
+            raw_json = bool(args.get("raw_json", False))
+            try:
+                raw_commits = args.get("max_commits")
+                raw_min = args.get("min_subsequent_tasks")
+                if isinstance(raw_commits, bool) or isinstance(raw_min, bool):
+                    return _text("Invalid boolean value for integer argument.", error=True)
+                max_commits = 50 if raw_commits is None else int(raw_commits)
+                min_sub = 1 if raw_min is None else int(raw_min)
+                if action == "postmortem":
+                    res = truth.run_postmortem(self.project, min_subsequent_tasks=min_sub)
+                elif action == "churn":
+                    res = truth.git_churn_stats(self.project, max_commits=max_commits)
+                elif action == "assumptions":
+                    q = str(args.get("query") or "").strip()
+                    items = truth.relevant_assumptions(self.project, q, limit=20) if q else truth.load_assumptions(self.project.resolve())
+                    res = {"status": "ok", "count": len(items), "items": items}
+                else:
+                    res = truth.analyze_dormant_signals(self.project, max_commits=max_commits)
+            except (HarnessError, TypeError, ValueError, OSError) as exc:
+                return _text(f"harness_truth_audit error: {exc}", error=True)
+            if raw_json or action in ("churn", "assumptions"):
+                return _text(json.dumps(res, indent=2, ensure_ascii=False))
+            return _text(truth.format_truth_report(res))
         target = self.native_map().get(name)
         if target is None:
             return _text(f"unknown tool {name!r}; call harness_tools to see what is available", True)

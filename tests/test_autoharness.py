@@ -1541,7 +1541,8 @@ def test_gateway_serve_end_to_end(project):
             "harness_simulate_action", "harness_compress_output",
             "harness_sentinel_verify", "harness_sentinel_snapshot", "harness_sentinel_rollback",
             "harness_compact_session", "harness_check_prompt_cache", "harness_session_status",
-            "harness_circuit_status", "harness_openspec_status", "harness_openspec_sync"
+            "harness_circuit_status", "harness_openspec_status", "harness_openspec_sync",
+            "harness_ontology", "harness_truth_audit",
         ]
 
         approved_servers(project, {"fake": FAKE_CFG})
@@ -1705,10 +1706,12 @@ def test_hook_never_fails_on_bad_input(project, capsys, monkeypatch):
 
 def test_install_hook_merges_and_removes_cleanly(tmp_path, capsys):
     settings = tmp_path / "settings.json"
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
     mine = {"type": "command", "command": "echo mine"}
     settings.write_text(json.dumps({"model": "opus", "hooks": {"UserPromptSubmit": [{"hooks": [mine]}]}}), "utf-8")
     for _ in range(2):  # idempotent
-        code, res = cli_json(capsys, "install-hook", "--settings", str(settings))
+        code, res = cli_json(capsys, "--project", str(proj_dir), "install-hook", "--settings", str(settings))
         assert code == 0
     data = json.loads(settings.read_text("utf-8"))
     assert data["model"] == "opus"
@@ -1716,7 +1719,7 @@ def test_install_hook_merges_and_removes_cleanly(tmp_path, capsys):
     assert cmds.count("autoharness hook") == 1 and "echo mine" in cmds
     pre = data["hooks"]["PreToolUse"]
     assert len(pre) == 1 and pre[0]["matcher"] == cli.PRE_TOOL_MATCHER and pre[0]["hooks"][0]["command"] == "autoharness hook"
-    code, res = cli_json(capsys, "install-hook", "--settings", str(settings), "--remove")
+    code, res = cli_json(capsys, "--project", str(proj_dir), "install-hook", "--settings", str(settings), "--remove")
     data = json.loads(settings.read_text("utf-8"))
     assert [h["command"] for e in data["hooks"]["UserPromptSubmit"] for h in e["hooks"]] == ["echo mine"]
     assert "PreToolUse" not in data["hooks"] and res["status"] == "removed"
@@ -3227,16 +3230,33 @@ def test_gateway_server_does_not_see_the_agents_secrets(project, monkeypatch):
 
 # --- evidence diff: the whole change, new files included -------------------------
 
+_GIT_TEMPLATE_DIR: Path | None = None
+
+
+def _get_git_template() -> Path:
+    global _GIT_TEMPLATE_DIR
+    if _GIT_TEMPLATE_DIR is None or not (_GIT_TEMPLATE_DIR / ".git").exists():
+        import atexit
+        import subprocess
+        import tempfile
+
+        tpl = Path(tempfile.mkdtemp(prefix="ah-git-tpl-"))
+        atexit.register(lambda d=tpl: shutil.rmtree(d, ignore_errors=True))
+        run = lambda *a: subprocess.run(["git", *a], cwd=tpl, check=True, capture_output=True)  # noqa: E731
+        run("init", "-q")
+        run("config", "user.email", "t@example.com")
+        run("config", "user.name", "t")
+        (tpl / "a.py").write_text("x = 1\n", "utf-8")
+        run("add", "a.py")
+        run("commit", "-qm", "init")
+        _GIT_TEMPLATE_DIR = tpl
+    return _GIT_TEMPLATE_DIR
+
+
 def git_repo(root):
     import subprocess
-    run = lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)  # noqa: E731
-    run("init", "-q")
-    run("config", "user.email", "t@example.com")
-    run("config", "user.name", "t")
-    (root / "a.py").write_text("x = 1\n", "utf-8")
-    run("add", "a.py")
-    run("commit", "-qm", "init")
-    return run
+    shutil.copytree(_get_git_template(), root, dirs_exist_ok=True)
+    return lambda *a: subprocess.run(["git", *a], cwd=root, check=True, capture_output=True)  # noqa: E731
 
 
 def test_evidence_diff_includes_untracked_files(project, capsys):

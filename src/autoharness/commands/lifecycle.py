@@ -177,6 +177,17 @@ def cmd_init(args, project, catalog):
         result["next"] = (f"`followups` lists {len(pending)} open item(s) earlier tasks found outside their scope: "
                           "if one bears on this task, say so and take it in; close what this task settles with "
                           "`autoharness followup done <id> --note \"...\"`. " + result["next"])
+    from autoharness import ontology as _ontology, truth as _truth
+    if prior_assumptions := _truth.relevant_assumptions(project.root, args.task, limit=5):
+        result["relevant_assumptions"] = prior_assumptions
+        flagged = [a for a in prior_assumptions if a.get("status") in ("falsified", "challenged")]
+        if flagged:
+            result["next"] = (
+                f"`relevant_assumptions` flags {len(flagged)} challenged/falsified prior assumption(s): "
+                "review them before repeating fragile patterns. " + result["next"]
+            )
+    if (onto_doc := _ontology.load_ontology(project.root)).get("exists"):
+        result["ontology"] = {"path": onto_doc["path"], "entries": onto_doc.get("entry_count", 0), "sections": len(onto_doc["sections"])}
     warnings = stale_skills(project) + unapproved_warning(project)
     if warnings:
         result["warnings"] = warnings
@@ -303,6 +314,10 @@ def cmd_teardown(args, project, catalog):
     warnings += [f"run #{r['n']}: {runs.NOT_A_CHECK.format(command=r['command'])}"
                  for r in checked["ran"] if r.get("not_a_check")]
     policy, source = config.teardown_policy(project.root, args.policy)
+    from autoharness import truth as _truth
+    has_assumptions = _truth.assumptions_path(project.root).is_file()
+    if has_assumptions:
+        _truth.load_assumptions(project.root)
     result = task.teardown(policy)
     lessons.settle(task, result["kept"]["skills"], learned)
     kept = result["kept"]["mcp"] + result["kept"]["skills"]
@@ -316,6 +331,12 @@ def cmd_teardown(args, project, catalog):
     harvested = followups.harvest(project, task.id)
     if harvested["added"] > 0:
         task.log(f"teardown auto-harvested {harvested['added']} shortcut(s) into followups")
+    pm_report = None
+    if has_assumptions:
+        pm_all = _truth.run_postmortem(project.root, min_subsequent_tasks=1)
+        pm_report = {k: pm_all[k] for k in ("total", "pending", "validated", "challenged", "falsified") if k in pm_all}
+        if pm_all.get("falsified", 0) > 0:
+            nxt += f" Postmortem flagged {pm_all['falsified']} falsified assumption(s); run `autoharness truth postmortem`."
     found = followups.from_task(project, task.id)
     if found:
         nxt += (" Tell the user the follow-ups this task left for later: "
@@ -337,6 +358,7 @@ def cmd_teardown(args, project, catalog):
                if checked["unchecked_items"] else "") + ".")
     out({"status": "ok", "policy": policy, "policy_source": source} | result | {"checked": checked}
         | ({"lessons": learned} if learned else {})
+        | ({"postmortem": pm_report} if pm_report else {})
         | {"recipe_saved": saved} | ({"followups": found} if found else {}) | {"next": nxt}
         | ({"warnings": warnings} if warnings else {}))
     return 0

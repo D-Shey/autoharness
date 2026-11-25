@@ -176,7 +176,7 @@ def compare(project: Project) -> dict:
         details.append(detail)
     if not details:
         return {"status": "ok", "paired_cases": 0, "unpaired_cases": unpaired,
-                "baseline": None, "harness": None, "delta": None, "cases": []}
+                "baseline": None, "harness": None, "delta": None, "compute_roi": None, "cases": []}
     totals = {}
     for variant in ("baseline", "harness"):
         totals[variant] = {key: _average([d[variant] for d in details], key)
@@ -184,5 +184,29 @@ def compare(project: Project) -> dict:
         totals[variant]["runs"] = sum(d[variant]["runs"] for d in details)
     delta = {key: _difference(totals["harness"][key], totals["baseline"][key])
              for key in ("pass_rate", "seconds", "tokens", "cost", "tool_calls")}
+    compute_roi = _compute_roi_summary(totals, delta)
     return {"status": "ok", "paired_cases": len(details), "unpaired_cases": unpaired,
-            "baseline": totals["baseline"], "harness": totals["harness"], "delta": delta, "cases": details}
+            "baseline": totals["baseline"], "harness": totals["harness"], "delta": delta,
+            "compute_roi": compute_roi, "cases": details}
+
+
+def _compute_roi_summary(totals: dict, delta: dict) -> dict:
+    """Compute additive Compute ROI & workslop efficiency signals across harness vs baseline."""
+    h, b = totals.get("harness") or {}, totals.get("baseline") or {}
+    h_tok, b_tok = h.get("tokens"), b.get("tokens")
+    h_cost, b_cost = h.get("cost"), b.get("cost")
+    h_pass = h.get("pass_rate")
+    pass_per_1k_tok = round((h_pass / (h_tok / 1000.0)), 6) if h_pass is not None and h_tok and h_tok > 0 else None
+    pass_per_dollar = round((h_pass / h_cost), 6) if h_pass is not None and h_cost and h_cost > 0 else None
+    pass_delta = delta.get("pass_rate") or 0.0
+    tok_ratio = round(h_tok / b_tok, 4) if h_tok is not None and b_tok and b_tok > 0 else None
+    workslop_risk = bool(
+        (pass_delta <= 0 and h_tok is not None and b_tok is not None and h_tok > b_tok * 1.5)
+        or (pass_delta < 0 and (delta.get("tool_calls") or 0) > 0)
+    )
+    return {
+        "harness_pass_per_1k_tokens": pass_per_1k_tok,
+        "harness_pass_per_dollar": pass_per_dollar,
+        "token_ratio_vs_baseline": tok_ratio,
+        "workslop_risk": workslop_risk,
+    }

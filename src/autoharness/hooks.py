@@ -164,13 +164,17 @@ SHELL_SPECIAL = set(";|&<>#(){}`\r\n")
 # stderr into the output the agent reads, and read-only filters of that output: harmless in both shells
 # an argument of such a filter: single-quoted, double-quoted with nothing either shell expands, or plain
 # spaces and tabs only between the parts: a newline is a new command, never an argument
-FILTER_ARG = r"""(?:'[^'\n]*'|"[^"\n$`\\]*"|[\w./\[\]-]+)"""
+FILTER_ARG = r"""(?:'[^'\n]*'|"[^"\n$`\\]*"|[\w.,/\[\]-]+)"""
 FILTER_OPTION = r"(?:-[a-zA-Z]+|--[a-z][a-z-]*(?:=" + FILTER_ARG + r")?)"
 READ_ONLY_FILTER = (r"(?:(?:head|tail)(?:[ \t]+-[nc][ \t]*\+?\d+|[ \t]+-\d+)?"
                     r"|wc(?:[ \t]+-[lwcm]+)?"
-                    r"|Select-Object[ \t]+-(?:First|Last)[ \t]+\d+"
-                    r"|Select-Object[ \t]+-ExpandProperty[ \t]+" + FILTER_ARG +
+                    r"|Select-Object(?:[ \t]+(?:-(?:First|Last|Skip)[ \t]+\d+|-(?:ExpandProperty|Property)[ \t]+" + FILTER_ARG + r"|-Unique|" + FILTER_ARG + r"))*"
                     r"|Select-String(?:[ \t]+-[a-zA-Z]+)*[ \t]+" + FILTER_ARG +
+                    r"|Sort-Object(?:[ \t]+(?:-(?:Descending|Unique|CaseSensitive)|-Property[ \t]+" + FILTER_ARG + r"|" + FILTER_ARG + r"))*"
+                    r"|sort(?:[ \t]+(?:-[ruMnRhbfVz]+|--(?:reverse|unique|numeric-sort|ignore-case)))*"
+                    r"|(?:Format-Table|ft|Format-List|fl)(?:[ \t]+(?:-(?:AutoSize|Wrap|HideTableHeaders)|-Property[ \t]+" + FILTER_ARG + r"|" + FILTER_ARG + r"))*"
+                    r"|Measure-Object(?:[ \t]+(?:-(?:Average|Sum|Maximum|Minimum)|-Property[ \t]+" + FILTER_ARG + r"|" + FILTER_ARG + r"))*"
+                    r"|findstr(?:[ \t]+/[a-zA-Z]+|[ \t]+-[a-zA-Z]+)*(?:[ \t]+" + FILTER_ARG + r")+"
                     r"|jq(?:[ \t]+" + FILTER_OPTION + r")*(?:[ \t]+" + FILTER_ARG + r")*"
                     r"|grep(?:[ \t]+" + FILTER_OPTION + r")*(?:[ \t]+" + FILTER_ARG + r")+"
                     r"|Out-String|ConvertFrom-Json)")
@@ -314,17 +318,49 @@ def _is_autoharness_call(tool: str, tool_input: dict) -> bool:
 
 
 READERS = {"ls", "dir", "pwd", "tree", "cat", "head", "tail", "type", "get-childitem", "gci", "get-location",
-           "get-content", "gc", "get-item", "test-path", "resolve-path"}
-GIT_READERS = {"status", "log", "diff", "show", "ls-files", "branch", "remote", "rev-parse"}
+           "get-content", "gc", "get-item", "test-path", "resolve-path",
+           "get-process", "gps", "ps", "tasklist", "get-ciminstance", "gcim", "get-wmiobject", "gwmi",
+           "pgrep", "uptime", "free", "df"}
+GIT_READERS = {"status", "log", "diff", "show", "ls-files", "branch", "remote", "rev-parse", "reflog"}
+CLEANUP_COMMANDS = {"taskkill", "taskkill.exe", "stop-process", "spps", "kill", "pkill"}
 
 
 def _reads_only(words: list[str]) -> bool:
-    """A listing or reading of files (`ls`, `Get-ChildItem`, `cat`, `git status`): reading stays open before the
-    brief, and these only read. Redirection and chaining never reach here (`_plain_commands` refuses them)."""
+    """A listing or reading of files/processes (`ls`, `Get-ChildItem`, `Get-Process`, `Get-CimInstance`, `cat`,
+    `git status`): inspection stays open before the brief, and these only read. Redirection and chaining never
+    reach here (`_plain_commands` refuses them)."""
     if not words:
         return False
     head = words[0].lower()
     return head in READERS or (head == "git" and len(words) > 1 and words[1].lower() in GIT_READERS)
+
+
+def _is_recovery_call(tool: str, tool_input: dict) -> bool:
+    """Plain process-cleanup or git-rollback command (`Stop-Process`, `taskkill`, `kill`, `pkill`, `git restore`,
+    `git checkout -- ...`) so an agent can always kill runaway test trees or roll back changes even when gated."""
+    if tool not in ("Bash", "PowerShell"):
+        return False
+    command = TRAILING_OUTPUT.sub("", _without_stdin(tool, str(tool_input.get("command", "")).strip()))
+    commands = _plain_commands(command, bash=tool == "Bash")
+    if not commands:
+        return False
+    *prefix, last = commands
+    while tool == "Bash" and last and ENV_PREFIX.match(last[0]):
+        last = last[1:]
+    if not all(len(c) == 2 and c[0] == "cd" for c in prefix) or not last:
+        return False
+    head = last[0].lower()
+    if RECORDS.search(command) or KEY_FILE.search(command):
+        return False
+    if head in CLEANUP_COMMANDS and len(last) > 1:
+        return True
+    if head == "git" and len(last) >= 3:
+        sub = last[1].lower()
+        if sub == "restore":
+            return True
+        if sub == "checkout" and "--" in last[2:]:
+            return True
+    return False
 
 
 def _looks_up_autoharness(words: list[str]) -> bool:
@@ -347,6 +383,7 @@ SHELL_WRITES = [
     re.compile(_AT_COMMAND + r"sed\b[^|;&\n]*\s-i[^|;&\n]*\.autoharness(?![\w.-])"),
     re.compile(_AT_COMMAND + r"(cp|mv|rm|rmdir|ln|touch|truncate|install|rsync|dd|del|erase|copy|move|ren|rename)\b"
                r"[^|;&\n]*\.autoharness(?![\w.-])", re.I),
+    re.compile(_AT_COMMAND + r"git[ \t]+(?:restore|checkout)\b[^|;&\n]*\.autoharness(?![\w.-])", re.I),
     re.compile(_AT_COMMAND + r"(Set-Content|Add-Content|Clear-Content|Out-File|New-Item|Remove-Item|Copy-Item|"
                r"Move-Item|Rename-Item|sc|ac|ni|ri|cpi|mi|rni)\b[^|;\n]*\.autoharness(?![\w.-])", re.I),
     re.compile(r"\|\s*(Set-Content|Add-Content|Out-File)\b[^|;\n]*\.autoharness(?![\w.-])", re.I),
@@ -606,7 +643,11 @@ def _agy_event(data: dict) -> dict | None:
     """An Antigravity CLI hook payload in the shape Claude Code sends, or None when there is nothing to do.
     agy has no prompt event: the first model call of a turn (PreInvocation, invocationNum 0) stands for it,
     with the prompt read from the transcript. Its shell runs PowerShell on Windows."""
-    common = {"session_id": data.get("conversationId", ""), "cwd": (data.get("workspacePaths") or [""])[0]}
+    common = {
+        "session_id": data.get("conversationId", ""),
+        "cwd": (data.get("workspacePaths") or [""])[0],
+        "transcriptPath": data.get("transcriptPath", ""),
+    }
     if "toolCall" in data:
         call = data.get("toolCall") or {}
         name = call.get("name", "")
@@ -641,7 +682,216 @@ def _agy_event(data: dict) -> dict | None:
     return {**common, "hook_event_name": "UserPromptSubmit", "prompt": prompt_text}
 
 
-def cmd_hook(args, project, catalog):
+_CONTENT_WRITER_CMDS = {"set-content", "sc", "add-content", "ac", "out-file"}
+_PATH_MUTATION_CMDS = {
+    "rm", "mv", "cp", "touch", "truncate", "install", "tee", "del", "erase", "copy", "move", "ren", "rename",
+    "clear-content", "new-item", "remove-item", "copy-item", "move-item", "rename-item", "ni", "ri", "cpi", "mi", "rni",
+    "mkdir",
+}
+_SHELL_VALUE_FLAGS = {"-value", "-encoding", "-filter", "-include", "-exclude", "-itemtype", "-name", "-delimiter"}
+_SHELL_PATH_FLAGS = {"-path", "-literalpath", "-filepath", "-destination"}
+_INTERPRETER_CMDS = {"python", "python3", "py", "node", "powershell", "pwsh"}
+_INLINE_WRITE_RE = re.compile(
+    r"(?:open|Path|writeFile|writeFileSync|WriteAllText|WriteAllBytes)\(\s*['\"]([^'\"\n]+)['\"]"
+)
+
+
+def _split_shell_segments(command: str) -> list[str]:
+    """Split a shell command on unquoted separators (`&&`, `||`, `;`, `|`, newline)."""
+    segs: list[str] = []
+    cur: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                cur.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            cur.append(ch)
+            i += 1
+        elif command.startswith(("&&", "||"), i):
+            segs.append("".join(cur))
+            cur = []
+            i += 2
+        elif ch in (";", "|", "\n"):
+            segs.append("".join(cur))
+            cur = []
+            i += 1
+        else:
+            cur.append(ch)
+            i += 1
+    if cur:
+        segs.append("".join(cur))
+    return [s.strip() for s in segs if s.strip()]
+
+
+def _tokenize_segment(seg: str) -> list[tuple[str, bool]]:
+    """Split a single command segment into `(token_text, was_quoted)` outside quotes."""
+    tokens: list[tuple[str, bool]] = []
+    buf: list[str] = []
+    quote: str | None = None
+    quoted = False
+    i, n = 0, len(seg)
+    while i < n:
+        ch = seg[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(seg[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            else:
+                buf.append(ch)
+            i += 1
+        elif ch in ("'", '"'):
+            quote = ch
+            quoted = True
+            i += 1
+        elif ch in (" ", "\t", "\r"):
+            if buf or quoted:
+                tokens.append(("".join(buf), quoted))
+                buf, quoted = [], False
+            i += 1
+        else:
+            buf.append(ch)
+            i += 1
+    if buf or quoted:
+        tokens.append(("".join(buf), quoted))
+    return tokens
+
+
+def _join_cd(base_dir: Path, target: str) -> str:
+    if not base_dir.parts or Path(target).is_absolute():
+        return target
+    return (base_dir / target).as_posix()
+
+
+def _extract_shell_write_targets(command: str, bash: bool) -> list[str]:
+    """Extract target file paths from shell file-mutation commands, git restores, or inline script writes."""
+    targets: list[str] = []
+    base_dir = Path("")
+    for seg in _split_shell_segments(command):
+        for m in re.finditer(r"(?:^|[ \t])(?:1)?>>?[ \t]*['\"]?([^\s'\";|&]+)", seg):
+            tok = m.group(1).strip()
+            if tok and tok not in ("&1", "/dev/null", "$null"):
+                targets.append(_join_cd(base_dir, tok))
+        raw_toks = _tokenize_segment(seg)
+        if not raw_toks:
+            continue
+        cmd = Path(raw_toks[0][0]).name.lower()
+        if cmd == "cd" and len(raw_toks) >= 2:
+            nxt = raw_toks[1][0]
+            if not nxt.startswith("-"):
+                p = Path(nxt)
+                base_dir = p if p.is_absolute() else (base_dir / p)
+            continue
+        if cmd in _CONTENT_WRITER_CMDS:
+            pos_path: str | None = None
+            i = 1
+            while i < len(raw_toks):
+                w, q = raw_toks[i]
+                lw = w.lower()
+                if lw in _SHELL_PATH_FLAGS and i + 1 < len(raw_toks):
+                    targets.append(_join_cd(base_dir, raw_toks[i + 1][0]))
+                    i += 2
+                elif lw in _SHELL_VALUE_FLAGS and i + 1 < len(raw_toks):
+                    i += 2
+                elif lw.startswith("-"):
+                    i += 1
+                elif pos_path is None:
+                    pos_path = w
+                    i += 1
+                else:
+                    i += 1   # trailing positional values (e.g. Set-Content path "content") are content, not paths
+            if pos_path:
+                targets.append(_join_cd(base_dir, pos_path))
+        elif cmd in _PATH_MUTATION_CMDS:
+            i = 1
+            while i < len(raw_toks):
+                w, _q = raw_toks[i]
+                lw = w.lower()
+                if lw in _SHELL_PATH_FLAGS and i + 1 < len(raw_toks):
+                    targets.append(_join_cd(base_dir, raw_toks[i + 1][0]))
+                    i += 2
+                elif lw in _SHELL_VALUE_FLAGS and i + 1 < len(raw_toks):
+                    i += 2
+                elif lw.startswith("-"):
+                    i += 1
+                else:
+                    targets.append(_join_cd(base_dir, w))
+                    i += 1
+        elif cmd == "git" and len(raw_toks) >= 3:
+            sub = raw_toks[1][0].lower()
+            rest = [w for w, _ in raw_toks[2:]]
+            if sub == "restore":
+                for w in rest:
+                    if w != "--" and not w.startswith("-"):
+                        targets.append(_join_cd(base_dir, w))
+            elif sub == "checkout" and "--" in rest:
+                idx = rest.index("--")
+                for w in rest[idx + 1:]:
+                    if w and not w.startswith("-"):
+                        targets.append(_join_cd(base_dir, w))
+        elif cmd in _INTERPRETER_CMDS and any(k in seg for k in ("open(", "write_text", "write_bytes", "WriteAll", "writeFile")):
+            for pm in _INLINE_WRITE_RE.finditer(seg):
+                targets.append(_join_cd(base_dir, pm.group(1)))
+    return targets
+
+
+def _track_hook_tokens(
+    data: dict,
+    sid: str,
+    active: str | None,
+    saved_state: dict,
+    task_info: dict,
+    tool_input: dict | None = None,
+) -> int | None:
+    """Track cumulative token usage for active bounded tasks in session state without modifying task.sig."""
+    candidates: list[int] = []
+    raw_task = task_info.get("tokens_used")
+    if isinstance(raw_task, int) and not isinstance(raw_task, bool) and raw_task >= 0:
+        candidates.append(raw_task)
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    for raw in (usage.get("total_tokens"), data.get("tokens_used")):
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+            candidates.append(raw)
+    tpath = data.get("transcriptPath") or data.get("transcript_path")
+    if isinstance(tpath, str) and tpath.strip():
+        tp = Path(tpath)
+        if tp.is_file():
+            try:
+                candidates.append(max(1, min(tp.stat().st_size, 5_000_000) // 4))
+            except OSError:
+                pass
+    prev = 0
+    if sid and saved_state.get("task_id") == active and isinstance(saved_state.get("tokens_used"), int):
+        prev = saved_state["tokens_used"]
+    delta = 0
+    if tool_input:
+        delta = max(1, len(json.dumps(tool_input, ensure_ascii=False)) // 4)
+    elif data.get("prompt"):
+        delta = max(1, len(str(data.get("prompt", ""))) // 4)
+    total = max([prev + delta, *candidates]) if (prev or delta or candidates) else None
+    if total is not None and sid:
+        updated = dict(saved_state)
+        if active:
+            updated["task_id"] = active
+        updated["tokens_used"] = total
+        set_session_state(sid, **updated)
+    return total
+
+
+def cmd_hook(args, project, catalog=None):
     """Claude Code hook for UserPromptSubmit, PreToolUse and Stop: make every real task go through autoharness.
     Antigravity CLI calls it for PreInvocation, PreToolUse and Stop, translated by `_agy_event`.
 
@@ -708,8 +958,13 @@ def cmd_hook(args, project, catalog):
                    "light" if task_info.get("mode") == "light" else
                    "brief" if ready else "waiting")
             if state != wanted or saved_state.get("task_id") != active or saved_state.get("via", via) != via:
-                set_session_state(sid, state=wanted, task_id=active, via=via, told=saved_state.get("told"),
-                                  stop_seen=saved_state.get("stop_seen"), prompt=saved_state.get("prompt"))
+                prev_tok = saved_state.get("tokens_used") if saved_state.get("task_id") == active else None
+                next_state = {"state": wanted, "task_id": active, "via": via, "told": saved_state.get("told"),
+                              "stop_seen": saved_state.get("stop_seen"), "prompt": saved_state.get("prompt")}
+                if isinstance(prev_tok, int):
+                    next_state["tokens_used"] = prev_tok
+                set_session_state(sid, **next_state)
+                saved_state = next_state
                 state = wanted
         if event == "Stop":
             return _stop_gate(data, sid, state, active, task_info, project=project, agy=agy, kimi=kimi)
@@ -737,6 +992,8 @@ def cmd_hook(args, project, catalog):
                 set_session_state(sid, **(saved_state | {"prompt": data.get("prompt", "")[:PROMPT_KEPT]}))
             if state in ("done", "waived"):
                 return 0
+            if catalog is None:
+                catalog = Catalog.load()
             ctx = hook_context(catalog, data.get("prompt", ""), sid)
             if not ctx:
                 return 0
@@ -788,6 +1045,43 @@ def cmd_hook(args, project, catalog):
                 return 0  # the skill and its CLI always pass; only a recorded brief opens the gate
             if reason := _writes_records(tool, tool_input, project.root):
                 return _deny(reason)
+            if (state == "done" and active and not foreign and GATED_TOOLS.match(tool)
+                    and (brief_bounds := (task_info.get("brief") or {}).get("bounds"))):
+                from autoharness import consequence
+                if EDIT_TOOLS.match(tool):
+                    bound_targets = _path_values(tool_input)
+                elif tool in ("Bash", "PowerShell"):
+                    bound_targets = _extract_shell_write_targets(str(tool_input.get("command", "")), bash=tool == "Bash")
+                else:
+                    bound_targets = []
+                action_desc = (
+                    f"{tool} {tool_input.get('command', '')}".strip()
+                    if tool in ("Bash", "PowerShell")
+                    else tool
+                )
+                tokens_used = _track_hook_tokens(data, sid, active, saved_state, task_info, tool_input=tool_input)
+                checks = bound_targets or [None]
+                for b_target in checks:
+                    bres = consequence.check_autonomy_bounds(
+                        project.root,
+                        target=b_target,
+                        bounds=brief_bounds,
+                        tokens_used=tokens_used,
+                        action_type=action_desc,
+                    )
+                    if not bres.get("within_bounds", True):
+                        return _deny("Bounded autonomy limit: " + "; ".join(bres.get("violations", [])))
+            if _is_recovery_call(tool, tool_input):
+                if (active and not foreign and (brief_bounds := (task_info.get("brief") or {}).get("bounds"))
+                        and tool in ("Bash", "PowerShell")):
+                    rec_targets = _extract_shell_write_targets(str(tool_input.get("command", "")), bash=tool == "Bash")
+                    if rec_targets:
+                        from autoharness import consequence
+                        for b_target in rec_targets:
+                            bres = consequence.check_autonomy_bounds(project.root, target=b_target, bounds=brief_bounds)
+                            if not bres.get("within_bounds", True):
+                                return _deny("Bounded autonomy limit: " + "; ".join(bres.get("violations", [])))
+                return 0
             server_name = None
             if (server := MCP_TOOL.match(tool)) and server[1] != GATEWAY_NAME:
                 server_name = server[1]
@@ -800,13 +1094,13 @@ def cmd_hook(args, project, catalog):
             if active and not foreign and server_name and server_name != GATEWAY_NAME:
                 from autoharness.gateway import note_call
                 note_call(project.root, server_name)   # the gateway counts its own servers' calls
-            from autoharness.cli import _skills_not_installed
             if (state == "done" and active and not foreign and task_info.get("mode", "full") != "light"
-                    and task_info.get("brief") and GATED_TOOLS.match(tool) and not MCP_TOOL.match(tool)
-                    and (missing := _skills_not_installed(project, Task(project, active), templates=False))):
-                reason = ("Install what the brief covers its areas with before doing the work, so the work is done "
-                          "with it, not around it: " + "; ".join(missing) + ". Reading files stays open.")
-                return _deny(reason)
+                    and task_info.get("brief") and GATED_TOOLS.match(tool) and not MCP_TOOL.match(tool)):
+                from autoharness.cli import _skills_not_installed
+                if (missing := _skills_not_installed(project, Task(project, active), templates=False)):
+                    reason = ("Install what the brief covers its areas with before doing the work, so the work is done "
+                              "with it, not around it: " + "; ".join(missing) + ". Reading files stays open.")
+                    return _deny(reason)
             if (state == "done" and active and not foreign and EDIT_TOOLS.match(tool)
                     and (reason := _unchecked_edits(sid, active, task_info))):
                 return _deny(reason)

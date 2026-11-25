@@ -14,9 +14,22 @@ def out(data) -> None:
 
 
 def need_approval(what: str, report: dict) -> int:
-    """Print an approval-required response and return `EXIT_APPROVAL`."""
-    out({"status": "approval_required", "what": what, "trust": report,
-         "next": "Show this to the user. Re-run the same command with --approve only if they agree."})
+    """Print an approval-required response with anti-cognitive-surrender framing and return `EXIT_APPROVAL`."""
+    risk = report.get("risk_score")
+    tier = report.get("reversibility_tier")
+    reasons = [str(r) for r in (report.get("reasons") or [])[:3]]
+    summary_parts = [f"Action `{what}` requires explicit human judgment."]
+    if tier or risk is not None:
+        summary_parts.append(f"Profile: tier={tier or 'unknown'}, risk={risk if risk is not None else 'n/a'}.")
+    if reasons:
+        summary_parts.append("Key signals: " + "; ".join(reasons))
+    judgment_focus = {
+        "why_not_routine": " ".join(summary_parts),
+        "counter_question": "What worst-case side effect or irreversible state change could happen if our assumptions about this target are wrong?",
+        "required_check": "Confirm the rollback path and blast radius directly before approving.",
+    }
+    out({"status": "approval_required", "what": what, "trust": report, "judgment_focus": judgment_focus,
+         "next": "Show this to the user with `judgment_focus`. Re-run the same command with --approve only if they explicitly agree."})
     return EXIT_APPROVAL
 
 

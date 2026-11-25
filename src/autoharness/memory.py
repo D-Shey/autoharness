@@ -215,7 +215,7 @@ def search_memory(
 def index_project_memory(project_root: Path) -> dict[str, int]:
     """Scan and index all task artifacts and knowledge into .autoharness/memory.db."""
     con = get_memory_db(project_root)
-    counts = {"rulings": 0, "followups": 0, "reviews": 0, "decisions": 0}
+    counts = {"rulings": 0, "followups": 0, "reviews": 0, "decisions": 0, "ontology": 0}
     state_dir = project_root / ".autoharness"
 
     # 1. Index rulings.json
@@ -288,6 +288,35 @@ def index_project_memory(project_root: Path) -> dict[str, int]:
                     except (OSError, sqlite3.Error, ValueError):
                         counts.setdefault("errors", 0)
                         counts["errors"] += 1
+
+    # 4. Index .autoharness/ontology.md (Ontology 2.0)
+    try:
+        from autoharness import ontology as _ontology
+        onto = _ontology.load_ontology(project_root)
+        with con:
+            try:
+                con.execute("DELETE FROM vector_embeddings WHERE doc_id IN (SELECT id FROM memory_docs WHERE kind = 'ontology')")
+            except sqlite3.OperationalError:
+                pass
+            con.execute("DELETE FROM memory_docs WHERE kind = 'ontology'")
+        if onto.get("exists"):
+            idx = 0
+            for sec_name, entries in onto.get("sections", {}).items():
+                for item in entries:
+                    idx += 1
+                    reconcile_and_store(
+                        con,
+                        kind="ontology",
+                        source=".autoharness/ontology.md",
+                        content=f"[{sec_name}] {item.get('raw', '')}",
+                        title=f"Ontology: {item.get('term') or sec_name}",
+                        metadata={"section": sec_name, "term": item.get("term", ""), "line": item.get("line", 0)},
+                        doc_id=f"ontology_{idx}",
+                    )
+                    counts["ontology"] += 1
+    except (OSError, sqlite3.Error, ValueError, ImportError):
+        counts.setdefault("errors", 0)
+        counts["errors"] += 1
 
     con.close()
 
@@ -619,7 +648,15 @@ def reconcile_memory_drift(
         orphaned_count = len(orphaned_ids)
         drift_rate = round((drifted_count + orphaned_count) / max(1, total_scanned), 4)
 
-        return {
+        onto_check = None
+        try:
+            from autoharness import ontology as _ontology
+            if _ontology.ontology_path(project_root).is_file():
+                onto_check = _ontology.validate_ontology(project_root)
+        except (OSError, ValueError, ImportError):
+            onto_check = None
+
+        res = {
             "status": "ok",
             "scanned_docs": total_scanned,
             "valid_count": valid_count,
@@ -629,6 +666,15 @@ def reconcile_memory_drift(
             "drift_rate": drift_rate,
             "drifted_items": drifted_items,
         }
+        if onto_check is not None:
+            res["ontology"] = {
+                "status": onto_check["status"],
+                "valid": onto_check["status"] == "healthy",
+                "broken_paths": len(onto_check["broken_paths"]),
+                "missing_symbols": len(onto_check["missing_symbols"]),
+                "conflicts": len(onto_check["conflicts"]),
+            }
+        return res
     finally:
         con.close()
 

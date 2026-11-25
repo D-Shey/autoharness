@@ -103,10 +103,12 @@ def _hash_dir(root: Path) -> str:
     return h.hexdigest()
 
 
-STATE_GITIGNORE = "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n!rulings.json\n"
+STATE_GITIGNORE = "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n!rulings.json\n!ontology.md\n!assumptions.json\n"
 _OLD_GITIGNORES = {"*\n", "*\n!.gitignore\n!config.json\n!kept.json\n",   # written by older versions
                    "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n",
-                   "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n"}
+                   "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n",
+                   "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n!rulings.json\n",
+                   "*\n!.gitignore\n!config.json\n!kept.json\n!gateway.json\n!followups.json\n!rulings.json"}
 GATEWAY_NAME = "autoharness"
 
 

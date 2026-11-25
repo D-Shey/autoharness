@@ -104,8 +104,8 @@ def test_lru_ttl_cache():
     assert cache.get("b") == 2
     assert cache.get("c") is None
 
-    # Test TTL expiration
-    time.sleep(0.06)
+    # Test TTL expiration (margin > Windows 15.6ms timer tick)
+    time.sleep(0.12)
     assert cache.get("a") is None
 
     # Test LRU eviction

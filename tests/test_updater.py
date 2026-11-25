@@ -166,7 +166,7 @@ def test_perform_update_dry_run_runner():
     assert executed_commands[0] == ["uv", "tool", "install", "--force", "git+https://github.com/D-Shey/autoharness.git"]
 
 
-def test_cli_update_command(monkeypatch, capsys):
+def test_cli_update_command(tmp_path: Path, monkeypatch, capsys):
     fake_release = {
         "tag_name": f"v{__version__}",
         "html_url": "https://github.com/D-Shey/autoharness",
@@ -183,7 +183,8 @@ def test_cli_update_command(monkeypatch, capsys):
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=6.0: FakeResponse(json.dumps(fake_release).encode("utf-8")))
 
     # 1. autoharness update --check
-    code = cli.main(["update", "--check"])
+    proj_args = ["--project", str(tmp_path)]
+    code = cli.main([*proj_args, "update", "--check"])
     assert code == 0
     out_check = json.loads(capsys.readouterr().out)
     assert out_check["status"] == "ok"
@@ -191,7 +192,7 @@ def test_cli_update_command(monkeypatch, capsys):
     assert out_check["update_available"] is False
 
     # 2. autoharness update (already up to date)
-    code = cli.main(["update"])
+    code = cli.main([*proj_args, "update"])
     assert code == 0
     out_update = json.loads(capsys.readouterr().out)
     assert out_update["status"] == "ok"
@@ -206,13 +207,13 @@ def test_cli_update_command(monkeypatch, capsys):
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=6.0: FakeResponse(json.dumps(fake_newer).encode("utf-8")))
     monkeypatch.setattr(updater, "perform_update", lambda **kwargs: {"status": "ok", "mocked": True})
 
-    code_need_approval = cli.main(["update"])
+    code_need_approval = cli.main([*proj_args, "update"])
     assert code_need_approval == cli.EXIT_APPROVAL
     out_approval = json.loads(capsys.readouterr().out)
     assert out_approval["status"] == "approval_required"
 
     # 4. autoharness update with --yes bypasses approval prompt
-    code_yes = cli.main(["update", "--yes"])
+    code_yes = cli.main([*proj_args, "update", "--yes"])
     assert code_yes == 0
     out_yes = json.loads(capsys.readouterr().out)
     assert out_yes["status"] == "ok"

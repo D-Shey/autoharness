@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from autoharness import agents, cli
@@ -5,6 +7,14 @@ from autoharness import agents, cli
 # the areas and method a test brief names: real ones need searches run against the network
 TEST_DOMAINS = "layout: create test-layout (searched: test); checks: create test-checks (searched: test)"
 TEST_METHOD = "build, then compare: https://example.com/guide/how; searched: how it is done"
+
+
+@pytest.fixture(autouse=True)
+def isolate_test_home(monkeypatch, tmp_path_factory):
+    """Keep all tests isolated from the user's real ~/.autoharness and home directory."""
+    home = tmp_path_factory.mktemp("test-home")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("AUTOHARNESS_HOME", str(home / ".autoharness"))
 
 
 @pytest.fixture(autouse=True)
